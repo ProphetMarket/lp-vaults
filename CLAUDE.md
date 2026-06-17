@@ -105,4 +105,19 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 - `../ctf-exchange/lib/ctf-exchange/src/exchange/mixins/Auth.sol` — role registry pattern (copy this verbatim, inlined)
 - `../research/lp-provisioning-engine.md` — research, architecture, Phase 1 contract sketch
 - `../research/lp-vaults-build-plan.md` — 8-feature build order with `/m:spec` prompts
-- `prd/` — project context (PROJECT, MODULES, DOMAINS, ACTORS, FEATURES, TECH-STACK, GLOSSARY)
+- `specs/` — project context (PROJECT, MODULES, DOMAINS, ACTORS, FEATURES, TECH-STACK, GLOSSARY)
+
+<!-- molcajete:principles:start -->
+## Engineering Principles (Molcajete)
+
+Trust comes from tests, not code shape. Code can change; behavior is the contract.
+
+- Integration tests are the trust contract. Unit tests only for heavy algorithmic logic.
+- Hexagonal architecture: drive tests through driver ports with the real internal stack; mock only the outer-edge driven ports.
+- Dependency injection makes the outer edge swappable at test time.
+- 80% coverage floor on touched files (configurable via `.molcajete/settings.json testing.threshold`).
+- Small functions, clear module boundaries, no god files. Refactor to reuse; never duplicate.
+- Principles are technology-agnostic. The stack is recorded in `specs/TECH-STACK.md`.
+
+See `.claude/rules/principles.md` for full text and rationale. Re-read it before any architecture decision, test-scope decision, or refactor.
+<!-- molcajete:principles:end -->

@@ -4,11 +4,13 @@
 
 ### contracts
 - **Directory:** `.`
-- **Language:** Solidity ^0.8.20
+- **Language:** Solidity 0.8.20
 - **Framework:** Foundry (forge, cast, anvil)
 - **Build:** `forge build`
-- **Key libraries:** forge-std, OpenZeppelin (SafeERC20, IERC20, IERC1155Receiver)
-- **Testing:** `forge test` (unit + fuzz + invariant)
+- **Key libraries:** forge-std, OpenZeppelin (IERC20, IERC1155, IERC1155Receiver — interfaces only)
+- **Testing:** forge test (unit + fuzz + invariant)
+- **Running tests:** `forge test`
+- **Coverage:** `forge coverage`
 - **Lint/Format:** `forge fmt`
 
 ## Runtime
@@ -47,8 +49,8 @@ N/A — pure contract project with no runtime services.
 - **Seed data:** N/A
 
 ## Conventions
-- All contracts use explicit Solidity compiler version `^0.8.20`
-- OpenZeppelin imports via `@openzeppelin/contracts/`
+- All contracts use exact Solidity compiler version `pragma solidity 0.8.20;`
+- Interface-only imports from OpenZeppelin; all implementations inlined (see CLAUDE.md pattern policy)
 - Test files follow `{ContractName}.t.sol` naming in `test/`
 - Deploy scripts follow `{Name}.s.sol` naming in `script/`
 - Fixed-point math uses Q128 (2^128 scaling) for fee accumulators

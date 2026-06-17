@@ -13,7 +13,7 @@
 
 **Use Case** -- A single interaction scenario within a feature, with defined preconditions, steps, and postconditions.
 
-**Actor** -- A role that interacts with the system: LP, Operator, Keeper, or Factory Owner.
+**Actor** -- A role that interacts with the system: LP, Operator, Oracle, Admin, Keeper, or Factory Owner.
 
 **Tick** -- A discrete price slot in the order book. The prediction market price space [0, 1] is divided into ticks at the vault's `tickSpacing` granularity (e.g., 1000 ticks at 0.001 spacing). Ticks are the unit of the fee accumulator system.
 
