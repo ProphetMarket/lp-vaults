@@ -9,6 +9,24 @@ import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../../src/LPVault.sol";
 
 // ──────────────────────────────────────────────
+// Minimal mocks — stub the ERC-20 and ERC-1155 entry points that
+// LPVault.initialize() calls (approve, setApprovalForAll). The T-002
+// slice extended initialize() with those external calls, so any test
+// that initializes a clone must pass real contract addresses for usdc
+// and conditionalTokens.
+// ──────────────────────────────────────────────
+
+contract MockERC20 {
+    function approve(address, uint256) external pure returns (bool) {
+        return true;
+    }
+}
+
+contract MockConditionalTokens {
+    function setApprovalForAll(address, bool) external {}
+}
+
+// ──────────────────────────────────────────────
 // Test harnesses — expose modifier-gated entry points so the modifier
 // bodies (onlyAdmin, onlyOperator, onlyOracle, onlyFactory) are exercisable
 // in isolation. These are test-only; the real gated functions arrive in T-002/T-003.
@@ -152,14 +170,14 @@ contract CloneInitializeSuccessTest is Test {
         LPVault vault = LPVault(clone);
 
         bytes32 mktId = bytes32(uint256(42));
-        address usdcAddr = makeAddr("usdc");
+        address usdcAddr = address(new MockERC20());
         address exchangeAddr = makeAddr("exchange");
-        address ctAddr = makeAddr("ct");
+        address ctAddr = address(new MockConditionalTokens());
         address oracleAddr = makeAddr("oracle");
         int24 spacing = int24(10);
         uint128 minLiq = uint128(1000);
 
-        vault.initialize(mktId, usdcAddr, exchangeAddr, ctAddr, oracleAddr, spacing, minLiq);
+        vault.initialize(mktId, usdcAddr, exchangeAddr, ctAddr, oracleAddr, spacing, address(this), minLiq);
 
         // factory is set from msg.sender (this test contract)
         assertEq(vault.factory(), address(this), "factory should be msg.sender");
@@ -178,25 +196,21 @@ contract CloneInitializeSuccessTest is Test {
         address clone = _createClone(address(impl));
         LPVault vault = LPVault(clone);
 
+        // Deploy all mocks up front — vm.expectRevert only watches the next observable
+        // call/creation, so any `new Mock()` between expectRevert and the target call
+        // would consume the expectation.
+        address usdc1 = address(new MockERC20());
+        address ct1 = address(new MockConditionalTokens());
+        address usdc2 = address(new MockERC20());
+        address ct2 = address(new MockConditionalTokens());
+
         vault.initialize(
-            bytes32(uint256(1)),
-            makeAddr("usdc"),
-            makeAddr("exchange"),
-            makeAddr("ct"),
-            makeAddr("oracle"),
-            int24(10),
-            uint128(1000)
+            bytes32(uint256(1)), usdc1, makeAddr("exchange"), ct1, makeAddr("oracle"), int24(10), address(this), uint128(1000)
         );
 
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
         vault.initialize(
-            bytes32(uint256(2)),
-            makeAddr("usdc2"),
-            makeAddr("exchange2"),
-            makeAddr("ct2"),
-            makeAddr("oracle2"),
-            int24(20),
-            uint128(2000)
+            bytes32(uint256(2)), usdc2, makeAddr("exchange2"), ct2, makeAddr("oracle2"), int24(20), address(this), uint128(2000)
         );
     }
 
@@ -238,6 +252,7 @@ contract ImplementationNotInitializableTest is Test {
             makeAddr("ct"),
             makeAddr("oracle"),
             int24(10), // tickSpacing
+            address(this), // factory_
             uint128(1000) // minimumFirstLiquidity
         );
     }
@@ -330,11 +345,12 @@ contract VaultModifierTest is Test {
         LPVault(clone)
             .initialize(
                 bytes32(uint256(1)),
-                makeAddr("usdc"),
+                address(new MockERC20()),
                 makeAddr("exchange"),
-                makeAddr("ct"),
+                address(new MockConditionalTokens()),
                 oracleAddr,
                 int24(10),
+                address(this),
                 uint128(1000)
             );
         factoryAddr = address(this);
