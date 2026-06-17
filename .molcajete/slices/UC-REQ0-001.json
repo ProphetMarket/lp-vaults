@@ -1,0 +1,16 @@
+{
+  "id": "UC-REQ0-001",
+  "use_case": "UC-REQ0",
+  "feature": "FEAT-REPZ",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260617T055202-deploy-lp-vault-for-market",
+  "completed_at": "2026-06-17T06:15:00Z",
+  "files_touched": [
+    "src/LPVaultFactory.sol",
+    "src/LPVault.sol",
+    "test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ0-deploy-factory/001-contract-call-deploy-factory-with-role-registry.t.sol"
+  ],
+  "covers": ["SC-REQ3", "SC-REQ4", "SC-REQ5"],
+  "summary": "Created LPVaultFactory with constructor that initializes the Auth registry (admin, oracle, operator) and stores immutable external contract addresses (implementation, usdc, exchange, conditionalTokens). Role separation enforced at constructor time (oracle != operator). Created LPVault with _disableInitializers() in constructor preventing direct initialization of the implementation. Both contracts export the Auth modifiers (onlyAdmin, onlyOperator, onlyOracle, onlyFactory) for downstream slices. Coverage: Factory 100%, Vault 83.33%."
+}

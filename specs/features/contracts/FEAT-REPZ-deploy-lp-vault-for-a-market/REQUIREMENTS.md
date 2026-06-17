@@ -3,7 +3,7 @@ id: FEAT-REPZ
 name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
-status: pending
+status: dirty
 version: 1
 refs: []
 ---

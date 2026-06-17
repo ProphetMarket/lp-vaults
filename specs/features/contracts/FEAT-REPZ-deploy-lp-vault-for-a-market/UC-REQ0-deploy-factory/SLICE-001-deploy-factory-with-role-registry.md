@@ -12,7 +12,7 @@ provides: [LPVaultFactory, LPVault, onlyAdmin, onlyOperator, onlyOracle, onlyFac
 entry_type: contract-call
 covers: [SC-REQ3, SC-REQ4, SC-REQ5]
 last_update: 2026-06-17
-status: pending
+status: implemented
 ---
 
 # UC-REQ0-001: Deploy Factory with Role Registry

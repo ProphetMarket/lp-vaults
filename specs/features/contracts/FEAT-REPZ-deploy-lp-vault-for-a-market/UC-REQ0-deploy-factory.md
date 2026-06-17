@@ -2,7 +2,7 @@
 id: UC-REQ0
 name: Deploy Factory
 feature: FEAT-REPZ
-status: pending
+status: implemented
 version: 1
 actor: Factory Owner
 ---
