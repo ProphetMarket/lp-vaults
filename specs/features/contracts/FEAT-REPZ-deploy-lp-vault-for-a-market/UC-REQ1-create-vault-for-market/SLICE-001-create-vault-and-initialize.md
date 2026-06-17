@@ -12,7 +12,7 @@ provides: [createVault, initialize, setMinimumFirstLiquidity, vaultForMarket]
 entry_type: contract-call
 covers: [SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77]
 last_update: 2026-06-17
-status: pending
+status: implemented
 ---
 
 # UC-REQ1-001: Create Vault and Initialize

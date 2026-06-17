@@ -2,7 +2,7 @@
 id: UC-REQ1
 name: Create Vault for Market
 feature: FEAT-REPZ
-status: pending
+status: implemented
 version: 3
 actor: Oracle
 ---
