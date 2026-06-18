@@ -1,0 +1,12 @@
+{
+  "id": "UC-U07A-001",
+  "use_case": "UC-U07A",
+  "feature": "FEAT-U079",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260618T144007-collect-position-fees",
+  "completed_at": "2026-06-18T14:50:00Z",
+  "files_touched": ["src/LPVault.sol", "test/features/FEAT-U079-collect-fees-on-a-position/UC-U07A-collect-position-fees/001-contract-call-collect-fees.t.sol"],
+  "covers": ["SC-U07B", "SC-U07C", "SC-U07D", "SC-U07E", "SC-U07F", "SC-U07G", "FR-U07H", "FR-U07I", "FR-U07J", "FR-U07K", "FR-U07L", "FR-U07M", "FR-U07N", "FR-U07O"],
+  "summary": "Implemented collect(uint256 positionId) on LPVault.sol — computes feeGrowthInside via _computeFeeGrowthInside, calculates owed fees using Q128 delta from feeGrowthInsideLastX128 snapshot, transfers USDC to position owner via new _safeTransfer helper, emits FeesCollected event. Added NotPositionOwner and PositionNotFound custom errors. Phase-independent (works in Active and WindDown). 21 integration tests covering all 6 scenarios plus FR assertions."
+}

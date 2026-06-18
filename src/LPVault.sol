@@ -14,6 +14,9 @@ pragma solidity 0.8.20;
 // FEAT-TVS0: Update Tick and Cross Ticks
 // UC-TVS1: Update Current Tick
 // UC-TVS1-001: update-tick-with-crossing
+// FEAT-U079: Collect Fees on a Position
+// UC-U07A: Collect Position Fees
+// UC-U07A-001: collect-fees
 
 /// @dev Minimal ERC-20 interface — only approve needed for exchange setup.
 interface IERC20 {
@@ -205,6 +208,8 @@ contract LPVault {
     error Reentrancy();
     error SameTick();
     error TooManyTicksCrossed();
+    error NotPositionOwner();
+    error PositionNotFound();
 
     // ──────────────────────────────────────────────
     // Events
@@ -217,6 +222,9 @@ contract LPVault {
 
     // SC-TVS2 through SC-TVS4: emitted on every successful tick update
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
+
+    // SC-U07B, SC-U07F, SC-U07G: emitted when LP collects nonzero fees
+    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
 
     // SC-T7AH, SC-T7AI, SC-T7AJ: emitted on every successful position mint
     event PositionMinted(
@@ -461,6 +469,47 @@ contract LPVault {
         _safeTransferFrom(usdc, lp, address(this), usdcAmount);
 
         emit PositionMinted(positionId, lp, tickLower, tickUpper, liquidity, usdcAmount, intentId);
+    }
+
+    // ──────────────────────────────────────────────
+    // Fee collection (FEAT-U079, UC-U07A)
+    // ──────────────────────────────────────────────
+
+    // SC-U07B through SC-U07G: LP collects accumulated trading fees
+    /// @notice Withdraws accumulated trading fees from a position without removing it.
+    /// @dev No phase restriction — collect works in both Active and WindDown to ensure
+    ///      LPs have an unbounded claim window post-resolution. The feeGrowthInsideLastX128
+    ///      snapshot prevents double-counting: each collect only pays fees that grew since
+    ///      the previous collect (or since mint).
+    /// @param positionId The ID of the position to collect fees from
+    function collect(uint256 positionId) external nonReentrant {
+        // --- Checks ---
+
+        Position storage p = positions[positionId];
+
+        // Position must exist (owner is never set to address(0) during mint)
+        if (p.owner == address(0)) revert PositionNotFound();
+
+        // Only the position's owner can collect
+        if (p.owner != msg.sender) revert NotPositionOwner();
+
+        // --- Effects ---
+
+        // Compute current feeGrowthInside for this position's tick range
+        uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
+
+        // Calculate fees accrued since the last collect (or mint)
+        uint256 owed = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+
+        // Snapshot update: future collects start from here
+        p.feeGrowthInsideLastX128 = feeGrowthInsideX128;
+
+        // --- Interactions (external calls last, per checks-effects-interactions) ---
+
+        if (owed > 0) {
+            _safeTransfer(usdc, msg.sender, owed);
+            emit FeesCollected(positionId, msg.sender, owed);
+        }
     }
 
     // ──────────────────────────────────────────────
@@ -818,6 +867,14 @@ contract LPVault {
     ///      The USDC address is set at initialize() and never changes.
     function _safeTransferFrom(address token, address from, address to, uint256 amount) internal {
         (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0x23b872dd, from, to, amount));
+        if (!success || (data.length > 0 && !abi.decode(data, (bool)))) revert TransferFailed();
+    }
+
+    /// @dev Push-direction ERC-20 transfer. Handles both bool-returning and
+    ///      non-bool-returning tokens (USDT semantics). Used by collect to pay
+    ///      out fees to the position owner.
+    function _safeTransfer(address token, address to, uint256 amount) internal {
+        (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0xa9059cbb, to, amount));
         if (!success || (data.length > 0 && !abi.decode(data, (bool)))) revert TransferFailed();
     }
 
