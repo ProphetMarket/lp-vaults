@@ -378,6 +378,24 @@ contract VaultModifierTest is Test {
         vault.guardedByOracle();
     }
 
+    // The vault-side admin/operator modifiers are inlined from the Auth pattern
+    // but no production vault function currently uses them. The factory never
+    // grants vault-level admin/operator, so only the revert side is reachable
+    // without vm.store-seeding the clone's mappings. Exercising the revert side
+    // here covers the modifier branch and locks the NotAdmin/NotOperator
+    // selectors against silent regressions in the inlined Auth scaffolding.
+    function test_onlyAdminRevertsForNonAdmin() public {
+        vm.prank(nobody);
+        vm.expectRevert(LPVault.NotAdmin.selector);
+        vault.guardedByAdmin();
+    }
+
+    function test_onlyOperatorRevertsForNonOperator() public {
+        vm.prank(nobody);
+        vm.expectRevert(LPVault.NotOperator.selector);
+        vault.guardedByOperator();
+    }
+
     /// @dev Deploys an EIP-1167 minimal proxy clone of the given implementation.
     function _createClone(address implementation) internal returns (address clone) {
         /// @solidity memory-safe-assembly

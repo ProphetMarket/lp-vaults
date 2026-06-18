@@ -1,0 +1,15 @@
+{
+  "id": "UC-REQ2-001",
+  "use_case": "UC-REQ2",
+  "feature": "FEAT-REPZ",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260617T055202-deploy-lp-vault-for-market",
+  "completed_at": "2026-06-17T06:15:00Z",
+  "files_touched": [
+    "src/LPVaultFactory.sol",
+    "test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ2-manage-roles-on-factory/001-contract-call-factory-role-management.t.sol"
+  ],
+  "covers": ["SC-REQB", "SC-REQC", "SC-REQD", "SC-REQE", "SC-REQF", "SC-REQG", "SC-REQH"],
+  "summary": "Added 5 role management functions (addOperator, removeOperator, setOracle, transferAdmin, acceptAdmin) to LPVaultFactory with role-separation enforcement, two-step admin transfer, and 3 new custom errors (NotPendingAdmin, ZeroAddress, AlreadyAdmin). 18 integration tests cover all 7 scenarios including happy paths, role-separation reverts, and non-admin access control."
+}

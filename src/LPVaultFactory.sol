@@ -4,9 +4,10 @@ pragma solidity 0.8.20;
 import {LPVault} from "./LPVault.sol";
 
 // FEAT-REPZ: Deploy LP Vault for a Market
-// UC-REQ0: Deploy Factory, UC-REQ1: Create Vault for Market
+// UC-REQ0: Deploy Factory, UC-REQ1: Create Vault for Market, UC-REQ2: Manage Roles on Factory
 // UC-REQ0-001: deploy-factory-with-role-registry
 // UC-REQ1-001: create-vault-and-initialize
+// UC-REQ2-001: factory-role-management
 
 /// @title LPVaultFactory
 /// @notice Deploys per-market LP vault clones (EIP-1167) and manages the factory-level role registry.
@@ -66,6 +67,9 @@ contract LPVaultFactory {
     error DuplicateMarket();
     error ZeroFloor();
     error CloneDeployFailed();
+    error NotPendingAdmin();
+    error ZeroAddress();
+    error AlreadyAdmin();
 
     // ──────────────────────────────────────────────
     // Events
@@ -187,5 +191,67 @@ contract LPVaultFactory {
             clone := create(0, ptr, 0x37)
         }
         if (clone == address(0)) revert CloneDeployFailed();
+    }
+
+    // ──────────────────────────────────────────────
+    // Role management (UC-REQ2-001)
+    // ──────────────────────────────────────────────
+
+    // SC-REQB, SC-REQC: register a new operator with role-separation enforcement
+    /// @notice Registers a new operator address.
+    /// @dev OPERATOR TRUST ASSUMPTION: Operators can execute transactional functions
+    ///      (mintPositionFor, notifyFees, updateTick, mergePositions). Users must
+    ///      trust that operators act honestly when crediting positions and reporting fees.
+    /// @param operator_ Address to register as operator — must not be the current oracle
+    function addOperator(address operator_) external onlyAdmin {
+        // Role separation: oracle and operator must be distinct wallets
+        if (operator_ == oracle) revert RoleSeparation();
+
+        operators[operator_] = 1;
+        emit NewOperator(operator_, msg.sender);
+    }
+
+    // SC-REQD: deregister an existing operator
+    /// @notice Removes an address from the operator set.
+    /// @param operator_ Address to deregister
+    function removeOperator(address operator_) external onlyAdmin {
+        operators[operator_] = 0;
+        emit RemovedOperator(operator_, msg.sender);
+    }
+
+    // SC-REQE, SC-REQF: update oracle with role-separation enforcement
+    /// @notice Updates the oracle address.
+    /// @dev The oracle controls vault lifecycle (createVault, startWindDown).
+    ///      Cannot be set to an address that is currently an operator (role separation).
+    /// @param newOracle Address to set as the new oracle
+    function setOracle(address newOracle) external onlyAdmin {
+        // Role separation: the new oracle must not already be an operator
+        if (operators[newOracle] == 1) revert RoleSeparation();
+
+        oracle = newOracle;
+    }
+
+    // SC-REQG: first step of two-step admin transfer — store the proposed admin
+    /// @notice Proposes a new admin. The proposed address must call acceptAdmin() to complete.
+    /// @dev Two-step transfer prevents accidental admin loss from typos or wrong addresses.
+    /// @param newAdmin Address to propose as admin — must not be zero or already an admin
+    function transferAdmin(address newAdmin) external onlyAdmin {
+        if (newAdmin == address(0)) revert ZeroAddress();
+        if (admins[newAdmin] == 1) revert AlreadyAdmin();
+
+        pendingAdmin = newAdmin;
+        emit AdminTransferProposed(msg.sender, newAdmin);
+    }
+
+    // SC-REQG: second step — proposed admin claims the role
+    /// @notice Completes the two-step admin transfer. Only callable by the pending admin.
+    function acceptAdmin() external {
+        if (msg.sender != pendingAdmin) revert NotPendingAdmin();
+
+        admins[msg.sender] = 1;
+        adminCount += 1;
+        pendingAdmin = address(0);
+
+        emit NewAdmin(msg.sender, msg.sender);
     }
 }

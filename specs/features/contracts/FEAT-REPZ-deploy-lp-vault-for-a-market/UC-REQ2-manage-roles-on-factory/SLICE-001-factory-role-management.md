@@ -12,7 +12,7 @@ provides: [addOperator, removeOperator, setOracle, transferAdmin, acceptAdmin]
 entry_type: contract-call
 covers: [SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH]
 last_update: 2026-06-17
-status: pending
+status: implemented
 ---
 
 # UC-REQ2-001: Factory Role Management

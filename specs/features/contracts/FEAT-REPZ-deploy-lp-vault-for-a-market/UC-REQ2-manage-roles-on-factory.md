@@ -2,7 +2,7 @@
 id: UC-REQ2
 name: Manage Roles on Factory
 feature: FEAT-REPZ
-status: pending
+status: implemented
 version: 1
 actor: Admin
 ---
