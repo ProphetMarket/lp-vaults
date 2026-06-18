@@ -3,7 +3,7 @@ id: FEAT-T7AF
 name: Mint LP Position
 module: contracts
 domain: "@positions"
-status: pending
+status: implemented
 version: 1
 refs: [FEAT-REPZ]
 ---

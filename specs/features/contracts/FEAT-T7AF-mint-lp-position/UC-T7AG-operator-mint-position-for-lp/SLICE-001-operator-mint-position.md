@@ -4,10 +4,10 @@ name: operator-mint-position
 use_case: UC-T7AG
 feature: FEAT-T7AF
 objective: implement
-status: pending
+status: implemented
 files:
   create: []
-  modify: [src/LPVault.sol]
+  modify: [src/LPVault.sol, src/LPVaultFactory.sol]
 depends_on: [UC-REQ1-001]
 provides: [mintPositionFor, positions, ticks, TickInfo, Position, usedIntents, MINT_INTENT_TYPEHASH]
 entry_type: contract-call

@@ -28,13 +28,7 @@ contract RoleManagementBase is Test {
     function setUp() public virtual {
         LPVault impl = new LPVault();
         factory = new LPVaultFactory(
-            address(impl),
-            makeAddr("usdc"),
-            makeAddr("exchange"),
-            makeAddr("ct"),
-            admin,
-            oracleAddr,
-            operatorAddr
+            address(impl), makeAddr("usdc"), makeAddr("exchange"), makeAddr("ct"), admin, oracleAddr, operatorAddr
         );
     }
 }

@@ -20,7 +20,7 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
-| FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation with EIP-712 signed intents, v3-style tick initialization, and fee-snapshot anchoring | pending |
+| FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation with EIP-712 signed intents, v3-style tick initialization, and fee-snapshot anchoring | implemented |
 
 ## @fees
 

@@ -2,7 +2,7 @@
 id: UC-T7AG
 name: Operator Mint Position for LP
 feature: FEAT-T7AF
-status: pending
+status: implemented
 version: 1
 actor: Operator
 ---

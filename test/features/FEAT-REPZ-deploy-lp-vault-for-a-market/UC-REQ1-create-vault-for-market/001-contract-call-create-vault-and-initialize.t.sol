@@ -266,16 +266,19 @@ contract VaultReInitializeTest is Test {
 
         // Any caller hitting initialize() on the already-initialized clone reverts
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
-        LPVault(vault).initialize(
-            bytes32(uint256(2)),
-            makeAddr("usdc2"),
-            makeAddr("exchange2"),
-            makeAddr("ct2"),
-            makeAddr("oracle2"),
-            int24(20),
-            address(this),
-            uint128(2000)
-        );
+        LPVault(vault)
+            .initialize(
+                bytes32(uint256(2)),
+                makeAddr("usdc2"),
+                makeAddr("exchange2"),
+                makeAddr("ct2"),
+                makeAddr("oracle2"),
+                int24(20),
+                address(this),
+                uint128(2000),
+                makeAddr("admin2"),
+                makeAddr("operator2")
+            );
     }
 }
 
@@ -319,16 +322,19 @@ contract VaultOnlyFactoryInitializeTest is Test {
 
         vm.prank(nobody);
         vm.expectRevert(LPVault.NotFactory.selector);
-        LPVault(clone).initialize(
-            bytes32(uint256(1)),
-            makeAddr("usdc"),
-            makeAddr("exchange"),
-            makeAddr("ct"),
-            makeAddr("oracle"),
-            int24(10),
-            address(factory), // declared factory address that msg.sender doesn't match
-            uint128(1000)
-        );
+        LPVault(clone)
+            .initialize(
+                bytes32(uint256(1)),
+                makeAddr("usdc"),
+                makeAddr("exchange"),
+                makeAddr("ct"),
+                makeAddr("oracle"),
+                int24(10),
+                address(factory), // declared factory address that msg.sender doesn't match
+                uint128(1000),
+                makeAddr("admin"),
+                makeAddr("operator")
+            );
     }
 
     function _createClone(address implementation) internal returns (address clone) {

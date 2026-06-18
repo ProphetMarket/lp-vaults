@@ -177,7 +177,18 @@ contract CloneInitializeSuccessTest is Test {
         int24 spacing = int24(10);
         uint128 minLiq = uint128(1000);
 
-        vault.initialize(mktId, usdcAddr, exchangeAddr, ctAddr, oracleAddr, spacing, address(this), minLiq);
+        vault.initialize(
+            mktId,
+            usdcAddr,
+            exchangeAddr,
+            ctAddr,
+            oracleAddr,
+            spacing,
+            address(this),
+            minLiq,
+            makeAddr("admin"),
+            makeAddr("operator")
+        );
 
         // factory is set from msg.sender (this test contract)
         assertEq(vault.factory(), address(this), "factory should be msg.sender");
@@ -205,12 +216,30 @@ contract CloneInitializeSuccessTest is Test {
         address ct2 = address(new MockConditionalTokens());
 
         vault.initialize(
-            bytes32(uint256(1)), usdc1, makeAddr("exchange"), ct1, makeAddr("oracle"), int24(10), address(this), uint128(1000)
+            bytes32(uint256(1)),
+            usdc1,
+            makeAddr("exchange"),
+            ct1,
+            makeAddr("oracle"),
+            int24(10),
+            address(this),
+            uint128(1000),
+            makeAddr("admin"),
+            makeAddr("operator")
         );
 
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
         vault.initialize(
-            bytes32(uint256(2)), usdc2, makeAddr("exchange2"), ct2, makeAddr("oracle2"), int24(20), address(this), uint128(2000)
+            bytes32(uint256(2)),
+            usdc2,
+            makeAddr("exchange2"),
+            ct2,
+            makeAddr("oracle2"),
+            int24(20),
+            address(this),
+            uint128(2000),
+            makeAddr("admin2"),
+            makeAddr("operator2")
         );
     }
 
@@ -253,7 +282,9 @@ contract ImplementationNotInitializableTest is Test {
             makeAddr("oracle"),
             int24(10), // tickSpacing
             address(this), // factory_
-            uint128(1000) // minimumFirstLiquidity
+            uint128(1000), // minimumFirstLiquidity
+            makeAddr("admin"),
+            makeAddr("operator")
         );
     }
 }
@@ -351,7 +382,9 @@ contract VaultModifierTest is Test {
                 oracleAddr,
                 int24(10),
                 address(this),
-                uint128(1000)
+                uint128(1000),
+                admin,
+                operatorAddr
             );
         factoryAddr = address(this);
     }
