@@ -26,6 +26,7 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
+| FEAT-TOGR | Notify and Distribute Fees | Operator-driven Q128 fee accumulator update that distributes trading fee revenue proportionally across in-range LP positions | implemented |
 
 ## @ticks
 

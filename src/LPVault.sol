@@ -8,6 +8,9 @@ pragma solidity 0.8.20;
 // FEAT-T7AF: Mint LP Position
 // UC-T7AG: Operator Mint Position for LP
 // UC-T7AG-001: operator-mint-position
+// FEAT-TOGR: Notify and Distribute Fees
+// UC-TOGS: Operator Notify Fee Revenue
+// UC-TOGS-001: notify-fees
 
 /// @dev Minimal ERC-20 interface — only approve needed for exchange setup.
 interface IERC20 {
@@ -149,6 +152,9 @@ contract LPVault {
     /// @dev Scaling factor for liquidity computation: L = usdcAmount * PRECISION / rangeWidth
     uint256 public constant LIQUIDITY_PRECISION = 1e18;
 
+    /// @dev Q128 = 2^128. Scaling factor for fee accumulator fixed-point math.
+    uint256 internal constant Q128 = 1 << 128;
+
     // ──────────────────────────────────────────────
     // Reentrancy guard (inlined per pattern policy in CLAUDE.md)
     // ──────────────────────────────────────────────
@@ -173,6 +179,7 @@ contract LPVault {
     error IntentAlreadyUsed();
     error InvalidSignature();
     error BelowMinimumFirstLiquidity();
+    error NoActiveLiquidity();
     error SafeCastOverflow();
     error TransferFailed();
     error Reentrancy();
@@ -182,6 +189,9 @@ contract LPVault {
     // ──────────────────────────────────────────────
 
     event MinimumFirstLiquidityUpdated(uint128 oldMin, uint128 newMin);
+
+    // SC-TOGT, SC-TOGU: emitted when Operator distributes fee revenue
+    event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
 
     // SC-T7AH, SC-T7AI, SC-T7AJ: emitted on every successful position mint
     event PositionMinted(
@@ -429,6 +439,36 @@ contract LPVault {
     }
 
     // ──────────────────────────────────────────────
+    // Fee notification (FEAT-TOGR, UC-TOGS)
+    // ──────────────────────────────────────────────
+
+    // SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY: operator-gated fee accumulator update
+    /// @notice Increments the global fee accumulator by the Q128-scaled share of new fee revenue.
+    /// @dev OPERATOR TRUST ASSUMPTION: The Operator is trusted to have deposited at least
+    ///      `amount` USDC into the vault before calling. The contract does not verify the
+    ///      vault's USDC balance — an Operator who calls notifyFees without funding it creates
+    ///      an accounting mismatch that would strand LP claims. This matches the CTF Exchange
+    ///      trust model where the operator manages fee sweeps.
+    /// @param amount The amount of USDC fee revenue to distribute across active liquidity
+    function notifyFees(uint256 amount) external onlyOperator {
+        // Zero-amount guard: notifying zero fees wastes gas and signals a caller bug
+        if (amount == 0) revert ZeroAmount();
+
+        // Safety guard: distributing fees against zero liquidity would lock them
+        // permanently with no LP able to claim (CLAUDE.md security checklist item 9)
+        uint128 activeL = activeLiquidity;
+        if (activeL == 0) revert NoActiveLiquidity();
+
+        // Increment the global fee accumulator using overflow-safe Q128 arithmetic.
+        // mulDiv computes (amount * 2^128) / activeLiquidity with full intermediate
+        // precision, truncating downward. The dust is economically negligible
+        // (< 1/2^128 USDC per unit of liquidity per call).
+        feeGrowthGlobalX128 += _mulDiv(amount, Q128, uint256(activeL));
+
+        emit FeesNotified(amount, feeGrowthGlobalX128);
+    }
+
+    // ──────────────────────────────────────────────
     // Internal: EIP-712 signature verification
     // ──────────────────────────────────────────────
 
@@ -536,6 +576,67 @@ contract LPVault {
     function _safeTransferFrom(address token, address from, address to, uint256 amount) internal {
         (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0x23b872dd, from, to, amount));
         if (!success || (data.length > 0 && !abi.decode(data, (bool)))) revert TransferFailed();
+    }
+
+    // ──────────────────────────────────────────────
+    // Internal: overflow-safe Q128 arithmetic (inlined per pattern policy)
+    // ──────────────────────────────────────────────
+
+    /// @dev Overflow-safe (a * b) / denominator with full 512-bit intermediate precision.
+    ///      Truncates toward zero (floor division). Inlined from OpenZeppelin Math.mulDiv
+    ///      per CLAUDE.md pattern policy — no library import.
+    function _mulDiv(uint256 a, uint256 b, uint256 denominator) internal pure returns (uint256 result) {
+        // 512-bit multiply: [prod1, prod0] = a * b
+        uint256 prod0;
+        uint256 prod1;
+        assembly {
+            let mm := mulmod(a, b, not(0))
+            prod0 := mul(a, b)
+            prod1 := sub(sub(mm, prod0), lt(mm, prod0))
+        }
+
+        // If the product fits in 256 bits, standard division is sufficient
+        if (prod1 == 0) {
+            return prod0 / denominator;
+        }
+
+        // The product must be less than the denominator for the result to fit in 256 bits
+        require(prod1 < denominator, "mulDiv overflow");
+
+        // The remaining steps use modular arithmetic (Montgomery multiplication) where
+        // intermediate overflows are intentional and mathematically correct mod 2^256.
+        unchecked {
+            // Subtract the remainder to make the product exactly divisible
+            uint256 remainder;
+            assembly {
+                remainder := mulmod(a, b, denominator)
+            }
+            assembly {
+                prod1 := sub(prod1, gt(remainder, prod0))
+                prod0 := sub(prod0, remainder)
+            }
+
+            // Factor out powers of two from the denominator using the largest power-of-two divisor
+            uint256 twos = denominator & (~denominator + 1);
+            assembly {
+                denominator := div(denominator, twos)
+                prod0 := div(prod0, twos)
+                twos := add(div(sub(0, twos), twos), 1)
+            }
+            prod0 |= prod1 * twos;
+
+            // Compute the modular inverse of the denominator via Newton's method (6 iterations
+            // for 256-bit precision, starting from a 3-bit accurate seed)
+            uint256 inverse = (3 * denominator) ^ 2;
+            inverse *= 2 - denominator * inverse;
+            inverse *= 2 - denominator * inverse;
+            inverse *= 2 - denominator * inverse;
+            inverse *= 2 - denominator * inverse;
+            inverse *= 2 - denominator * inverse;
+            inverse *= 2 - denominator * inverse;
+
+            result = prod0 * inverse;
+        }
     }
 
     // ──────────────────────────────────────────────

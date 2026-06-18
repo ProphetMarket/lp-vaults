@@ -1,0 +1,15 @@
+{
+  "id": "UC-TOGS-001",
+  "use_case": "UC-TOGS",
+  "feature": "FEAT-TOGR",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260618T112702-notify-fees",
+  "completed_at": "2026-06-18T11:30:00Z",
+  "files_touched": [
+    "src/LPVault.sol",
+    "test/features/FEAT-TOGR-notify-and-distribute-fees/UC-TOGS-operator-notify-fee-revenue/001-contract-call-notify-fees.t.sol"
+  ],
+  "covers": ["SC-TOGT", "SC-TOGU", "SC-TOGV", "SC-TOGW", "SC-TOGX", "SC-TOGY", "FR-TOGZ", "FR-TOH0", "FR-TOH1", "FR-TOH2", "FR-TOH3"],
+  "summary": "Implemented notifyFees(uint256 amount) on LPVault with onlyOperator access control, inline _mulDiv for overflow-safe Q128 arithmetic (unchecked modular inverse section), NoActiveLiquidity and ZeroAmount guards. FeesNotified event emitted. 16 tests covering all 6 scenarios including a fuzz test for mulDiv overflow safety with 257 runs. Coverage: lines 98.59%, statements 95.83%, branches 82.35%, funcs 100%. The _mulDiv helper is reusable by downstream features (collect, burn)."
+}
