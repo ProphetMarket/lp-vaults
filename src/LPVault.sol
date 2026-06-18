@@ -11,6 +11,9 @@ pragma solidity 0.8.20;
 // FEAT-TOGR: Notify and Distribute Fees
 // UC-TOGS: Operator Notify Fee Revenue
 // UC-TOGS-001: notify-fees
+// FEAT-TVS0: Update Tick and Cross Ticks
+// UC-TVS1: Update Current Tick
+// UC-TVS1-001: update-tick-with-crossing
 
 /// @dev Minimal ERC-20 interface — only approve needed for exchange setup.
 interface IERC20 {
@@ -102,6 +105,10 @@ contract LPVault {
     /// @dev Counter for minting new positions
     uint256 public nextPositionId;
 
+    /// @dev Tracks the most recent block.timestamp at which an Operator called
+    ///      updateTick. Used by feature 8 to detect prolonged Operator silence.
+    uint256 public lastOperatorActivityTimestamp;
+
     // ──────────────────────────────────────────────
     // Position and tick state (FEAT-T7AF)
     // ──────────────────────────────────────────────
@@ -131,6 +138,15 @@ contract LPVault {
     mapping(bytes32 => bool) public usedIntents;
 
     // ──────────────────────────────────────────────
+    // TickBitmap (FEAT-TVS0)
+    // ──────────────────────────────────────────────
+
+    /// @dev One uint256 word per 256 consecutive ticks. Bit N is set when the
+    ///      tick at (wordPosition * 256 + N) is initialized. Enables O(1) per-word
+    ///      lookup of the next initialized tick during updateTick.
+    mapping(int16 => uint256) public tickBitmap;
+
+    // ──────────────────────────────────────────────
     // EIP-712 (inlined per pattern policy in CLAUDE.md)
     // ──────────────────────────────────────────────
 
@@ -154,6 +170,10 @@ contract LPVault {
 
     /// @dev Q128 = 2^128. Scaling factor for fee accumulator fixed-point math.
     uint256 internal constant Q128 = 1 << 128;
+
+    /// @dev Maximum number of initialized ticks that can be crossed in a single
+    ///      updateTick call. Prevents gas griefing on large price moves.
+    uint256 internal constant MAX_TICK_CROSSINGS = 256;
 
     // ──────────────────────────────────────────────
     // Reentrancy guard (inlined per pattern policy in CLAUDE.md)
@@ -183,6 +203,8 @@ contract LPVault {
     error SafeCastOverflow();
     error TransferFailed();
     error Reentrancy();
+    error SameTick();
+    error TooManyTicksCrossed();
 
     // ──────────────────────────────────────────────
     // Events
@@ -192,6 +214,9 @@ contract LPVault {
 
     // SC-TOGT, SC-TOGU: emitted when Operator distributes fee revenue
     event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
+
+    // SC-TVS2 through SC-TVS4: emitted on every successful tick update
+    event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
     // SC-T7AH, SC-T7AI, SC-T7AJ: emitted on every successful position mint
     event PositionMinted(
@@ -469,6 +494,60 @@ contract LPVault {
     }
 
     // ──────────────────────────────────────────────
+    // Tick update (FEAT-TVS0, UC-TVS1)
+    // ──────────────────────────────────────────────
+
+    // SC-TVS2 through SC-TVS8: operator-gated tick synchronization
+    /// @notice Synchronizes the vault's price tick with the off-chain CLOB mid-price.
+    /// @dev OPERATOR TRUST ASSUMPTION: The Operator can report any tick value. LPs
+    ///      trust that the Operator reports the CLOB mid-price accurately. A malicious
+    ///      or compromised Operator could report a false tick, causing incorrect fee
+    ///      distribution between positions. This matches the ProphetCTFExchange trust model.
+    ///      Crosses every initialized tick between currentTick and newTick, flipping
+    ///      feeGrowthOutsideX128 and applying liquidityNet to activeLiquidity.
+    /// @param newTick The new price tick to set
+    function updateTick(int24 newTick) external onlyOperator nonReentrant {
+        // Phase check: only Active vaults accept tick updates
+        if (phase != 1) revert VaultNotActive();
+
+        int24 oldTick = currentTick;
+        if (newTick == oldTick) revert SameTick();
+
+        bool movingRight = newTick > oldTick;
+        uint256 crossCount = 0;
+        int24 tick = oldTick;
+
+        if (movingRight) {
+            // Cross every initialized tick in (oldTick, newTick]
+            while (tick < newTick) {
+                (int24 next, bool found) = _nextInitializedTick(tick, true);
+                if (!found || next > newTick) break;
+
+                crossCount++;
+                if (crossCount > MAX_TICK_CROSSINGS) revert TooManyTicksCrossed();
+                _crossTick(next, true);
+                tick = next;
+            }
+        } else {
+            // Cross every initialized tick in (newTick, oldTick]
+            while (tick > newTick) {
+                (int24 next, bool found) = _nextInitializedTick(tick, false);
+                if (!found || next <= newTick) break;
+
+                crossCount++;
+                if (crossCount > MAX_TICK_CROSSINGS) revert TooManyTicksCrossed();
+                _crossTick(next, false);
+                tick = next - 1;
+            }
+        }
+
+        currentTick = newTick;
+        lastOperatorActivityTimestamp = block.timestamp;
+
+        emit TickUpdated(oldTick, newTick, crossCount);
+    }
+
+    // ──────────────────────────────────────────────
     // Internal: EIP-712 signature verification
     // ──────────────────────────────────────────────
 
@@ -524,6 +603,9 @@ contract LPVault {
                 ticks[tick].feeGrowthOutsideX128 = feeGrowthGlobalX128;
             }
             // Tick above currentTick: feeGrowthOutside stays 0 (storage default)
+
+            // Register this tick in the bitmap so updateTick can locate it in O(1)
+            _setTickBitmapBit(tick);
         }
     }
 
@@ -548,6 +630,167 @@ contract LPVault {
         }
 
         return feeGrowthGlobalX128 - feeGrowthBelow - feeGrowthAbove;
+    }
+
+    // ──────────────────────────────────────────────
+    // Internal: tick crossing (FEAT-TVS0)
+    // ──────────────────────────────────────────────
+
+    /// @dev Crosses an initialized tick: flips feeGrowthOutsideX128 and adjusts
+    ///      activeLiquidity by the tick's liquidityNet. The flip formula is the
+    ///      same in both directions; the liquidityNet sign depends on direction.
+    function _crossTick(int24 tick, bool ltr) internal {
+        TickInfo storage info = ticks[tick];
+
+        // Flip feeGrowthOutside: the "outside" side swaps relative to currentTick
+        info.feeGrowthOutsideX128 = feeGrowthGlobalX128 - info.feeGrowthOutsideX128;
+
+        // Apply liquidityNet: positive when moving L-to-R, negated when R-to-L
+        int128 liquidityDelta = ltr ? info.liquidityNet : -info.liquidityNet;
+        activeLiquidity = _addDelta(activeLiquidity, liquidityDelta);
+    }
+
+    /// @dev Adds a signed delta to an unsigned liquidity value. Reverts on underflow
+    ///      (activeLiquidity should never go negative — would indicate a logic bug).
+    function _addDelta(uint128 x, int128 y) internal pure returns (uint128 z) {
+        if (y >= 0) {
+            z = x + uint128(y);
+            if (z < x) revert SafeCastOverflow();
+        } else {
+            z = x - uint128(-y);
+            if (z > x) revert SafeCastOverflow();
+        }
+    }
+
+    // ──────────────────────────────────────────────
+    // Internal: TickBitmap (FEAT-TVS0)
+    // ──────────────────────────────────────────────
+
+    /// @dev Decomposes a tick index into its bitmap word position and bit position.
+    ///      Uses arithmetic right shift for correct negative-tick handling.
+    function _tickPosition(int24 tick) internal pure returns (int16 wordPos, uint8 bitPos) {
+        assembly {
+            // Arithmetic right shift by 8 (sign-extending for negative ticks)
+            wordPos := sar(8, signextend(2, tick))
+            // Lower 8 bits give the position within the word
+            bitPos := and(tick, 0xff)
+        }
+    }
+
+    /// @dev Sets the bitmap bit for a tick when it becomes initialized.
+    function _setTickBitmapBit(int24 tick) internal {
+        (int16 wordPos, uint8 bitPos) = _tickPosition(tick);
+        tickBitmap[wordPos] |= (1 << bitPos);
+    }
+
+    /// @dev Clears the bitmap bit for a tick when it becomes deinitialized.
+    ///      Provided for feature 6 (burn) — not called by this feature.
+    function _clearTickBitmapBit(int24 tick) internal {
+        (int16 wordPos, uint8 bitPos) = _tickPosition(tick);
+        tickBitmap[wordPos] &= ~(1 << bitPos);
+    }
+
+    /// @dev Finds the next initialized tick relative to the given tick.
+    ///      searchRight=true: smallest initialized tick strictly greater than `tick`.
+    ///      searchRight=false: largest initialized tick less than or equal to `tick`.
+    ///      Returns (nextTick, true) if found, or (0, false) if no initialized tick exists.
+    function _nextInitializedTick(int24 tick, bool searchRight) internal view returns (int24 next, bool found) {
+        if (searchRight) {
+            // Start from tick + 1
+            int24 startTick = tick + 1;
+            (int16 wordPos, uint8 bitPos) = _tickPosition(startTick);
+
+            // Mask out bits at and below bitPos-1 (keep bitPos and above)
+            uint256 word = tickBitmap[wordPos] >> bitPos;
+            if (word != 0) {
+                uint8 offset = _leastSignificantBit(word);
+                return (startTick + int24(uint24(offset)), true);
+            }
+
+            // Search subsequent words
+            wordPos++;
+            for (; wordPos <= type(int16).max; wordPos++) {
+                word = tickBitmap[wordPos];
+                if (word != 0) {
+                    uint8 offset = _leastSignificantBit(word);
+                    return (int24(int256(wordPos)) * 256 + int24(uint24(offset)), true);
+                }
+            }
+            return (0, false);
+        } else {
+            // Start from tick itself (search at or below)
+            (int16 wordPos, uint8 bitPos) = _tickPosition(tick);
+
+            // Mask out bits above bitPos (keep bitPos and below).
+            // unchecked: when bitPos=255, (1 << 256) wraps to 0, 0-1 = type(uint256).max = all bits set.
+            uint256 mask;
+            unchecked {
+                mask = (uint256(1) << (uint256(bitPos) + 1)) - 1;
+            }
+            uint256 word = tickBitmap[wordPos] & mask;
+            if (word != 0) {
+                uint8 offset = _mostSignificantBit(word);
+                return (int24(int256(wordPos)) * 256 + int24(uint24(offset)), true);
+            }
+
+            // Search previous words
+            wordPos--;
+            for (; wordPos >= type(int16).min; wordPos--) {
+                word = tickBitmap[wordPos];
+                if (word != 0) {
+                    uint8 offset = _mostSignificantBit(word);
+                    return (int24(int256(wordPos)) * 256 + int24(uint24(offset)), true);
+                }
+                if (wordPos == type(int16).min) break;
+            }
+            return (0, false);
+        }
+    }
+
+    /// @dev Returns the index of the least significant set bit in `x`.
+    ///      Assumes x != 0. Isolates the lowest bit then finds its position via MSB.
+    function _leastSignificantBit(uint256 x) internal pure returns (uint8) {
+        assembly {
+            x := and(x, sub(0, x))
+        }
+        return _mostSignificantBit(x);
+    }
+
+    /// @dev Returns the index of the most significant set bit in `x`.
+    ///      Assumes x != 0.
+    function _mostSignificantBit(uint256 x) internal pure returns (uint8 r) {
+        assembly {
+            r := 0
+            if gt(x, 0x00000000000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF) {
+                r := 128
+                x := shr(128, x)
+            }
+            if gt(x, 0x000000000000000000000000000000000000000000000000FFFFFFFFFFFFFFFF) {
+                r := add(r, 64)
+                x := shr(64, x)
+            }
+            if gt(x, 0x00000000000000000000000000000000000000000000000000000000FFFFFFFF) {
+                r := add(r, 32)
+                x := shr(32, x)
+            }
+            if gt(x, 0x000000000000000000000000000000000000000000000000000000000000FFFF) {
+                r := add(r, 16)
+                x := shr(16, x)
+            }
+            if gt(x, 0x00000000000000000000000000000000000000000000000000000000000000FF) {
+                r := add(r, 8)
+                x := shr(8, x)
+            }
+            if gt(x, 0x000000000000000000000000000000000000000000000000000000000000000F) {
+                r := add(r, 4)
+                x := shr(4, x)
+            }
+            if gt(x, 0x0000000000000000000000000000000000000000000000000000000000000003) {
+                r := add(r, 2)
+                x := shr(2, x)
+            }
+            if gt(x, 0x0000000000000000000000000000000000000000000000000000000000000001) { r := add(r, 1) }
+        }
     }
 
     // ──────────────────────────────────────────────

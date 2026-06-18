@@ -1,0 +1,12 @@
+{
+  "id": "UC-TVS1-001",
+  "use_case": "UC-TVS1",
+  "feature": "FEAT-TVS0",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260618T120100-update-tick-cross-ticks",
+  "completed_at": "2026-06-18T12:30:00Z",
+  "files_touched": ["src/LPVault.sol", "test/features/FEAT-TVS0-update-tick-and-cross-ticks/UC-TVS1-update-current-tick/001-contract-call-update-tick-with-crossing.t.sol"],
+  "covers": ["SC-TVS2", "SC-TVS3", "SC-TVS4", "SC-TVS5", "SC-TVS6", "SC-TVS7", "SC-TVS8", "FR-TVS9", "FR-TVSA", "FR-TVSB", "FR-TVSC", "FR-TVSD", "FR-TVSE", "FR-TVSF", "FR-TVSG", "FR-TVSH", "FR-TVSI", "FR-TVSJ"],
+  "summary": "Implemented updateTick(int24 newTick) with inline TickBitmap for O(1) initialized-tick lookup. Added _crossTick for feeGrowthOutside flipping and liquidityNet application, _nextInitializedTick with MSB/LSB bitmap search, _setTickBitmapBit/_clearTickBitmapBit for bitmap management, lastOperatorActivityTimestamp for feature 8 silence detection. Modified _initializeTick to set bitmap bits on first use. Fixed edge case where mask computation in _nextInitializedTick underflowed when bitPos=255. Gas-bounded at 256 crossings per call."
+}

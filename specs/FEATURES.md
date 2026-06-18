@@ -32,3 +32,4 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
+| FEAT-TVS0 | Update Tick and Cross Ticks | Operator-driven tick synchronization that crosses initialized ticks, flips per-tick fee accumulators, and adjusts active liquidity for correct fee distribution | implemented |
