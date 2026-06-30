@@ -4,7 +4,7 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 1
+version: 2
 refs: []
 ---
 
@@ -18,7 +18,7 @@ refs: []
 - Does not handle fee distribution, tick updates, or fee collection -- see features 3-5
 - Does not handle position burning or deposit-then-credit orchestration -- see features 6-7
 - Does not handle vault wind-down or emergency cancel -- see feature 8
-- Does not manage vault-level role registries beyond initial setup during `initialize()` -- vault-side Admin ops use the same Auth pattern but are exercised by later features
+- Does not maintain vault-level role registries -- vaults delegate all operator, oracle, and admin authorization to the factory contract at call time
 
 ## Actors
 
@@ -57,8 +57,8 @@ Linked to: UC-REQ1
 
 ### Vault Initialization
 
-**FR-REQN** `When initialize() is called on a new vault clone, the system shall store marketId, USDC address, CTF Exchange address, ConditionalTokens address, oracle address, tickSpacing, and factory address in storage, copy the factory's operator and admin registries, and set the vault phase to Active.`
-Fit Criterion: Given a freshly initialized clone, all storage variables match factory-provided values, `phase == Active`, and the vault's role registry mirrors the factory's.
+**FR-REQN** `When initialize() is called on a new vault clone, the system shall store marketId, USDC address, CTF Exchange address, ConditionalTokens address, tickSpacing, and factory address in storage, and set the vault phase to Active.`
+Fit Criterion: Given a freshly initialized clone, all storage variables match factory-provided values, `phase == Active`, and the vault's `factory` address matches the deploying factory.
 Linked to: UC-REQ1
 
 **FR-REQO** `When initialize() is called on a new vault clone, the system shall grant the CTF Exchange unlimited ERC-20 approval for USDC and call setApprovalForAll on the ConditionalTokens contract for the CTF Exchange.`
@@ -71,6 +71,24 @@ Linked to: UC-REQ1
 
 **FR-REQQ** `If a non-factory address calls initialize() on a vault clone, then the system shall revert.`
 Fit Criterion: Given any address != factory, calling `initialize()` reverts with an onlyFactory error.
+Linked to: UC-REQ1
+
+### Factory-Delegated Authorization
+
+**FR-FKD0** `When any vault function requires operator authorization, the system shall read the caller's operator status from the factory contract's operator registry.`
+Fit Criterion: Given a vault with factory F, `onlyOperator` reverts unless `F.operators(msg.sender) == 1`. After `F.addOperator(addr)`, addr is immediately authorized on all vaults deployed by F. After `F.removeOperator(addr)`, addr is immediately rejected on all vaults deployed by F.
+Linked to: UC-REQ2
+
+**FR-FKD1** `When any vault function requires oracle authorization, the system shall read the oracle address from the factory contract.`
+Fit Criterion: Given a vault with factory F, `onlyOracle` reverts unless `msg.sender == F.oracle()`. After `F.setOracle(newOracle)`, the new oracle is immediately authorized on all vaults deployed by F and the old oracle is immediately rejected.
+Linked to: UC-REQ2
+
+**FR-FKD2** `When any vault function requires admin authorization, the system shall read the caller's admin status from the factory contract's admin registry.`
+Fit Criterion: Given a vault with factory F, `onlyAdmin` reverts unless `F.admins(msg.sender) == 1`.
+Linked to: UC-REQ2
+
+**FR-FKD3** `The vault shall not store operator, oracle, or admin registry state in its own storage.`
+Fit Criterion: Given a freshly initialized vault clone, no storage is written for `operators`, `oracle`, `admins`, `pendingAdmin`, or `adminCount`. All role authorization is resolved by querying the factory contract at call time.
 Linked to: UC-REQ1
 
 ### First-LP Inflation Protection
@@ -151,4 +169,6 @@ Linked to: UC-REQ2
 - Implementation contract cannot be initialized directly
 - Forge fmt passes; no console.log in production code
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
+- Factory role rotation (addOperator, removeOperator, setOracle, transferAdmin/acceptAdmin) propagates immediately to all existing vaults deployed by that factory
+- Vault clones contain no local role state (operators, oracle, admins, pendingAdmin, adminCount) -- all authorization delegated to factory
 - FEATURES.md status is `implemented`

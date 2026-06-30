@@ -3,7 +3,7 @@ id: UC-REQ1
 name: Create Vault for Market
 feature: FEAT-REPZ
 status: implemented
-version: 3
+version: 4
 actor: Oracle
 ---
 
@@ -31,7 +31,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 **Steps:**
 1. Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the factory
 2. System deploys an EIP-1167 minimal-proxy clone of the implementation contract
-3. System calls `initialize(marketId, usdc, exchange, conditionalTokens, oracle, tickSpacing, factory, minimumFirstLiquidity, operators, admins)` on the clone
+3. System calls `initialize(marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity)` on the clone
 4. Clone stores all config in storage (not immutable -- EIP-1167 constraint), sets `phase = Active`, sets `activeLiquidity = 0`, sets `minimumFirstLiquidity` to the passed value
 5. Clone approves CTF Exchange for unlimited USDC spending and calls `setApprovalForAll` on ConditionalTokens for the exchange
 6. System registers `vaultForMarket[marketId] = cloneAddress`
@@ -39,7 +39,8 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 **Outcomes:**
 - A new vault clone exists and is registered in the factory
 - The vault is in Active phase with `activeLiquidity == 0`, ready for the Operator to credit the first position
-- The minimum-first-liquidity floor is set to the Oracle-supplied value, so any non-Operator caller cannot create positions and the first Operator-driven mint must produce `liquidity >= minimumFirstLiquidity`
+- The vault delegates operator, oracle, and admin authorization to the factory contract -- no local role state is stored
+- The minimum-first-liquidity floor is set to the Oracle-supplied value
 
 **Side Effects:**
 - `VaultCreated(marketId, vaultAddress, minimumFirstLiquidity)` event emitted by the factory

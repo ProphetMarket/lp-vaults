@@ -2,8 +2,8 @@
 id: FEAT-REPZ
 name: Deploy LP Vault for a Market
 use_cases: [UC-REQ0, UC-REQ1, UC-REQ2]
-scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH]
-last_update: 2026-06-16
+scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5]
+last_update: 2026-06-30
 ---
 
 # Architecture: Deploy LP Vault for a Market
@@ -80,8 +80,7 @@ erDiagram
         address usdc "storage"
         address exchange "storage"
         address conditionalTokens "storage"
-        address oracle "storage"
-        address factory "storage, onlyFactory guard"
+        address factory "storage, onlyFactory guard + auth delegation"
         int24 tickSpacing "storage"
         uint128 minimumFirstLiquidity "storage, set by Oracle via createVault, updatable via setMinimumFirstLiquidity"
         uint8 phase "Active or WindDown"
@@ -108,14 +107,15 @@ erDiagram
         address pendingAdmin "two-step"
     }
     LPVAULTFACTORY ||--|| AUTH_REGISTRY : "has"
-    LPVAULT ||--|| AUTH_REGISTRY : "has (copied at init)"
+    LPVAULT ||--|| LPVAULTFACTORY : "delegates auth to"
 ```
 
 **Invariants:**
 - `vaultForMarket[marketId]` is either zero (no vault) or the deployed clone address (immutable once set)
-- `adminCount >= 1` always -- cannot remove the last admin
-- `oracle != operators[x]` for any x where `operators[x] == 1` -- role separation
+- `adminCount >= 1` always on the factory -- cannot remove the last admin
+- `oracle != operators[x]` for any x where `operators[x] == 1` on the factory -- role separation
 - Every vault clone's `factory` storage == the LPVaultFactory address that deployed it
+- Vaults hold no local role state (operators, oracle, admins, pendingAdmin, adminCount) -- all authorization reads delegated to factory
 - `initialized` flips from false to true exactly once per clone -- never resets
 - All position-creation entry points on the vault are gated by `onlyOperator` -- no direct LP mint path exists
 - When `activeLiquidity == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` or revert -- the first position is always materially large
@@ -164,7 +164,7 @@ erDiagram
 | call | `LPVaultFactory.setOracle(address)` | `setOracle` | onlyAdmin | `newOracle` | void | NotAdmin, RoleSeparation |
 | call | `LPVaultFactory.transferAdmin(address)` | `transferAdmin` | onlyAdmin | `newAdmin` | void | NotAdmin, ZeroAddress, AlreadyAdmin |
 | call | `LPVaultFactory.acceptAdmin()` | `acceptAdmin` | pendingAdmin only | none | void | NotPendingAdmin, AlreadyAdmin |
-| call | `LPVault.initialize(...)` | `initialize` | onlyFactory | `marketId, usdc, exchange, conditionalTokens, oracle, tickSpacing, factory, minimumFirstLiquidity` | void | AlreadyInitialized, NotFactory, ZeroFloor |
+| call | `LPVault.initialize(...)` | `initialize` | onlyFactory | `marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity` | void | AlreadyInitialized, NotFactory, ZeroFloor |
 
 ## Integration Points
 
@@ -219,14 +219,16 @@ stateDiagram-v2
 | SC-REQF | Set oracle revert (operator) | `src/LPVaultFactory.sol:setOracle()` |
 | SC-REQG | Two-step admin transfer | `src/LPVaultFactory.sol:transferAdmin()`, `src/LPVaultFactory.sol:acceptAdmin()` |
 | SC-REQH | Non-admin revert | `src/LPVaultFactory.sol:addOperator()`, `src/LPVaultFactory.sol:removeOperator()`, `src/LPVaultFactory.sol:setOracle()`, `src/LPVaultFactory.sol:transferAdmin()` |
+| SC-FKD4 | Operator rotation propagates to existing vaults | `src/LPVaultFactory.sol:removeOperator()`, `src/LPVaultFactory.sol:addOperator()`, `src/LPVault.sol:onlyOperator` |
+| SC-FKD5 | Oracle rotation propagates to existing vaults | `src/LPVaultFactory.sol:setOracle()`, `src/LPVault.sol:onlyOracle` |
 
 ## Architecture Decisions
 
 **ADR-RER0:** EIP-1167 clone pattern with storage-based config
 In the context of deploying one vault per market, facing the constraint that EIP-1167 clones share the implementation's bytecode (so `immutable` values are shared), we decided to store all per-vault configuration (`marketId`, `usdc`, `exchange`, `conditionalTokens`, `oracle`, `tickSpacing`) in storage set during `initialize()` to achieve correct per-vault isolation, accepting the marginal gas overhead of SLOAD vs. bytecode-embedded constants.
 
-**ADR-RER1:** Inlined Auth pattern mirroring ctf-exchange
-In the context of role management, facing the pattern policy that forbids importing library implementations, we decided to inline the Auth pattern from `ctf-exchange/lib/ctf-exchange/src/exchange/mixins/Auth.sol` verbatim (with the addition of `setOracle` and role separation checks) to achieve a smaller audit surface and no transitive dependency risk, accepting the code duplication across factory and vault.
+**ADR-RER1:** Inlined Auth pattern on factory, factory-delegated on vaults
+In the context of role management, facing the pattern policy that forbids importing library implementations, we decided to inline the Auth pattern from `ctf-exchange/lib/ctf-exchange/src/exchange/mixins/Auth.sol` on the factory (with the addition of `setOracle` and role separation checks) and have vaults delegate all role checks to the factory via cross-contract calls. This achieves a single source of truth for roles — key rotation on the factory propagates immediately to all existing vaults — while maintaining a smaller audit surface and no transitive dependency risk. We accept the marginal gas overhead of one SLOAD + CALL per gated vault function (cold ~2600 gas, warm ~100 gas per subsequent call in the same tx).
 
 **ADR-RFS9:** Operator-gated minting + per-vault minimum-first-liquidity floor for inflation-grief protection
 In the context of first-LP protection, facing the risk that a tiny first position can manipulate `feeGrowthGlobalX128` initialization (the v3 analog of the ERC-4626 first-depositor inflation attack), we decided to (a) route every position-creation entry point through an `onlyOperator` gate so no public mint path exists, and (b) enforce on-chain that the next mint while `activeLiquidity == 0` must produce `liquidity >= minimumFirstLiquidity`, where `minimumFirstLiquidity` is supplied per-market by the Oracle at `createVault` time and adjustable later via `setMinimumFirstLiquidity` (also `onlyOracle`). The floor cannot be set to zero. This achieves attack-resistance without locking capital per-vault while giving the Oracle per-market control to size the floor against expected market depth. We accept that the Operator is now in the path of every LP onboarding -- a trust assumption already established by the OPERATOR TRUST ASSUMPTION pattern in CLAUDE.md and mirrored from the CTF Exchange's operator-matched order flow -- and that lowering the floor requires a compromised Oracle to collude with a compromised Operator before an inflation grief becomes possible (two-of-two compromise).

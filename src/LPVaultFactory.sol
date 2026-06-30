@@ -49,12 +49,6 @@ contract LPVaultFactory {
     /// @notice Gnosis ConditionalTokens (ERC-1155) contract address
     address public immutable conditionalTokens;
 
-    /// @notice Initial admin address — passed to vault clones at init
-    address public immutable initialAdmin;
-
-    /// @notice Initial operator address — passed to vault clones at init
-    address public immutable initialOperator;
-
     // ──────────────────────────────────────────────
     // Vault registry
     // ──────────────────────────────────────────────
@@ -138,10 +132,6 @@ contract LPVaultFactory {
         exchange = exchange_;
         conditionalTokens = conditionalTokens_;
 
-        // Store initial roles for vault clone initialization
-        initialAdmin = admin_;
-        initialOperator = operator_;
-
         // Initialize Auth registry: one admin, one oracle, one operator
         admins[admin_] = 1;
         adminCount = 1;
@@ -177,20 +167,9 @@ contract LPVaultFactory {
         // CEI: register before external interaction (initialize calls approve on USDC/CT)
         vaultForMarket[marketId_] = vault;
 
-        // Initialize the clone with per-market configuration and copy role registry
+        // Initialize the clone with per-market configuration (role state delegated, not copied)
         LPVault(vault)
-            .initialize(
-                marketId_,
-                usdc,
-                exchange,
-                conditionalTokens,
-                oracle,
-                tickSpacing_,
-                address(this),
-                minimumFirstLiquidity_,
-                initialAdmin,
-                initialOperator
-            );
+            .initialize(marketId_, usdc, exchange, conditionalTokens, tickSpacing_, address(this), minimumFirstLiquidity_);
 
         emit VaultCreated(marketId_, vault, minimumFirstLiquidity_);
     }

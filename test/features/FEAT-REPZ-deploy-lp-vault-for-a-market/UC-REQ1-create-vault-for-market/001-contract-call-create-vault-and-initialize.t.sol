@@ -272,12 +272,9 @@ contract VaultReInitializeTest is Test {
                 makeAddr("usdc2"),
                 makeAddr("exchange2"),
                 makeAddr("ct2"),
-                makeAddr("oracle2"),
                 int24(20),
                 address(this),
-                uint128(2000),
-                makeAddr("admin2"),
-                makeAddr("operator2")
+                uint128(2000)
             );
     }
 }
@@ -328,12 +325,9 @@ contract VaultOnlyFactoryInitializeTest is Test {
                 makeAddr("usdc"),
                 makeAddr("exchange"),
                 makeAddr("ct"),
-                makeAddr("oracle"),
                 int24(10),
                 address(factory), // declared factory address that msg.sender doesn't match
-                uint128(1000),
-                makeAddr("admin"),
-                makeAddr("operator")
+                uint128(1000)
             );
     }
 
@@ -526,5 +520,169 @@ contract SetMinFirstLiqZeroTest is Test {
         vm.prank(oracleAddr);
         vm.expectRevert(LPVault.ZeroFloor.selector);
         vault.setMinimumFirstLiquidity(uint128(0));
+    }
+}
+
+// ──────────────────────────────────────────────
+// FR-FKD0: Vault operator auth delegates to factory
+// What: The vault's operators(addr) function reads from the factory's
+//       operator registry via cross-contract call, not from local storage.
+// Why:  Centralizing the operator registry on the factory means a single
+//       addOperator/removeOperator call propagates to every deployed vault
+//       instantly — no per-vault updates needed for key rotation.
+// Example: factory.operators(operatorAddr) == 1, vault.operators(operatorAddr) == 1.
+// ──────────────────────────────────────────────
+contract VaultOperatorDelegationTest is Test {
+    LPVaultFactory factory;
+    LPVault vault;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        MockConditionalTokens mockCt = new MockConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+        );
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+    }
+
+    // FR-FKD0: vault.operators(addr) returns factory.operators(addr)
+    function test_vaultOperatorsReadsFromFactory() public view {
+        assertEq(vault.operators(operatorAddr), factory.operators(operatorAddr));
+        assertEq(vault.operators(operatorAddr), uint256(1));
+    }
+
+    // FR-FKD0: non-operator returns 0 via delegation
+    function test_vaultOperatorsReturnsZeroForNonOperator() public {
+        address nobody = makeAddr("nobody");
+        assertEq(vault.operators(nobody), uint256(0));
+        assertEq(vault.operators(nobody), factory.operators(nobody));
+    }
+}
+
+// ──────────────────────────────────────────────
+// FR-FKD1: Vault oracle auth delegates to factory
+// What: The vault's oracle() function reads from the factory's oracle
+//       address via cross-contract call, not from local storage.
+// Why:  Oracle rotation on the factory takes immediate effect on all
+//       vaults — the vault never stores a stale oracle address.
+// Example: factory.oracle() == oracleAddr, vault.oracle() == oracleAddr.
+// ──────────────────────────────────────────────
+contract VaultOracleDelegationTest is Test {
+    LPVaultFactory factory;
+    LPVault vault;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        MockConditionalTokens mockCt = new MockConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+        );
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+    }
+
+    // FR-FKD1: vault.oracle() returns factory.oracle()
+    function test_vaultOracleReadsFromFactory() public view {
+        assertEq(vault.oracle(), factory.oracle());
+        assertEq(vault.oracle(), oracleAddr);
+    }
+}
+
+// ──────────────────────────────────────────────
+// FR-FKD2: Vault admin auth delegates to factory
+// What: The vault's admins(addr) function reads from the factory's admin
+//       registry via cross-contract call, not from local storage.
+// Why:  Admin transfers on the factory propagate to all vaults without
+//       needing per-vault admin management functions.
+// Example: factory.admins(admin) == 1, vault.admins(admin) == 1.
+// ──────────────────────────────────────────────
+contract VaultAdminDelegationTest is Test {
+    LPVaultFactory factory;
+    LPVault vault;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        MockConditionalTokens mockCt = new MockConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+        );
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+    }
+
+    // FR-FKD2: vault.admins(addr) returns factory.admins(addr)
+    function test_vaultAdminsReadsFromFactory() public view {
+        assertEq(vault.admins(admin), factory.admins(admin));
+        assertEq(vault.admins(admin), uint256(1));
+    }
+
+    // FR-FKD2: non-admin returns 0 via delegation
+    function test_vaultAdminsReturnsZeroForNonAdmin() public {
+        address nobody = makeAddr("nobody");
+        assertEq(vault.admins(nobody), uint256(0));
+        assertEq(vault.admins(nobody), factory.admins(nobody));
+    }
+}
+
+// ──────────────────────────────────────────────
+// FR-FKD3: Vault has no local role state
+// What: The vault does not write operators, oracle, admins, pendingAdmin,
+//       or adminCount to its own storage during initialize() — all role
+//       state is read from the factory at call time.
+// Why:  Local role copies create stale-registry risk. With no local state,
+//       there is nothing to go stale.
+// Example: vault created → vault.admins(admin) == 1 via factory delegation,
+//          but no admins mapping exists locally on the vault.
+// ──────────────────────────────────────────────
+contract VaultNoLocalRoleStateTest is Test {
+    LPVaultFactory factory;
+    LPVault vault;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        MockConditionalTokens mockCt = new MockConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+        );
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+    }
+
+    // FR-FKD3: vault delegation reflects live factory state.
+    // If the factory adds a new operator, the vault sees it immediately
+    // because it reads from factory, not from a local copy.
+    function test_vaultReflectsLiveFactoryState() public {
+        address newOp = makeAddr("newOperator");
+
+        // Before: vault doesn't recognize newOp as operator
+        assertEq(vault.operators(newOp), uint256(0));
+
+        // Factory adds newOp
+        vm.prank(admin);
+        factory.addOperator(newOp);
+
+        // After: vault immediately recognizes newOp (no vault-side update needed)
+        assertEq(vault.operators(newOp), uint256(1));
     }
 }

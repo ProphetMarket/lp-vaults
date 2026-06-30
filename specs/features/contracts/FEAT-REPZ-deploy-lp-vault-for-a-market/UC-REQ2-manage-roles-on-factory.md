@@ -3,7 +3,7 @@ id: UC-REQ2
 name: Manage Roles on Factory
 feature: FEAT-REPZ
 status: implemented
-version: 1
+version: 2
 actor: Admin
 ---
 
@@ -151,5 +151,50 @@ Admin calls a role-management function on the LPVaultFactory.
 **Side Effects:**
 - No state changes
 - No events emitted
+
+---
+
+### SC-FKD4: Operator rotation propagates to existing vaults
+
+**Given:**
+- Factory has operator A active (`operators[A] == 1`)
+- Vault V was created while operator A was active
+
+**Steps:**
+1. Admin calls `removeOperator(A)` on factory
+2. Admin calls `addOperator(B)` on factory
+3. Old operator A calls an operator-gated function on vault V
+4. New operator B calls an operator-gated function on vault V
+
+**Outcomes:**
+- Old operator A's call reverts with access control error
+- New operator B's call succeeds
+
+**Side Effects:**
+- `RemovedOperator(A, admin)` event emitted by factory at step 1
+- `NewOperator(B, admin)` event emitted by factory at step 2
+- No role-related state changes on vault V's storage (role state lives on factory)
+
+---
+
+### SC-FKD5: Oracle rotation propagates to existing vaults
+
+**Given:**
+- Factory has oracle X
+- Vault V was created while oracle X was active
+
+**Steps:**
+1. Admin calls `setOracle(Y)` on factory (Y is not a current operator)
+2. Old oracle X calls `setMinimumFirstLiquidity(newMin)` on vault V
+3. New oracle Y calls `setMinimumFirstLiquidity(newMin)` on vault V
+
+**Outcomes:**
+- Old oracle X's call reverts with access control error
+- New oracle Y's call succeeds and `minimumFirstLiquidity` is updated
+
+**Side Effects:**
+- Oracle-change state updated on factory at step 1
+- `MinimumFirstLiquidityUpdated` event emitted at step 3
+- No role-related state changes on vault V's storage
 
 ---

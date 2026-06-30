@@ -173,30 +173,24 @@ contract CloneInitializeSuccessTest is Test {
         address usdcAddr = address(new MockERC20());
         address exchangeAddr = makeAddr("exchange");
         address ctAddr = address(new MockConditionalTokens());
-        address oracleAddr = makeAddr("oracle");
         int24 spacing = int24(10);
         uint128 minLiq = uint128(1000);
 
-        vault.initialize(
-            mktId,
-            usdcAddr,
-            exchangeAddr,
-            ctAddr,
-            oracleAddr,
-            spacing,
-            address(this),
-            minLiq,
-            makeAddr("admin"),
-            makeAddr("operator")
+        // Deploy real factory so vault delegation works (FR-FKD0/1/2)
+        LPVaultFactory realFactory = new LPVaultFactory(
+            address(impl), usdcAddr, exchangeAddr, ctAddr,
+            makeAddr("admin"), makeAddr("oracle"), makeAddr("operator")
         );
 
-        // factory is set from msg.sender (this test contract)
-        assertEq(vault.factory(), address(this), "factory should be msg.sender");
+        vm.prank(address(realFactory));
+        vault.initialize(mktId, usdcAddr, exchangeAddr, ctAddr, spacing, address(realFactory), minLiq);
+
+        assertEq(vault.factory(), address(realFactory), "factory should be the real factory");
         assertEq(vault.marketId(), mktId, "marketId should match");
         assertEq(vault.usdc(), usdcAddr, "usdc should match");
         assertEq(vault.exchange(), exchangeAddr, "exchange should match");
         assertEq(vault.conditionalTokens(), ctAddr, "conditionalTokens should match");
-        assertEq(vault.oracle(), oracleAddr, "oracle should match");
+        assertEq(vault.oracle(), makeAddr("oracle"), "oracle should delegate to factory");
         assertEq(vault.tickSpacing(), spacing, "tickSpacing should match");
         assertEq(vault.minimumFirstLiquidity(), minLiq, "minimumFirstLiquidity should match");
     }
@@ -207,40 +201,23 @@ contract CloneInitializeSuccessTest is Test {
         address clone = _createClone(address(impl));
         LPVault vault = LPVault(clone);
 
-        // Deploy all mocks up front — vm.expectRevert only watches the next observable
-        // call/creation, so any `new Mock()` between expectRevert and the target call
-        // would consume the expectation.
         address usdc1 = address(new MockERC20());
         address ct1 = address(new MockConditionalTokens());
         address usdc2 = address(new MockERC20());
         address ct2 = address(new MockConditionalTokens());
 
-        vault.initialize(
-            bytes32(uint256(1)),
-            usdc1,
-            makeAddr("exchange"),
-            ct1,
-            makeAddr("oracle"),
-            int24(10),
-            address(this),
-            uint128(1000),
-            makeAddr("admin"),
-            makeAddr("operator")
+        // Deploy real factory so vault delegation works
+        LPVaultFactory realFactory = new LPVaultFactory(
+            address(impl), usdc1, makeAddr("exchange"), ct1,
+            makeAddr("admin"), makeAddr("oracle"), makeAddr("operator")
         );
 
+        vm.prank(address(realFactory));
+        vault.initialize(bytes32(uint256(1)), usdc1, makeAddr("exchange"), ct1, int24(10), address(realFactory), uint128(1000));
+
+        vm.prank(address(realFactory));
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
-        vault.initialize(
-            bytes32(uint256(2)),
-            usdc2,
-            makeAddr("exchange2"),
-            ct2,
-            makeAddr("oracle2"),
-            int24(20),
-            address(this),
-            uint128(2000),
-            makeAddr("admin2"),
-            makeAddr("operator2")
-        );
+        vault.initialize(bytes32(uint256(2)), usdc2, makeAddr("exchange2"), ct2, int24(20), address(realFactory), uint128(2000));
     }
 
     /// @dev Deploys an EIP-1167 minimal proxy clone of the given implementation.
@@ -275,16 +252,13 @@ contract ImplementationNotInitializableTest is Test {
         // Any call to initialize() should revert because _initialized is already true
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
         impl.initialize(
-            bytes32(uint256(1)), // marketId
+            bytes32(uint256(1)),
             makeAddr("usdc"),
             makeAddr("exchange"),
             makeAddr("ct"),
-            makeAddr("oracle"),
-            int24(10), // tickSpacing
-            address(this), // factory_
-            uint128(1000), // minimumFirstLiquidity
-            makeAddr("admin"),
-            makeAddr("operator")
+            int24(10),
+            address(this),
+            uint128(1000)
         );
     }
 }
@@ -364,6 +338,8 @@ contract VaultModifierTest is Test {
     address operatorAddr = makeAddr("operator");
     address nobody = makeAddr("nobody");
 
+    LPVaultFactory realFactory;
+
     function setUp() public {
         // Deploy a harness as the implementation
         LPVaultHarness implHarness = new LPVaultHarness();
@@ -372,21 +348,19 @@ contract VaultModifierTest is Test {
         address clone = _createClone(address(implHarness));
         vault = LPVaultHarness(clone);
 
-        // Initialize the clone — msg.sender (this contract) becomes factory
-        LPVault(clone)
-            .initialize(
-                bytes32(uint256(1)),
-                address(new MockERC20()),
-                makeAddr("exchange"),
-                address(new MockConditionalTokens()),
-                oracleAddr,
-                int24(10),
-                address(this),
-                uint128(1000),
-                admin,
-                operatorAddr
-            );
-        factoryAddr = address(this);
+        // Deploy real factory so vault modifier delegation works (FR-FKD0/1/2)
+        address usdcAddr = address(new MockERC20());
+        address ctAddr = address(new MockConditionalTokens());
+        realFactory = new LPVaultFactory(
+            address(implHarness), usdcAddr, makeAddr("exchange"), ctAddr, admin, oracleAddr, operatorAddr
+        );
+
+        // Initialize the clone from the real factory's address
+        vm.prank(address(realFactory));
+        LPVault(clone).initialize(
+            bytes32(uint256(1)), usdcAddr, makeAddr("exchange"), ctAddr, int24(10), address(realFactory), uint128(1000)
+        );
+        factoryAddr = address(realFactory);
     }
 
     function test_onlyFactoryRevertsForNonFactory() public {

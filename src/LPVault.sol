@@ -28,6 +28,14 @@ interface IERC1155 {
     function setApprovalForAll(address operator, bool approved) external;
 }
 
+/// @dev Minimal factory interface for auth delegation (FR-FKD0, FR-FKD1, FR-FKD2).
+///      Vault modifiers read role state from the factory at call time.
+interface ILPVaultFactory {
+    function operators(address) external view returns (uint256);
+    function oracle() external view returns (address);
+    function admins(address) external view returns (uint256);
+}
+
 /// @title LPVault
 /// @notice Per-market vault holding USDC and ERC-1155 outcome tokens. Deployed as EIP-1167
 ///         minimal-proxy clone by LPVaultFactory. Manages v3-style concentrated-liquidity
@@ -38,23 +46,22 @@ interface IERC1155 {
 ///      share the implementation's bytecode.
 contract LPVault {
     // ──────────────────────────────────────────────
-    // Auth registry (inlined — see pattern policy in CLAUDE.md)
+    // Auth delegation (FR-FKD0, FR-FKD1, FR-FKD2, FR-FKD3)
+    // Vault reads all role state from factory at call time.
+    // No local admins/operators/oracle/pendingAdmin/adminCount storage.
     // ──────────────────────────────────────────────
 
-    /// @dev 1 = active admin
-    mapping(address => uint256) public admins;
+    function operators(address addr) public view returns (uint256) {
+        return ILPVaultFactory(factory).operators(addr);
+    }
 
-    /// @dev 1 = active operator
-    mapping(address => uint256) public operators;
+    function oracle() public view returns (address) {
+        return ILPVaultFactory(factory).oracle();
+    }
 
-    /// @dev Always >= 1; cannot remove the last admin
-    uint256 public adminCount;
-
-    /// @dev Single oracle wallet; must never be an operator (role separation)
-    address public oracle;
-
-    /// @dev Two-step admin transfer target
-    address public pendingAdmin;
+    function admins(address addr) public view returns (uint256) {
+        return ILPVaultFactory(factory).admins(addr);
+    }
 
     // ──────────────────────────────────────────────
     // Per-vault configuration (storage because EIP-1167)
@@ -254,17 +261,17 @@ contract LPVault {
     }
 
     modifier onlyAdmin() {
-        if (admins[msg.sender] != 1) revert NotAdmin();
+        if (ILPVaultFactory(factory).admins(msg.sender) != 1) revert NotAdmin();
         _;
     }
 
     modifier onlyOperator() {
-        if (operators[msg.sender] != 1) revert NotOperator();
+        if (ILPVaultFactory(factory).operators(msg.sender) != 1) revert NotOperator();
         _;
     }
 
     modifier onlyOracle() {
-        if (msg.sender != oracle) revert NotOracle();
+        if (msg.sender != ILPVaultFactory(factory).oracle()) revert NotOracle();
         _;
     }
 
@@ -301,6 +308,8 @@ contract LPVault {
     /// @notice Initializes a freshly-deployed vault clone with per-market configuration.
     /// @dev Called exactly once by LPVaultFactory.createVault(). The factory_ param
     ///      must match msg.sender — defense-in-depth beyond the one-shot initializer.
+    ///      Role state (operators, oracle, admins) is NOT copied from the factory.
+    ///      The vault reads role state from the factory at call time via ILPVaultFactory.
     ///      Approval scope: setApprovalForAll(exchange, true) on the ConditionalTokens
     ///      is acceptable BECAUSE the vault holds outcome tokens for exactly one market —
     ///      token IDs for other markets cannot enter the vault (no entry point exists).
@@ -308,7 +317,6 @@ contract LPVault {
     /// @param usdc_ USDC ERC-20 address
     /// @param exchange_ ProphetCTFExchange address
     /// @param conditionalTokens_ Gnosis ConditionalTokens (ERC-1155) address
-    /// @param oracle_ Oracle wallet address (lifecycle control)
     /// @param tickSpacing_ Minimum tick increment for positions
     /// @param factory_ Factory contract address — must equal msg.sender
     /// @param minimumFirstLiquidity_ Floor for the first mint when activeLiquidity == 0
@@ -317,17 +325,14 @@ contract LPVault {
         address usdc_,
         address exchange_,
         address conditionalTokens_,
-        address oracle_,
         int24 tickSpacing_,
         address factory_,
-        uint128 minimumFirstLiquidity_,
-        address initialAdmin_,
-        address initialOperator_
+        uint128 minimumFirstLiquidity_
     ) external initializer {
         // Factory guard: caller must be the factory that deployed this clone
         if (msg.sender != factory_) revert NotFactory();
 
-        // Store factory address for future onlyFactory checks
+        // Store factory address for auth delegation and onlyFactory checks
         factory = factory_;
 
         // Store per-vault configuration
@@ -335,14 +340,8 @@ contract LPVault {
         usdc = usdc_;
         exchange = exchange_;
         conditionalTokens = conditionalTokens_;
-        oracle = oracle_;
         tickSpacing = tickSpacing_;
         minimumFirstLiquidity = minimumFirstLiquidity_;
-
-        // Copy initial role registry from factory (FR-REQN)
-        admins[initialAdmin_] = 1;
-        adminCount = 1;
-        operators[initialOperator_] = 1;
 
         // Set vault lifecycle to Active
         phase = 1;

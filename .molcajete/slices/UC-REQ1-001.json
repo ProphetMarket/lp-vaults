@@ -4,13 +4,13 @@
   "feature": "FEAT-REPZ",
   "objective": "implement",
   "status": "implemented",
-  "plan_id": "20260617T055202-deploy-lp-vault-for-market",
-  "completed_at": "2026-06-17T00:00:00Z",
+  "plan_id": "20260630T060432-factory-delegated-auth",
+  "completed_at": "2026-06-30T06:15:00Z",
   "files_touched": [
     "src/LPVault.sol",
     "src/LPVaultFactory.sol",
     "test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ1-create-vault-for-market/001-contract-call-create-vault-and-initialize.t.sol"
   ],
-  "covers": ["SC-REQ6", "SC-REQ7", "SC-REQ8", "SC-REQ9", "SC-REQA", "SC-RG74", "SC-RG75", "SC-RG76", "SC-RG77"],
-  "summary": "Added createVault(marketId, tickSpacing, minimumFirstLiquidity) to LPVaultFactory — gated by onlyOracle, validates non-zero floor, rejects duplicate marketId, deploys EIP-1167 clone, registers it in vaultForMarket, initializes it, and emits VaultCreated. LPVault.initialize() now takes factory_ as a parameter, enforces msg.sender == factory_ for defense-in-depth on top of the one-shot initializer, sets phase=Active, and approves the exchange on USDC (max) and ConditionalTokens (setApprovalForAll). Added setMinimumFirstLiquidity(newMin) onlyOracle with a zero guard and MinimumFirstLiquidityUpdated event. Adjusted the UC-REQ0 test file to pass the new factory_ param to initialize() and to use minimal MockERC20/MockConditionalTokens contracts for the approve/setApprovalForAll calls. Mutation check: 19/22 T-002 tests turned RED when createVault/initialize/setMinimumFirstLiquidity were replaced with revert(MUTANT). Coverage: LPVault.sol 87.88%, LPVaultFactory.sol 100% — both above the 80% threshold."
+  "covers": ["SC-REQ6", "SC-REQ7", "SC-REQ8", "SC-REQ9", "SC-REQA", "SC-RG74", "SC-RG75", "SC-RG76", "SC-RG77", "FR-FKD0", "FR-FKD1", "FR-FKD2", "FR-FKD3"],
+  "summary": "Removed local role storage (admins, operators, oracle, pendingAdmin, adminCount) from LPVault. Added ILPVaultFactory interface and delegating view functions. Vault modifiers now read from factory via cross-contract calls. initialize() reduced from 10 to 7 params. Factory initialAdmin/initialOperator storage removed. Tests updated to work with delegation model."
 }

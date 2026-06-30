@@ -1,0 +1,12 @@
+{
+  "id": "UC-REQ2-002",
+  "use_case": "UC-REQ2",
+  "feature": "FEAT-REPZ",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260630T060432-factory-delegated-auth",
+  "completed_at": "2026-06-30T06:15:00Z",
+  "files_touched": ["test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ2-manage-roles-on-factory/002-contract-call-role-propagation-to-vaults.t.sol"],
+  "covers": ["SC-FKD4", "SC-FKD5"],
+  "summary": "Added 8 integration tests verifying that factory role rotations (addOperator/removeOperator, setOracle) propagate immediately to existing vaults. Tests confirm old keys are rejected and new keys are accepted after rotation, with correct event emissions."
+}

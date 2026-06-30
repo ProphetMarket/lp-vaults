@@ -14,7 +14,7 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
-| FEAT-REPZ | Deploy LP Vault for a Market | Factory pattern and role registry for deploying per-market LP vaults as EIP-1167 clones with ghost position anti-griefing | pending |
+| FEAT-REPZ | Deploy LP Vault for a Market | Factory pattern and role registry for deploying per-market LP vaults as EIP-1167 clones with factory-delegated authorization | implemented |
 
 ## @positions
 
