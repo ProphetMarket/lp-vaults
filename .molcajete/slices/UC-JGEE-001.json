@@ -1,0 +1,12 @@
+{
+  "id": "UC-JGEE-001",
+  "use_case": "UC-JGEE",
+  "feature": "FEAT-JGE7",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260702T082522-start-wind-down",
+  "completed_at": "2026-07-02T08:27:00Z",
+  "files_touched": ["src/LPVault.sol"],
+  "covers": ["SC-JGEF", "SC-JGEG", "SC-JGEH", "SC-JGEI", "SC-JGEJ", "SC-JGEK", "FR-JGE8", "FR-JGE9", "FR-JGEA", "FR-JGEB", "FR-JGEC", "NFR-JGED"],
+  "summary": "Added startWindDown() function to LPVault.sol — Oracle-gated, one-way phase transition from Active (1) to WindDown (2). Emits VaultWindDownStarted(marketId). The existing phase guard on mintPositionFor (if phase != 1 revert VaultNotActive) automatically blocks mints in WindDown. collect and reclaimDeposit have no phase check and remain callable. 15 integration tests cover all 6 scenarios."
+}

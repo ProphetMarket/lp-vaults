@@ -17,6 +17,9 @@ pragma solidity 0.8.20;
 // FEAT-U079: Collect Fees on a Position
 // UC-U07A: Collect Position Fees
 // UC-U07A-001: collect-fees
+// FEAT-JGE7: Vault Wind-Down Lifecycle
+// UC-JGEE: Start Wind Down
+// UC-JGEE-001: start-wind-down
 
 /// @dev Minimal ERC-20 interface — only approve needed for exchange setup.
 interface IERC20 {
@@ -100,7 +103,7 @@ contract LPVault {
     // Vault state
     // ──────────────────────────────────────────────
 
-    /// @dev Phase lifecycle: 1 = Active
+    /// @dev Phase lifecycle: 1 = Active, 2 = WindDown
     uint8 public phase;
 
     /// @dev Running total of liquidity in range
@@ -240,6 +243,9 @@ contract LPVault {
     // ──────────────────────────────────────────────
 
     event MinimumFirstLiquidityUpdated(uint128 oldMin, uint128 newMin);
+
+    // SC-JGEF: emitted when Oracle transitions vault from Active to WindDown
+    event VaultWindDownStarted(bytes32 indexed marketId);
 
     // SC-TOGT, SC-TOGU: emitted when Operator distributes fee revenue
     event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
@@ -397,6 +403,21 @@ contract LPVault {
         minimumFirstLiquidity = newMin;
 
         emit MinimumFirstLiquidityUpdated(oldMin, newMin);
+    }
+
+    // SC-JGEF through SC-JGEK: Oracle-driven vault lifecycle transition
+    /// @notice Transitions the vault from Active to WindDown phase.
+    /// @dev One-way transition — there is no mechanism to revert from WindDown
+    ///      back to Active. Once in WindDown, mintPositionFor reverts (existing
+    ///      phase guard at the top of that function), while collect and
+    ///      reclaimDeposit remain callable so LPs can exit.
+    ///      ORACLE TRUST ASSUMPTION: The Oracle can freeze minting on any vault
+    ///      by calling startWindDown(). LPs must trust that the Oracle only
+    ///      triggers wind-down when the underlying market has resolved.
+    function startWindDown() external onlyOracle {
+        if (phase != 1) revert VaultNotActive();
+        phase = 2;
+        emit VaultWindDownStarted(marketId);
     }
 
     // ──────────────────────────────────────────────
