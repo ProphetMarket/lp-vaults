@@ -180,7 +180,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
         vm.prank(operatorAddr);
         uint256 posId = vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
 
-        (address owner, int24 tl, int24 tu, uint128 liq, uint256 feeGrowthLast, uint256 owed) = vault.positions(posId);
+        (address owner, int24 tl, int24 tu, uint128 liq,, uint256 owed) = vault.positions(posId);
         assertEq(owner, lp, "position owner should be LP");
         assertEq(tl, tickLower, "tickLower should match");
         assertEq(tu, tickUpper, "tickUpper should match");
@@ -601,7 +601,7 @@ contract MintPositionSignatureTest is MintPositionTestBase {
         bytes32 structHash =
             keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, int24(20), int24(80), uint256(600), intentId));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(LP_PK, digest);
+        (, bytes32 r, bytes32 s) = vm.sign(LP_PK, digest);
 
         // Set v to invalid value (not 27 or 28)
         bytes memory badVSig = abi.encodePacked(r, s, uint8(26));
