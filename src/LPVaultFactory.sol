@@ -169,7 +169,9 @@ contract LPVaultFactory {
 
         // Initialize the clone with per-market configuration (role state delegated, not copied)
         LPVault(vault)
-            .initialize(marketId_, usdc, exchange, conditionalTokens, tickSpacing_, address(this), minimumFirstLiquidity_);
+            .initialize(
+                marketId_, usdc, exchange, conditionalTokens, tickSpacing_, address(this), minimumFirstLiquidity_
+            );
 
         emit VaultCreated(marketId_, vault, minimumFirstLiquidity_);
     }

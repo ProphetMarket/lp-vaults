@@ -23,6 +23,7 @@
 |----|---------|-------------|--------|
 | FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation with EIP-712 signed intents, v3-style tick initialization, and fee-snapshot anchoring | implemented |
 | FEAT-U079 | Collect Fees on a Position | LP withdraws accumulated trading fees from a position using the v3 feeGrowthInside accumulator with snapshot-based double-counting prevention | implemented |
+| FEAT-JAIJ | LP Escape Hatch | LP-initiated USDC recovery when the Operator fails to fulfill a signed mint intent within RECLAIM_TIMELOCK | pending |
 
 ## @fees
 

@@ -1,0 +1,15 @@
+{
+  "id": "UC-JAIK-001",
+  "use_case": "UC-JAIK",
+  "feature": "FEAT-JAIJ",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260702T062557-reclaim-deposit-escape-hatch",
+  "completed_at": "2026-07-02T06:30:00Z",
+  "files_touched": [
+    "src/LPVault.sol",
+    "test/features/FEAT-JAIJ-lp-escape-hatch/UC-JAIK-reclaim-deposit/001-contract-call-reclaim-deposit.t.sol"
+  ],
+  "covers": ["SC-JAIL", "SC-JAIM", "SC-JAIN", "SC-JAIO", "SC-JAIP", "FR-JAIQ", "FR-JAIR", "FR-JAIS", "FR-JAIT", "FR-JAIU", "FR-JAIV", "NFR-JAIW", "NFR-JAIX"],
+  "summary": "Implemented two-phase reclaimDeposit function on LPVault (ADR-JB78). Phase 1 records intentTimestamps, Phase 2 executes USDC refund after RECLAIM_TIMELOCK (24h). Added _verifyOperatorSignature for operator co-signature validation. 15 tests covering all 5 scenarios plus FR/NFR requirements. Also fixed pre-existing _setPhase storage slot bug in 3 other test files (slot 10 → slot 5)."
+}

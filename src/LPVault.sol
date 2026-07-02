@@ -148,6 +148,16 @@ contract LPVault {
     mapping(bytes32 => bool) public usedIntents;
 
     // ──────────────────────────────────────────────
+    // Reclaim state (FEAT-JAIJ)
+    // ──────────────────────────────────────────────
+
+    /// @dev intentId => block.timestamp when Phase 1 (reclaim submission) was called.
+    ///      Set exactly once per intentId; never updated. Used by reclaimDeposit Phase 2
+    ///      to enforce RECLAIM_TIMELOCK. Would be immutable in a non-clone contract;
+    ///      storage because EIP-1167.
+    mapping(bytes32 => uint256) public intentTimestamps;
+
+    // ──────────────────────────────────────────────
     // TickBitmap (FEAT-TVS0)
     // ──────────────────────────────────────────────
 
@@ -185,6 +195,11 @@ contract LPVault {
     ///      updateTick call. Prevents gas griefing on large price moves.
     uint256 internal constant MAX_TICK_CROSSINGS = 256;
 
+    /// @dev Minimum wait between Phase 1 (reclaim submission) and Phase 2 (execution).
+    ///      24 hours = 86400 seconds. Polygon block.timestamp tolerance is ±15s, which
+    ///      is negligible at this scale.
+    uint256 public constant RECLAIM_TIMELOCK = 24 hours;
+
     // ──────────────────────────────────────────────
     // Reentrancy guard (inlined per pattern policy in CLAUDE.md)
     // ──────────────────────────────────────────────
@@ -217,6 +232,8 @@ contract LPVault {
     error TooManyTicksCrossed();
     error NotPositionOwner();
     error PositionNotFound();
+    error TimelockNotElapsed();
+    error NotIntentOwner();
 
     // ──────────────────────────────────────────────
     // Events
@@ -232,6 +249,12 @@ contract LPVault {
 
     // SC-U07B, SC-U07F, SC-U07G: emitted when LP collects nonzero fees
     event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
+
+    // SC-JAIL: emitted on Phase 1 of reclaimDeposit (records submission timestamp)
+    event ReclaimSubmitted(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
+
+    // SC-JAIL: emitted on Phase 2 of reclaimDeposit (USDC transferred to LP)
+    event DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
 
     // SC-T7AH, SC-T7AI, SC-T7AJ: emitted on every successful position mint
     event PositionMinted(
@@ -512,6 +535,77 @@ contract LPVault {
     }
 
     // ──────────────────────────────────────────────
+    // Deposit reclaim (FEAT-JAIJ, UC-JAIK)
+    // ──────────────────────────────────────────────
+
+    // SC-JAIL through SC-JAIP: two-phase LP escape hatch for unfulfilled mint intents
+    /// @notice Allows an LP to reclaim USDC deposited via the deposit-then-credit flow when
+    ///         the Operator fails to call mintPositionFor. Two-phase operation (ADR-JB78):
+    ///         Phase 1 (first call): records intentTimestamps[intentId] = block.timestamp and
+    ///         emits ReclaimSubmitted. Phase 2 (after RECLAIM_TIMELOCK): marks usedIntents,
+    ///         transfers usdcAmount back to the LP, and emits DepositReclaimed.
+    /// @dev OPERATOR TRUST ASSUMPTION: The Operator's co-signature attests that the deposit
+    ///      was received. LPs must trust that the Operator signs promptly and honestly. A
+    ///      dishonest Operator who refuses to co-sign can block reclaim, but the LP's USDC
+    ///      is still recoverable via emergencyCancelAll (feature 8, not yet implemented).
+    /// @param lp LP wallet address — must match msg.sender and LP EIP-712 signature
+    /// @param tickLower Lower tick bound from the original MintIntent
+    /// @param tickUpper Upper tick bound from the original MintIntent
+    /// @param usdcAmount USDC amount from the original MintIntent
+    /// @param intentId Unique identifier from the original MintIntent
+    /// @param lpSignature EIP-712 signature from the LP over the MintIntent struct
+    /// @param operatorSignature EIP-712 signature from a registered Operator over the same MintIntent
+    function reclaimDeposit(
+        address lp,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 usdcAmount,
+        bytes32 intentId,
+        bytes calldata lpSignature,
+        bytes calldata operatorSignature
+    ) external nonReentrant {
+        // --- Checks ---
+
+        // Caller must be the LP named in the intent
+        if (msg.sender != lp) revert NotIntentOwner();
+
+        // Verify LP's EIP-712 signature over the MintIntent struct
+        _verifyMintIntent(lp, tickLower, tickUpper, usdcAmount, intentId, lpSignature);
+
+        // Verify operator's EIP-712 signature over the same MintIntent struct
+        // and confirm the recovered signer is a registered operator
+        _verifyOperatorSignature(lp, tickLower, tickUpper, usdcAmount, intentId, operatorSignature);
+
+        // Replay protection: intentId must not have been used by mintPositionFor or a prior reclaim
+        if (usedIntents[intentId]) revert IntentAlreadyUsed();
+
+        // --- Phase 1: Record submission timestamp ---
+
+        if (intentTimestamps[intentId] == 0) {
+            intentTimestamps[intentId] = block.timestamp;
+            emit ReclaimSubmitted(intentId, lp, usdcAmount);
+            return;
+        }
+
+        // --- Phase 2: Execute reclaim after timelock ---
+
+        // Timelock must have elapsed since Phase 1 submission
+        if (block.timestamp - intentTimestamps[intentId] < RECLAIM_TIMELOCK) {
+            revert TimelockNotElapsed();
+        }
+
+        // --- Effects ---
+
+        // Mark intentId as used to prevent double-refund and mutual exclusion with mintPositionFor
+        usedIntents[intentId] = true;
+
+        // --- Interactions (external calls last, per checks-effects-interactions) ---
+
+        _safeTransfer(usdc, lp, usdcAmount);
+        emit DepositReclaimed(intentId, lp, usdcAmount);
+    }
+
+    // ──────────────────────────────────────────────
     // Fee notification (FEAT-TOGR, UC-TOGS)
     // ──────────────────────────────────────────────
 
@@ -634,6 +728,45 @@ contract LPVault {
         // Recover the signer and verify it matches the declared LP address
         address signer = ecrecover(digest, v, r, s);
         if (signer == address(0) || signer != lp) revert InvalidSignature();
+    }
+
+    /// @dev Verifies that `signature` is a valid EIP-712 signature from a registered operator
+    ///      over a MintIntent struct with the given fields. Same digest as _verifyMintIntent
+    ///      (operator signs the same struct), but the recovered signer is checked against the
+    ///      factory's operator registry instead of a declared address.
+    ///      Rejects malleable signatures (high-s) and invalid v values per CLAUDE.md rule 5.
+    function _verifyOperatorSignature(
+        address lp,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 usdcAmount,
+        bytes32 intentId,
+        bytes calldata signature
+    ) internal view {
+        // Build the EIP-712 digest (same struct as _verifyMintIntent)
+        bytes32 structHash = keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, tickLower, tickUpper, usdcAmount, intentId));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+
+        // Decode the 65-byte signature into r, s, v
+        if (signature.length != 65) revert InvalidSignature();
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+        assembly {
+            r := calldataload(signature.offset)
+            s := calldataload(add(signature.offset, 0x20))
+            v := byte(0, calldataload(add(signature.offset, 0x40)))
+        }
+
+        // Reject malleable signatures: s must be in the lower half of secp256k1's order
+        if (uint256(s) > SECP256K1N_HALF) revert InvalidSignature();
+
+        // v must be 27 or 28 — reject all other values
+        if (v != 27 && v != 28) revert InvalidSignature();
+
+        // Recover the signer and verify it is a registered operator via factory delegation
+        address signer = ecrecover(digest, v, r, s);
+        if (signer == address(0) || ILPVaultFactory(factory).operators(signer) != 1) revert InvalidSignature();
     }
 
     // ──────────────────────────────────────────────

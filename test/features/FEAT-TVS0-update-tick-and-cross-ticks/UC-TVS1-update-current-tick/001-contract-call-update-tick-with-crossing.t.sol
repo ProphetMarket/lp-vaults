@@ -132,7 +132,6 @@ contract UpdateTickTestBase is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
     }
-
 }
 
 // ──────────────────────────────────────────────
@@ -516,12 +515,12 @@ contract UpdateTickNotActiveTest is UpdateTickTestBase {
     function setUp() public override {
         super.setUp();
         // Set phase to 2 (WindDown) via direct storage write.
-        // phase is at slot 10, offset 17 (packed with minimumFirstLiquidity and _initialized).
-        bytes32 slot10 = vm.load(address(vault), bytes32(uint256(10)));
+        // phase is at slot 5, offset 17 (packed with minimumFirstLiquidity and _initialized).
+        bytes32 slot5 = vm.load(address(vault), bytes32(uint256(5)));
         // Clear byte at offset 17 and set to 2
         bytes32 mask = ~(bytes32(uint256(0xFF)) << (17 * 8));
-        bytes32 newVal = (slot10 & mask) | (bytes32(uint256(2)) << (17 * 8));
-        vm.store(address(vault), bytes32(uint256(10)), newVal);
+        bytes32 newVal = (slot5 & mask) | (bytes32(uint256(2)) << (17 * 8));
+        vm.store(address(vault), bytes32(uint256(5)), newVal);
     }
 
     // SC-TVS8: reverts with VaultNotActive

@@ -125,8 +125,9 @@ contract CollectFeesTestBase is Test {
         uint256 usdcAmount,
         bytes32 intentId
     ) internal view returns (bytes memory) {
-        bytes32 structHash =
-            keccak256(abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId));
+        bytes32 structHash = keccak256(
+            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
+        );
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
@@ -335,12 +336,12 @@ contract CollectFeesDuringWindDownTest is CollectFeesTestBase {
 
         // Transition vault to WindDown phase (phase = 2).
         // startWindDown is not yet implemented (feature 8), so we write storage directly.
-        // phase is at slot 10, offset 17 (packed with minimumFirstLiquidity and _initialized).
-        bytes32 slot10 = vm.load(address(vault), bytes32(uint256(10)));
+        // phase is at slot 5, offset 17 (packed with minimumFirstLiquidity and _initialized).
+        bytes32 slot5 = vm.load(address(vault), bytes32(uint256(5)));
         bytes32 phaseMask = bytes32(uint256(0xFF) << 136);
         bytes32 newPhase = bytes32(uint256(2) << 136);
-        slot10 = (slot10 & ~phaseMask) | newPhase;
-        vm.store(address(vault), bytes32(uint256(10)), slot10);
+        slot5 = (slot5 & ~phaseMask) | newPhase;
+        vm.store(address(vault), bytes32(uint256(5)), slot5);
         assertEq(vault.phase(), 2, "precondition: vault should be in WindDown");
     }
 

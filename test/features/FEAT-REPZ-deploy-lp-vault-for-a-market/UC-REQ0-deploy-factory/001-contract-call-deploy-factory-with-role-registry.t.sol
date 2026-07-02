@@ -178,8 +178,7 @@ contract CloneInitializeSuccessTest is Test {
 
         // Deploy real factory so vault delegation works (FR-FKD0/1/2)
         LPVaultFactory realFactory = new LPVaultFactory(
-            address(impl), usdcAddr, exchangeAddr, ctAddr,
-            makeAddr("admin"), makeAddr("oracle"), makeAddr("operator")
+            address(impl), usdcAddr, exchangeAddr, ctAddr, makeAddr("admin"), makeAddr("oracle"), makeAddr("operator")
         );
 
         vm.prank(address(realFactory));
@@ -208,16 +207,19 @@ contract CloneInitializeSuccessTest is Test {
 
         // Deploy real factory so vault delegation works
         LPVaultFactory realFactory = new LPVaultFactory(
-            address(impl), usdc1, makeAddr("exchange"), ct1,
-            makeAddr("admin"), makeAddr("oracle"), makeAddr("operator")
+            address(impl), usdc1, makeAddr("exchange"), ct1, makeAddr("admin"), makeAddr("oracle"), makeAddr("operator")
         );
 
         vm.prank(address(realFactory));
-        vault.initialize(bytes32(uint256(1)), usdc1, makeAddr("exchange"), ct1, int24(10), address(realFactory), uint128(1000));
+        vault.initialize(
+            bytes32(uint256(1)), usdc1, makeAddr("exchange"), ct1, int24(10), address(realFactory), uint128(1000)
+        );
 
         vm.prank(address(realFactory));
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
-        vault.initialize(bytes32(uint256(2)), usdc2, makeAddr("exchange2"), ct2, int24(20), address(realFactory), uint128(2000));
+        vault.initialize(
+            bytes32(uint256(2)), usdc2, makeAddr("exchange2"), ct2, int24(20), address(realFactory), uint128(2000)
+        );
     }
 
     /// @dev Deploys an EIP-1167 minimal proxy clone of the given implementation.
@@ -357,9 +359,16 @@ contract VaultModifierTest is Test {
 
         // Initialize the clone from the real factory's address
         vm.prank(address(realFactory));
-        LPVault(clone).initialize(
-            bytes32(uint256(1)), usdcAddr, makeAddr("exchange"), ctAddr, int24(10), address(realFactory), uint128(1000)
-        );
+        LPVault(clone)
+            .initialize(
+                bytes32(uint256(1)),
+                usdcAddr,
+                makeAddr("exchange"),
+                ctAddr,
+                int24(10),
+                address(realFactory),
+                uint128(1000)
+            );
         factoryAddr = address(realFactory);
     }
 

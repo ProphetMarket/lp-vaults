@@ -136,10 +136,10 @@ contract MintPositionTestBase is Test {
     }
 
     /// @dev Sets the vault's phase via direct storage manipulation.
-    ///      phase is a uint8 at slot 10, byte offset 17 (bits 136-143), packed with
+    ///      phase is a uint8 at slot 5, byte offset 17 (bits 136-143), packed with
     ///      minimumFirstLiquidity (bytes 0-15) and _initialized (byte 16).
     function _setPhase(uint8 p) internal {
-        bytes32 slot = bytes32(uint256(10));
+        bytes32 slot = bytes32(uint256(5));
         bytes32 current = vm.load(address(vault), slot);
         bytes32 mask = ~bytes32(uint256(0xFF) << 136);
         bytes32 updated = (current & mask) | bytes32(uint256(p) << 136);
