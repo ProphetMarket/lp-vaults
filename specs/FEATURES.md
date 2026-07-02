@@ -15,6 +15,7 @@
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
 | FEAT-REPZ | Deploy LP Vault for a Market | Factory pattern and role registry for deploying per-market LP vaults as EIP-1167 clones with factory-delegated authorization | implemented |
+| FEAT-J92H | Deploy Contracts | Foundry deploy script that deploys LPVault implementation and LPVaultFactory with env-var-driven configuration for Polygon Amoy and mainnet | implemented |
 
 ## @positions
 

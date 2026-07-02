@@ -1,0 +1,12 @@
+{
+  "id": "UC-J92I-001",
+  "use_case": "UC-J92I",
+  "feature": "FEAT-J92H",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260701T000100-deploy-contracts",
+  "completed_at": "2026-07-01T00:02:00Z",
+  "files_touched": ["script/Deploy.s.sol", "test/features/FEAT-J92H-deploy-contracts/UC-J92I-deploy-factory-and-implementation/001-contract-call-deploy-script.t.sol"],
+  "covers": ["SC-J92J", "SC-J92K", "SC-J92L", "SC-J92M", "FR-J92N", "FR-J92O", "FR-J92P", "FR-J92Q", "FR-J92R", "FR-J92S", "FR-J92T"],
+  "summary": "Created Foundry deploy script (script/Deploy.s.sol) with env-var-driven configuration. The script reads 6 address env vars and PRIVATE_KEY, validates all addresses are non-zero before broadcasting, deploys LPVault implementation (with _disableInitializers) then LPVaultFactory with all addresses as constructor args, and logs both deployed addresses. deploy() is public so tests can call it directly, avoiding vm.setEnv cross-test pollution. 18 tests cover happy path (10 assertions), zero-address validation (6 per-env-var), role separation revert, and verification-equivalent deployment."
+}
