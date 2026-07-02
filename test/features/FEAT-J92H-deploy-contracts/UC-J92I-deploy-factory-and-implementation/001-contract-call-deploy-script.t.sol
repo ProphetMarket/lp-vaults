@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
+// FEAT-J92H: Deploy Contracts
 // UC-J92I: Deploy Factory and Implementation
 // SLICE-001: deploy-script
 
@@ -10,13 +11,12 @@ import {LPVault} from "../../../../src/LPVault.sol";
 import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
 
 // SC-J92J: Successful deployment with valid configuration
-// What: Running the deploy script with all valid, distinct addresses deploys both
+// What: Running the deploy helper with all valid, distinct addresses deploys both
 //       LPVault implementation and LPVaultFactory, with the factory's on-chain state
 //       matching every provided address.
-// Why:  The deploy script is the single entry point for production deployment.
-//       If any address is wired incorrectly, the entire vault system is misconfigured
-//       and all downstream operations (createVault, mintPosition, etc.) will fail.
-// Example: deploy(key, usdc, exchange, ct, admin, oracle, operator)
+// Why:  The deploy helper is the core deployment logic shared by run() and tests.
+//       If any address is wired incorrectly, the entire vault system is misconfigured.
+// Example: deploy(usdc, exchange, ct, admin, oracle, operator)
 //          → factory.usdc() == usdc, factory.implementation() == deployed LPVault.
 contract DeployScriptSuccessTest is Test {
     DeployScript script;
@@ -29,12 +29,10 @@ contract DeployScriptSuccessTest is Test {
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
     address operatorAddr = makeAddr("operator");
-    uint256 deployerKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
 
     function setUp() public {
         script = new DeployScript();
-        (lpVault, factory) =
-            script.deploy(deployerKey, usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+        (lpVault, factory) = script.deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
     }
 
     // SC-J92J: LPVault implementation is deployed at a non-zero address
@@ -96,16 +94,14 @@ contract DeployScriptSuccessTest is Test {
 }
 
 // SC-J92K: Missing environment variable
-// What: The deploy script must revert before broadcasting any transaction when
+// What: The deploy helper must revert before deploying any contract when
 //       any required address is the zero address.
 // Why:  Deploying with a zero address for USDC, exchange, or any role wallet
-//       would create a permanently broken factory — the immutable addresses
-//       cannot be changed after deployment. Fail-fast prevents wasted gas and
-//       a bricked deployment.
-// Example: deploy(key, address(0), ...) → revert ZeroAddress("USDC_ADDRESS").
+//       would create a permanently broken factory — the addresses cannot be
+//       changed after deployment. Fail-fast prevents wasted gas.
+// Example: deploy(address(0), ...) → revert ZeroAddress("USDC_ADDRESS").
 contract DeployScriptZeroAddressTest is Test {
     DeployScript script;
-    uint256 deployerKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
 
     address usdc = makeAddr("usdc");
     address exchange = makeAddr("exchange");
@@ -121,37 +117,37 @@ contract DeployScriptZeroAddressTest is Test {
     // SC-J92K: USDC_ADDRESS set to zero address
     function test_revertsWhenUsdcIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "USDC_ADDRESS"));
-        script.deploy(deployerKey, address(0), exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+        script.deploy(address(0), exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
     }
 
     // SC-J92K: EXCHANGE_ADDRESS set to zero address
     function test_revertsWhenExchangeIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "EXCHANGE_ADDRESS"));
-        script.deploy(deployerKey, usdc, address(0), conditionalTokens, admin, oracleAddr, operatorAddr);
+        script.deploy(usdc, address(0), conditionalTokens, admin, oracleAddr, operatorAddr);
     }
 
     // SC-J92K: CONDITIONAL_TOKENS_ADDRESS set to zero address
     function test_revertsWhenConditionalTokensIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "CONDITIONAL_TOKENS_ADDRESS"));
-        script.deploy(deployerKey, usdc, exchange, address(0), admin, oracleAddr, operatorAddr);
+        script.deploy(usdc, exchange, address(0), admin, oracleAddr, operatorAddr);
     }
 
     // SC-J92K: ADMIN_ADDRESS set to zero address
     function test_revertsWhenAdminIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "ADMIN_ADDRESS"));
-        script.deploy(deployerKey, usdc, exchange, conditionalTokens, address(0), oracleAddr, operatorAddr);
+        script.deploy(usdc, exchange, conditionalTokens, address(0), oracleAddr, operatorAddr);
     }
 
     // SC-J92K: ORACLE_ADDRESS set to zero address
     function test_revertsWhenOracleIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "ORACLE_ADDRESS"));
-        script.deploy(deployerKey, usdc, exchange, conditionalTokens, admin, address(0), operatorAddr);
+        script.deploy(usdc, exchange, conditionalTokens, admin, address(0), operatorAddr);
     }
 
     // SC-J92K: OPERATOR_ADDRESS set to zero address
     function test_revertsWhenOperatorIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "OPERATOR_ADDRESS"));
-        script.deploy(deployerKey, usdc, exchange, conditionalTokens, admin, oracleAddr, address(0));
+        script.deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, address(0));
     }
 }
 
@@ -161,39 +157,31 @@ contract DeployScriptZeroAddressTest is Test {
 //       violates role separation.
 // Why:  Oracle and Operator are separate trust domains (CLAUDE.md hard rule).
 //       Compromise of one must not unlock the other's powers. The factory
-//       constructor enforces this; the deploy script surfaces the revert.
-// Example: deploy(key, ..., oracle=0xABC, operator=0xABC) → revert RoleSeparation.
+//       constructor enforces this; the deploy helper surfaces the revert.
+// Example: deploy(..., oracle=0xABC, operator=0xABC) → revert RoleSeparation.
 contract DeployScriptRoleSeparationTest is Test {
     // SC-J92L: deployment reverts when oracle == operator
     function test_revertsWhenOracleEqualsOperator() public {
         DeployScript script = new DeployScript();
-        uint256 deployerKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
         address sameAddr = makeAddr("sameAddr");
 
         vm.expectRevert(LPVaultFactory.RoleSeparation.selector);
         script.deploy(
-            deployerKey,
-            makeAddr("usdc"),
-            makeAddr("exchange"),
-            makeAddr("conditionalTokens"),
-            makeAddr("admin"),
-            sameAddr,
-            sameAddr
+            makeAddr("usdc"), makeAddr("exchange"), makeAddr("conditionalTokens"), makeAddr("admin"), sameAddr, sameAddr
         );
     }
 }
 
 // SC-J92M: Deployment with contract verification
-// What: The deploy script produces identical deployment results regardless of
+// What: The deploy helper produces identical deployment results regardless of
 //       whether --verify is passed. Verification is a Foundry CLI-level concern.
-// Why:  This test verifies the script's core deployment logic is correct.
+// Why:  This test verifies the helper's core deployment logic is correct.
 //       The --verify flag is handled by Foundry's CLI, not script logic.
 // Note: Actual Polygonscan verification is tested operationally, not in-EVM.
 contract DeployScriptVerificationTest is Test {
     // SC-J92M: deployment produces same results (verification is a CLI flag)
     function test_deploymentProducesSameResultsRegardlessOfVerifyFlag() public {
         DeployScript script = new DeployScript();
-        uint256 deployerKey = 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80;
         address usdc = makeAddr("usdc");
         address exchange = makeAddr("exchange");
         address conditionalTokens = makeAddr("conditionalTokens");
@@ -202,9 +190,8 @@ contract DeployScriptVerificationTest is Test {
         address operatorAddr = makeAddr("operator");
 
         (LPVault lpVault, LPVaultFactory factory) =
-            script.deploy(deployerKey, usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+            script.deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
 
-        // Same assertions as SC-J92J — deployment logic is identical
         assertTrue(address(lpVault) != address(0), "LPVault impl should be deployed");
         assertTrue(address(factory) != address(0), "Factory should be deployed");
         assertEq(factory.implementation(), address(lpVault), "implementation should match");
@@ -214,5 +201,33 @@ contract DeployScriptVerificationTest is Test {
         assertEq(factory.admins(admin), 1, "admin should be registered");
         assertEq(factory.oracle(), oracleAddr, "oracle should match");
         assertEq(factory.operators(operatorAddr), 1, "operator should be registered");
+    }
+}
+
+// SC-K49S: Script does not read raw private keys
+// What: The deploy() function does not accept a private key parameter and
+//       does not manage vm.startBroadcast/vm.stopBroadcast. Signing is
+//       delegated entirely to Foundry's CLI-level wallet management.
+// Why:  Raw private keys in environment variables are a security risk —
+//       they can leak via shell history, process listings, and CI logs.
+//       Cast wallets (encrypted keystores) and hardware wallets eliminate
+//       this attack surface.
+// Example: deploy(usdc, exchange, ct, admin, oracle, operator) — no key param.
+contract DeployScriptNoPrivateKeyTest is Test {
+    // SC-K49S: deploy() accepts only address parameters, no private key
+    function test_deployAcceptsOnlyAddressParams() public {
+        DeployScript script = new DeployScript();
+        address usdc = makeAddr("usdc");
+        address exchange = makeAddr("exchange");
+        address conditionalTokens = makeAddr("conditionalTokens");
+        address admin = makeAddr("admin");
+        address oracleAddr = makeAddr("oracle");
+        address operatorAddr = makeAddr("operator");
+
+        (LPVault lpVault, LPVaultFactory factory) =
+            script.deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+
+        assertTrue(address(lpVault) != address(0), "deploy() should work without a private key parameter");
+        assertTrue(address(factory) != address(0), "deploy() should work without a private key parameter");
     }
 }

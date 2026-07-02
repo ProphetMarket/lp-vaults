@@ -3,7 +3,7 @@ id: UC-J92I
 name: Deploy Factory and Implementation
 feature: FEAT-J92H
 status: implemented
-version: 1
+version: 2
 actor: Factory Owner
 ---
 
@@ -14,26 +14,28 @@ actor: Factory Owner
 ## Preconditions
 
 - Factory Owner has a funded wallet on the target chain (Polygon Amoy or mainnet)
-- Environment variables are set: PRIVATE_KEY, USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS
+- Environment variables are set: USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS
+- Factory Owner has a signing method configured: either a `cast` wallet (`--account <name>`) or a hardware wallet (`--ledger` / `--trezor`)
 - RPC_URL points to the target chain
 - Foundry toolchain (forge) is installed
 
 ## Trigger
 
-Factory Owner runs `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast`
+Factory Owner runs `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --account <wallet-name>` (for cast wallets) or `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --ledger` (for hardware wallets).
 
 ---
 
 ### SC-J92J: Successful deployment with valid configuration
 
 **Given:**
-- All required env vars (PRIVATE_KEY, USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS) are set to valid non-zero addresses
+- All required env vars (USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS) are set to valid non-zero addresses
+- A signing method is provided via CLI flag (`--account`, `--ledger`, or `--trezor`)
 - ORACLE_ADDRESS and OPERATOR_ADDRESS are different addresses
 - The deployer wallet has sufficient native token (MATIC/POL) for gas
 
 **Steps:**
 1. Factory Owner runs the deploy script with `--broadcast`
-2. Script reads and validates all environment variables
+2. Script reads and validates all address environment variables (signing is handled by Foundry CLI)
 3. Script deploys the LPVault implementation contract
 4. Script deploys the LPVaultFactory with the implementation address and all env-var addresses
 5. Script logs both deployed addresses to stdout
@@ -53,7 +55,7 @@ Factory Owner runs `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadc
 ### SC-J92K: Missing environment variable
 
 **Given:**
-- One or more required env vars (USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, or OPERATOR_ADDRESS) is unset or set to the zero address
+- One or more required address env vars (USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, or OPERATOR_ADDRESS) is unset or set to the zero address
 
 **Steps:**
 1. Factory Owner runs the deploy script
@@ -89,6 +91,26 @@ Factory Owner runs `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadc
 **Side Effects:**
 - Implementation contract creation transaction may be broadcast (depending on Foundry's batch behavior)
 - No factory contract created
+
+---
+
+### SC-K49S: Script does not read raw private keys
+
+**Given:**
+- PRIVATE_KEY environment variable is set
+
+**Steps:**
+1. Factory Owner runs the deploy script with `--account <wallet-name>`
+2. Script reads address environment variables but does not call `vm.envUint("PRIVATE_KEY")`
+3. Transaction signing is handled by Foundry's CLI-level wallet management
+
+**Outcomes:**
+- Script executes without reading PRIVATE_KEY
+- No raw private key material enters the script's memory
+
+**Side Effects:**
+- No raw private key read from environment
+- PRIVATE_KEY env var is ignored entirely
 
 ---
 

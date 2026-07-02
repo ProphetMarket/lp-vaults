@@ -18,8 +18,10 @@ contract DeployScript is Script {
     /// @dev Reverts when a required address env var is zero.
     error ZeroAddress(string name);
 
-    // SC-J92J: entry point reads env vars and delegates to deploy()
-    /// @notice Reads env vars and deploys both contracts.
+    // SC-J92J, SC-K49S: entry point reads address env vars and delegates to deploy()
+    /// @notice Reads address env vars and deploys both contracts.
+    /// @dev Signing is handled by Foundry CLI flags (--account, --ledger, --trezor).
+    ///      No raw private key is read from environment variables.
     function run() external returns (LPVault lpVault, LPVaultFactory factory) {
         // SC-J92J, SC-J92K: read all required addresses from environment variables
         address usdc = vm.envAddress("USDC_ADDRESS");
@@ -28,17 +30,23 @@ contract DeployScript is Script {
         address admin = vm.envAddress("ADMIN_ADDRESS");
         address oracleAddr = vm.envAddress("ORACLE_ADDRESS");
         address operatorAddr = vm.envAddress("OPERATOR_ADDRESS");
-        uint256 deployerKey = vm.envUint("PRIVATE_KEY");
 
-        return deploy(deployerKey, usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+        // SC-K49S: no private key read — signing delegated to Foundry CLI wallet management
+        vm.startBroadcast();
+        (lpVault, factory) = deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+        vm.stopBroadcast();
+
+        // SC-J92J: log deployed addresses to stdout
+        console.log("LPVault implementation:", address(lpVault));
+        console.log("LPVaultFactory:", address(factory));
     }
 
-    // SC-J92J, SC-J92K: validates addresses and deploys both contracts
+    // SC-J92J, SC-J92K, SC-K49S: validates addresses and deploys both contracts
     /// @notice Validates all addresses, deploys LPVault implementation + LPVaultFactory.
     /// @dev Separated from run() so tests can call deploy() directly with explicit
-    ///      parameters, avoiding env var pollution across Forge test suites.
+    ///      parameters. Does not manage vm.startBroadcast/vm.stopBroadcast —
+    ///      the caller (run() or test setUp) handles broadcast context.
     function deploy(
-        uint256 deployerKey,
         address usdc,
         address exchange,
         address conditionalTokens,
@@ -46,7 +54,7 @@ contract DeployScript is Script {
         address oracleAddr,
         address operatorAddr
     ) public returns (LPVault lpVault, LPVaultFactory factory) {
-        // SC-J92K: validate all addresses are non-zero before broadcasting
+        // SC-J92K: validate all addresses are non-zero before deploying
         if (usdc == address(0)) revert ZeroAddress("USDC_ADDRESS");
         if (exchange == address(0)) revert ZeroAddress("EXCHANGE_ADDRESS");
         if (conditionalTokens == address(0)) revert ZeroAddress("CONDITIONAL_TOKENS_ADDRESS");
@@ -54,19 +62,11 @@ contract DeployScript is Script {
         if (oracleAddr == address(0)) revert ZeroAddress("ORACLE_ADDRESS");
         if (operatorAddr == address(0)) revert ZeroAddress("OPERATOR_ADDRESS");
 
-        vm.startBroadcast(deployerKey);
-
         // SC-J92J: deploy implementation — constructor calls _disableInitializers()
         lpVault = new LPVault();
 
         // SC-J92J: deploy factory with implementation address and all addresses
         factory =
             new LPVaultFactory(address(lpVault), usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
-
-        vm.stopBroadcast();
-
-        // SC-J92J: log deployed addresses to stdout
-        console.log("LPVault implementation:", address(lpVault));
-        console.log("LPVaultFactory:", address(factory));
     }
 }

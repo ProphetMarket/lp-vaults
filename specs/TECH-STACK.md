@@ -45,7 +45,7 @@ N/A — pure contract project with no runtime services.
 
 ## Environment
 - **Env file:** `.env`
-- **Key variables:** `RPC_URL`, `PRIVATE_KEY`, `ETHERSCAN_API_KEY`
+- **Key variables:** `RPC_URL`, `ETHERSCAN_API_KEY`
 - **Seed data:** N/A
 
 ## Conventions

@@ -2,8 +2,8 @@
 id: FEAT-J92H
 name: Deploy Contracts
 use_cases: [UC-J92I]
-scenarios: [SC-J92J, SC-J92K, SC-J92L, SC-J92M]
-last_update: 2026-07-01
+scenarios: [SC-J92J, SC-J92K, SC-J92L, SC-J92M, SC-K49S]
+last_update: 2026-07-02
 ---
 
 # Architecture: Deploy Contracts
@@ -70,7 +70,7 @@ C4Container
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| CLI | `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast` | `DeployScript.run()` | PRIVATE_KEY env var | env vars: USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS | stdout: impl address, factory address | revert on zero address, revert on role separation |
+| CLI | `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --account <name>` | `DeployScript.run()` | cast wallet (`--account`) or hardware wallet (`--ledger`/`--trezor`) | env vars: USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS | stdout: impl address, factory address | revert on zero address, revert on role separation |
 
 ## Integration Points
 
@@ -92,6 +92,7 @@ C4Container
 | SC-J92K | Missing environment variable | `script/Deploy.s.sol:run()` (validation logic) |
 | SC-J92L | Oracle equals operator | `src/LPVaultFactory.sol:constructor()` (RoleSeparation revert) |
 | SC-J92M | Deployment with contract verification | `script/Deploy.s.sol:run()` (--verify flag handled by Foundry) |
+| SC-K49S | Script does not read raw private keys | `script/Deploy.s.sol:run()` |
 
 ## Architecture Decisions
 

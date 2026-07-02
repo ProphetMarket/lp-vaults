@@ -22,7 +22,7 @@ refs: [FEAT-REPZ]
 
 | Actor | Role | Notes |
 |-------|------|-------|
-| Factory Owner | Runs the deploy script | Holds the deployer private key; signs deployment transactions |
+| Factory Owner | Runs the deploy script | Configures a cast wallet or hardware wallet; signs deployment transactions |
 
 ## Functional Requirements
 
@@ -32,8 +32,8 @@ refs: [FEAT-REPZ]
 Fit Criterion: Given any of the required env vars is unset or zero-address, the script reverts before broadcasting any transaction.
 Linked to: UC-J92I
 
-**FR-J92O** `When the Factory Owner runs the deploy script, the system shall read the deployer's private key from the PRIVATE_KEY environment variable or use the Foundry default sender.`
-Fit Criterion: Given PRIVATE_KEY is set, the deployer address matches the corresponding public key; the script starts a broadcast with that key.
+**FR-J92O** `When the Factory Owner runs the deploy script, the system shall delegate transaction signing to Foundry's CLI-level wallet management (--account for cast keystores, --ledger for Ledger, --trezor for Trezor) and shall not read any raw private key from environment variables.`
+Fit Criterion: Given the script executes, it calls `vm.startBroadcast()` without a private key argument; no call to `vm.envUint("PRIVATE_KEY")` exists in the script; signing is resolved by the CLI flag the Factory Owner provides.
 Linked to: UC-J92I
 
 ### Deployment Sequence
@@ -66,7 +66,7 @@ Linked to: UC-J92I
 
 ## Non-Functional Requirements
 
-**NFR-J92U** Security: `The deploy script shall never hardcode private keys, addresses, or secrets in source code -- all sensitive values must come from environment variables or Foundry's keystore.`
+**NFR-J92U** Security: `The deploy script shall never hardcode private keys, addresses, or secrets in source code. Raw private keys shall not be accepted via environment variables. Transaction signing must use Foundry's keystore (cast wallet) or hardware wallet integration exclusively. Non-secret addresses may be read from environment variables.`
 
 **NFR-J92V** Reliability: `The deploy script shall validate all environment variable addresses are non-zero before broadcasting any transaction, failing fast on misconfiguration.`
 
