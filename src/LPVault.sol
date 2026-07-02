@@ -23,6 +23,9 @@ pragma solidity 0.8.20;
 // FEAT-JXQO: Emergency Cancel All Positions
 // UC-JXQW: Emergency Cancel All
 // UC-JXQW-001: emergency-cancel-all
+// FEAT-K1M2: Merge Positions
+// UC-K1M8: Merge Same-Range Positions
+// UC-K1M8-001: merge-same-range-positions
 
 /// @dev Minimal ERC-20 interface — only approve needed for exchange setup.
 interface IERC20 {
@@ -249,6 +252,8 @@ contract LPVault {
     error NotIntentOwner();
     error NoPositionHeld();
     error VaultCancelled();
+    error RangeMismatch();
+    error InsufficientPositions();
 
     // ──────────────────────────────────────────────
     // Events
@@ -276,6 +281,9 @@ contract LPVault {
 
     // SC-JAIL: emitted on Phase 2 of reclaimDeposit (USDC transferred to LP)
     event DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
+
+    // SC-K1M9: emitted when Operator merges same-range positions
+    event PositionsMerged(uint256[] positionIds, uint256 survivorId);
 
     // SC-T7AH, SC-T7AI, SC-T7AJ: emitted on every successful position mint
     event PositionMinted(
@@ -487,6 +495,7 @@ contract LPVault {
             // Compute uncollected fees using the same accumulator formula as collect
             uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
             uint256 fees = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+            fees += p.tokensOwed;
 
             // Reconstruct original principal from liquidity and tick range width
             uint256 rangeWidth = uint256(int256(p.tickUpper - p.tickLower));
@@ -642,6 +651,10 @@ contract LPVault {
 
         // Calculate fees accrued since the last collect (or mint)
         uint256 owed = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+
+        // Include previously accumulated fees (e.g., rolled up from mergePositions)
+        owed += p.tokensOwed;
+        p.tokensOwed = 0;
 
         // Snapshot update: future collects start from here
         p.feeGrowthInsideLastX128 = feeGrowthInsideX128;
@@ -816,6 +829,75 @@ contract LPVault {
         lastOperatorActivityTimestamp = block.timestamp;
 
         emit TickUpdated(oldTick, newTick, crossCount);
+    }
+
+    // ──────────────────────────────────────────────
+    // Position merge (FEAT-K1M2, UC-K1M8)
+    // ──────────────────────────────────────────────
+
+    // SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC: operator-gated position merge
+    /// @notice Combines two or more positions with identical owner, tickLower, and
+    ///         tickUpper into a single survivor position (positionIds[0]), preserving
+    ///         total liquidity and rolling up accrued fees.
+    /// @dev OPERATOR TRUST ASSUMPTION: The Operator can merge any positions that share
+    ///      the same owner and range. LPs must trust that the Operator only merges
+    ///      positions for legitimate housekeeping (reducing storage and gas costs for
+    ///      overlapping positions).
+    ///      No USDC moves during merge — uncollected fees from consumed positions are
+    ///      rolled into the survivor's tokensOwed. Tick state (liquidityGross,
+    ///      liquidityNet) is unchanged since total liquidity on the range stays the same.
+    /// @param positionIds Array of position IDs to merge — must have >= 2 elements,
+    ///        all sharing the same owner, tickLower, and tickUpper
+    function mergePositions(uint256[] calldata positionIds) external onlyOperator nonReentrant {
+        // At least two positions required to merge
+        if (positionIds.length < 2) revert InsufficientPositions();
+
+        // Load the survivor (first position in the array)
+        Position storage survivor = positions[positionIds[0]];
+        address ownerAddr = survivor.owner;
+        int24 tickLower = survivor.tickLower;
+        int24 tickUpper = survivor.tickUpper;
+
+        // Compute current feeGrowthInside for this range (same formula as collect)
+        uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(tickLower, tickUpper);
+
+        // Compute uncollected fees for the survivor before updating its snapshot
+        uint256 survivorFees =
+            uint256(survivor.liquidity) * (feeGrowthInsideX128 - survivor.feeGrowthInsideLastX128) / Q128;
+
+        // Start accumulation from the survivor's current state
+        uint128 totalLiquidity = survivor.liquidity;
+        uint256 totalOwed = survivor.tokensOwed + survivorFees;
+
+        // Process each consumed position: validate, accumulate, then zero
+        for (uint256 i = 1; i < positionIds.length; i++) {
+            Position storage consumed = positions[positionIds[i]];
+
+            // All positions must share the same owner and tick range
+            if (consumed.owner != ownerAddr || consumed.tickLower != tickLower || consumed.tickUpper != tickUpper) {
+                revert RangeMismatch();
+            }
+
+            // Compute uncollected fees for the consumed position
+            uint256 consumedFees =
+                uint256(consumed.liquidity) * (feeGrowthInsideX128 - consumed.feeGrowthInsideLastX128) / Q128;
+
+            // Accumulate liquidity and fees
+            totalLiquidity += consumed.liquidity;
+            totalOwed += consumed.tokensOwed + consumedFees;
+
+            // Zero the consumed position so it can no longer accrue or claim
+            consumed.liquidity = 0;
+            consumed.tokensOwed = 0;
+            consumed.feeGrowthInsideLastX128 = 0;
+        }
+
+        // Update the survivor with accumulated totals and a fresh fee snapshot
+        survivor.liquidity = totalLiquidity;
+        survivor.tokensOwed = totalOwed;
+        survivor.feeGrowthInsideLastX128 = feeGrowthInsideX128;
+
+        emit PositionsMerged(positionIds, positionIds[0]);
     }
 
     // ──────────────────────────────────────────────

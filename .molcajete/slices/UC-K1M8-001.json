@@ -1,0 +1,15 @@
+{
+  "id": "UC-K1M8-001",
+  "use_case": "UC-K1M8",
+  "feature": "FEAT-K1M2",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260702T160256-merge-positions-pause-trading",
+  "completed_at": "2026-07-02T16:30:00Z",
+  "files_touched": [
+    "src/LPVault.sol",
+    "test/features/FEAT-K1M2-merge-positions/UC-K1M8-merge-same-range-positions/001-contract-call-merge-same-range-positions.t.sol"
+  ],
+  "covers": ["SC-K1M9", "SC-K1MA", "SC-K1MB", "SC-K1MC", "FR-K1M3", "FR-K1M4", "FR-K1M5", "FR-K1M6", "NFR-K1M7"],
+  "summary": "Added mergePositions(uint256[] calldata positionIds) to LPVault.sol: operator-gated function that combines same-owner same-range positions into a survivor, rolling up liquidity and uncollected fees. Also updated collect() and emergencyCancelAll() to include tokensOwed in their payout computation (backward-compatible — tokensOwed was always 0 before merge). 14 integration tests covering happy path, range mismatch revert, insufficient input revert, fee accounting preservation with collect verification, and operator-only access control."
+}
