@@ -1,0 +1,12 @@
+{
+  "id": "UC-JXQW-001",
+  "use_case": "UC-JXQW",
+  "feature": "FEAT-JXQO",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260702T144422-emergency-cancel-all",
+  "completed_at": "2026-07-02T14:50:00Z",
+  "files_touched": ["src/LPVault.sol"],
+  "covers": ["SC-JXQX", "SC-JXQY", "SC-JXQZ", "SC-JXR0", "SC-JXR1", "SC-JXR2", "FR-JXQP", "FR-JXQQ", "FR-JXQR", "FR-JXQS", "FR-JXQT", "NFR-JXQU", "NFR-JXQV"],
+  "summary": "Added emergencyCancelAll() to LPVault.sol — any position holder can force-close all positions after EMERGENCY_CANCEL_TIMELOCK (7 days) of operator silence. Iterates all positions, computes principal (liquidity * rangeWidth / PRECISION) + accrued fees (v3 feeGrowthInside accumulator), distributes USDC to each owner, zeroes all positions, sets activeLiquidity=0, transitions phase to Cancelled(3). Also added lastOperatorActivityTimestamp reset to notifyFees and phase==3 guards to collect, reclaimDeposit, and notifyFees. Initialized lastOperatorActivityTimestamp in initialize() to prevent premature timelock on new vaults. 24 integration tests cover all 6 scenarios."
+}

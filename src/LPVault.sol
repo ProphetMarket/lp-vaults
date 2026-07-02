@@ -20,6 +20,9 @@ pragma solidity 0.8.20;
 // FEAT-JGE7: Vault Wind-Down Lifecycle
 // UC-JGEE: Start Wind Down
 // UC-JGEE-001: start-wind-down
+// FEAT-JXQO: Emergency Cancel All Positions
+// UC-JXQW: Emergency Cancel All
+// UC-JXQW-001: emergency-cancel-all
 
 /// @dev Minimal ERC-20 interface — only approve needed for exchange setup.
 interface IERC20 {
@@ -103,7 +106,7 @@ contract LPVault {
     // Vault state
     // ──────────────────────────────────────────────
 
-    /// @dev Phase lifecycle: 1 = Active, 2 = WindDown
+    /// @dev Phase lifecycle: 1 = Active, 2 = WindDown, 3 = Cancelled (terminal)
     uint8 public phase;
 
     /// @dev Running total of liquidity in range
@@ -119,7 +122,8 @@ contract LPVault {
     uint256 public nextPositionId;
 
     /// @dev Tracks the most recent block.timestamp at which an Operator called
-    ///      updateTick. Used by feature 8 to detect prolonged Operator silence.
+    ///      notifyFees or updateTick. Used by emergencyCancelAll to detect
+    ///      prolonged Operator silence.
     uint256 public lastOperatorActivityTimestamp;
 
     // ──────────────────────────────────────────────
@@ -203,6 +207,12 @@ contract LPVault {
     ///      is negligible at this scale.
     uint256 public constant RECLAIM_TIMELOCK = 24 hours;
 
+    /// @dev Minimum silence duration before any position holder can trigger
+    ///      emergencyCancelAll. 7 days is long enough to distinguish operator
+    ///      outage from normal low-activity periods. Polygon block.timestamp
+    ///      tolerance is ±15s, negligible at this scale.
+    uint256 public constant EMERGENCY_CANCEL_TIMELOCK = 7 days;
+
     // ──────────────────────────────────────────────
     // Reentrancy guard (inlined per pattern policy in CLAUDE.md)
     // ──────────────────────────────────────────────
@@ -237,6 +247,8 @@ contract LPVault {
     error PositionNotFound();
     error TimelockNotElapsed();
     error NotIntentOwner();
+    error NoPositionHeld();
+    error VaultCancelled();
 
     // ──────────────────────────────────────────────
     // Events
@@ -246,6 +258,9 @@ contract LPVault {
 
     // SC-JGEF: emitted when Oracle transitions vault from Active to WindDown
     event VaultWindDownStarted(bytes32 indexed marketId);
+
+    // SC-JXQX: emitted when a position holder triggers emergency cancel
+    event EmergencyCancelExecuted(address indexed caller);
 
     // SC-TOGT, SC-TOGU: emitted when Operator distributes fee revenue
     event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
@@ -375,6 +390,10 @@ contract LPVault {
         // Set vault lifecycle to Active
         phase = 1;
 
+        // Start the operator-silence timer from vault creation so the
+        // emergency cancel timelock doesn't trigger prematurely
+        lastOperatorActivityTimestamp = block.timestamp;
+
         // Enable reentrancy guard for nonReentrant functions
         _reentrancyGuard = 1;
 
@@ -418,6 +437,83 @@ contract LPVault {
         if (phase != 1) revert VaultNotActive();
         phase = 2;
         emit VaultWindDownStarted(marketId);
+    }
+
+    // ──────────────────────────────────────────────
+    // Emergency cancel (FEAT-JXQO, UC-JXQW)
+    // ──────────────────────────────────────────────
+
+    // SC-JXQX through SC-JXR2: position-holder-triggered emergency force-close
+    /// @notice Force-closes all open positions and distributes principal + accrued
+    ///         fees to each position owner. Transitions vault to terminal Cancelled state.
+    /// @dev Callable by any address that owns at least one position, after the
+    ///      operator-silence timelock has elapsed. Iterates all positions (bounded
+    ///      by nextPositionId), computes each position's payout, zeroes state, then
+    ///      transfers USDC. Follows checks-effects-interactions: all state mutations
+    ///      happen before any external transfer call.
+    ///      The Cancelled phase (3) is terminal — no vault function succeeds after this.
+    function emergencyCancelAll() external nonReentrant {
+        // --- Checks ---
+
+        // Already cancelled — terminal state, nothing to do
+        if (phase == 3) revert VaultCancelled();
+
+        // Operator-silence timelock must have elapsed
+        if (block.timestamp - lastOperatorActivityTimestamp < EMERGENCY_CANCEL_TIMELOCK) {
+            revert TimelockNotElapsed();
+        }
+
+        // Caller must own at least one active position in this vault
+        uint256 count = nextPositionId;
+        bool callerHasPosition = false;
+        for (uint256 i = 0; i < count; i++) {
+            if (positions[i].owner == msg.sender && positions[i].liquidity > 0) {
+                callerHasPosition = true;
+                break;
+            }
+        }
+        if (!callerHasPosition) revert NoPositionHeld();
+
+        // --- Effects ---
+
+        // Build payout arrays from position data before zeroing state
+        address[] memory owners = new address[](count);
+        uint256[] memory payouts = new uint256[](count);
+
+        for (uint256 i = 0; i < count; i++) {
+            Position storage p = positions[i];
+            if (p.liquidity == 0) continue;
+
+            // Compute uncollected fees using the same accumulator formula as collect
+            uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
+            uint256 fees = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+
+            // Reconstruct original principal from liquidity and tick range width
+            uint256 rangeWidth = uint256(int256(p.tickUpper - p.tickLower));
+            uint256 principal = uint256(p.liquidity) * rangeWidth / LIQUIDITY_PRECISION;
+
+            owners[i] = p.owner;
+            payouts[i] = principal + fees;
+
+            // Zero position state
+            p.liquidity = 0;
+            p.tokensOwed = 0;
+            p.feeGrowthInsideLastX128 = 0;
+        }
+
+        // Transition to terminal state
+        activeLiquidity = 0;
+        phase = 3;
+
+        // --- Interactions (external calls last, per checks-effects-interactions) ---
+
+        for (uint256 i = 0; i < count; i++) {
+            if (payouts[i] > 0) {
+                _safeTransfer(usdc, owners[i], payouts[i]);
+            }
+        }
+
+        emit EmergencyCancelExecuted(msg.sender);
     }
 
     // ──────────────────────────────────────────────
@@ -528,6 +624,9 @@ contract LPVault {
     function collect(uint256 positionId) external nonReentrant {
         // --- Checks ---
 
+        // Cancelled vaults have already distributed all funds
+        if (phase == 3) revert VaultCancelled();
+
         Position storage p = positions[positionId];
 
         // Position must exist (owner is never set to address(0) during mint)
@@ -587,6 +686,9 @@ contract LPVault {
     ) external nonReentrant {
         // --- Checks ---
 
+        // Cancelled vaults have already distributed all funds
+        if (phase == 3) revert VaultCancelled();
+
         // Caller must be the LP named in the intent
         if (msg.sender != lp) revert NotIntentOwner();
 
@@ -639,6 +741,9 @@ contract LPVault {
     ///      trust model where the operator manages fee sweeps.
     /// @param amount The amount of USDC fee revenue to distribute across active liquidity
     function notifyFees(uint256 amount) external onlyOperator {
+        // Cancelled vaults have already distributed all funds
+        if (phase == 3) revert VaultCancelled();
+
         // Zero-amount guard: notifying zero fees wastes gas and signals a caller bug
         if (amount == 0) revert ZeroAmount();
 
@@ -652,6 +757,9 @@ contract LPVault {
         // precision, truncating downward. The dust is economically negligible
         // (< 1/2^128 USDC per unit of liquidity per call).
         feeGrowthGlobalX128 += _mulDiv(amount, Q128, uint256(activeL));
+
+        // Reset operator-silence timer so emergencyCancelAll timelock restarts
+        lastOperatorActivityTimestamp = block.timestamp;
 
         emit FeesNotified(amount, feeGrowthGlobalX128);
     }
