@@ -26,7 +26,7 @@ contract DeployScript is Script {
         // SC-J92J, SC-J92K: read all required addresses from environment variables
         address usdc = vm.envAddress("USDC_ADDRESS");
         address exchange = vm.envAddress("EXCHANGE_ADDRESS");
-        address conditionalTokens = vm.envAddress("CONDITIONAL_TOKENS_ADDRESS");
+        address conditionalTokens = vm.envAddress("CTF_ADDRESS");
         address admin = vm.envAddress("ADMIN_ADDRESS");
         address oracleAddr = vm.envAddress("ORACLE_ADDRESS");
         address operatorAddr = vm.envAddress("OPERATOR_ADDRESS");
@@ -57,7 +57,7 @@ contract DeployScript is Script {
         // SC-J92K: validate all addresses are non-zero before deploying
         if (usdc == address(0)) revert ZeroAddress("USDC_ADDRESS");
         if (exchange == address(0)) revert ZeroAddress("EXCHANGE_ADDRESS");
-        if (conditionalTokens == address(0)) revert ZeroAddress("CONDITIONAL_TOKENS_ADDRESS");
+        if (conditionalTokens == address(0)) revert ZeroAddress("CTF_ADDRESS");
         if (admin == address(0)) revert ZeroAddress("ADMIN_ADDRESS");
         if (oracleAddr == address(0)) revert ZeroAddress("ORACLE_ADDRESS");
         if (operatorAddr == address(0)) revert ZeroAddress("OPERATOR_ADDRESS");

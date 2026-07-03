@@ -68,13 +68,9 @@ contract DeployScriptSuccessTest is Test {
         assertEq(factory.exchange(), exchange, "factory.exchange should match EXCHANGE_ADDRESS");
     }
 
-    // SC-J92J: factory.conditionalTokens() equals CONDITIONAL_TOKENS_ADDRESS
+    // SC-J92J: factory.conditionalTokens() equals CTF_ADDRESS
     function test_factoryConditionalTokensMatchesEnvVar() public view {
-        assertEq(
-            factory.conditionalTokens(),
-            conditionalTokens,
-            "factory.conditionalTokens should match CONDITIONAL_TOKENS_ADDRESS"
-        );
+        assertEq(factory.conditionalTokens(), conditionalTokens, "factory.conditionalTokens should match CTF_ADDRESS");
     }
 
     // SC-J92J: factory.admins(ADMIN_ADDRESS) equals 1
@@ -126,9 +122,9 @@ contract DeployScriptZeroAddressTest is Test {
         script.deploy(usdc, address(0), conditionalTokens, admin, oracleAddr, operatorAddr);
     }
 
-    // SC-J92K: CONDITIONAL_TOKENS_ADDRESS set to zero address
+    // SC-J92K: CTF_ADDRESS set to zero address
     function test_revertsWhenConditionalTokensIsZero() public {
-        vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "CONDITIONAL_TOKENS_ADDRESS"));
+        vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "CTF_ADDRESS"));
         script.deploy(usdc, exchange, address(0), admin, oracleAddr, operatorAddr);
     }
 
