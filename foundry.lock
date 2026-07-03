@@ -1,1 +1,5 @@
-{}
+{
+  "lib/ctf-exchange": {
+    "rev": "9e6d895eaaddc5f949f3b476e1c68bfdf9c679a7"
+  }
+}

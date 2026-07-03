@@ -260,6 +260,8 @@ contract LPVaultFactory {
     ///         and incrementing the version counter. Clears the pending state.
     function applyImplementation() external onlyAdmin {
         if (pendingImplementation == address(0)) revert NoPendingSchedule();
+        // ±15s Polygon tolerance is negligible at 7-day scale
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp < implementationUnlockAt) revert TimelockNotElapsed();
 
         address newImpl = pendingImplementation;

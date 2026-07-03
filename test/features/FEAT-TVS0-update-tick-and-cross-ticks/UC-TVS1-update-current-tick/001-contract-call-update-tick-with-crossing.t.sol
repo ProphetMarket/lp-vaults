@@ -393,7 +393,10 @@ contract UpdateTickTooManyTicksTest is Test {
         // Mint 129 positions to create 258 initialized ticks in (0, 260]
         // Each position [2i+1, 2i+2) creates ticks at odd and even indices
         for (uint256 i = 0; i < 129; i++) {
+            // casting is safe because i < 129 so i*2+2 <= 260, well within int24 range
+            // forge-lint: disable-next-line(unsafe-typecast)
             int24 lower = int24(int256(i * 2 + 1));
+            // forge-lint: disable-next-line(unsafe-typecast)
             int24 upper = int24(int256(i * 2 + 2));
             bytes32 intentId = keccak256(abi.encode("many-", i));
             _mintPositionOnVault(lower, upper, 1, intentId);

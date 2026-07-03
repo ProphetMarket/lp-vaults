@@ -517,7 +517,8 @@ contract LPVault {
         // Already cancelled — terminal state, nothing to do
         if (phase == 3) revert VaultCancelled();
 
-        // Operator-silence timelock must have elapsed
+        // Operator-silence timelock must have elapsed (±15s Polygon tolerance is negligible at 7-day scale)
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp - lastOperatorActivityTimestamp < EMERGENCY_CANCEL_TIMELOCK) {
             revert TimelockNotElapsed();
         }
@@ -624,6 +625,8 @@ contract LPVault {
         // --- Effects ---
 
         // Compute liquidity weight from USDC and range width
+        // casting to uint256 is safe because tickUpper > tickLower is validated above
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint256 rangeWidth = uint256(int256(tickUpper - tickLower));
         uint128 liquidity = _toUint128(usdcAmount * LIQUIDITY_PRECISION / rangeWidth);
 
@@ -776,7 +779,8 @@ contract LPVault {
 
         // --- Phase 2: Execute reclaim after timelock ---
 
-        // Timelock must have elapsed since Phase 1 submission
+        // Timelock must have elapsed since Phase 1 submission (±15s Polygon tolerance is negligible at 24h scale)
+        // forge-lint: disable-next-line(block-timestamp)
         if (block.timestamp - intentTimestamps[intentId] < RECLAIM_TIMELOCK) {
             revert TimelockNotElapsed();
         }
@@ -1097,9 +1101,13 @@ contract LPVault {
     ///      (activeLiquidity should never go negative — would indicate a logic bug).
     function _addDelta(uint128 x, int128 y) internal pure returns (uint128 z) {
         if (y >= 0) {
+            // casting to uint128 is safe because y >= 0 is checked on the line above
+            // forge-lint: disable-next-line(unsafe-typecast)
             z = x + uint128(y);
             if (z < x) revert SafeCastOverflow();
         } else {
+            // casting to uint128 is safe because -y is positive when y < 0
+            // forge-lint: disable-next-line(unsafe-typecast)
             z = x - uint128(-y);
             if (z > x) revert SafeCastOverflow();
         }
@@ -1123,6 +1131,7 @@ contract LPVault {
     /// @dev Sets the bitmap bit for a tick when it becomes initialized.
     function _setTickBitmapBit(int24 tick) internal {
         (int16 wordPos, uint8 bitPos) = _tickPosition(tick);
+        // forge-lint: disable-next-line(incorrect-shift)
         tickBitmap[wordPos] |= (1 << bitPos);
     }
 
@@ -1130,6 +1139,7 @@ contract LPVault {
     ///      Provided for feature 6 (burn) — not called by this feature.
     function _clearTickBitmapBit(int24 tick) internal {
         (int16 wordPos, uint8 bitPos) = _tickPosition(tick);
+        // forge-lint: disable-next-line(incorrect-shift)
         tickBitmap[wordPos] &= ~(1 << bitPos);
     }
 
@@ -1340,12 +1350,16 @@ contract LPVault {
     /// @dev uint256 → uint128 with overflow check
     function _toUint128(uint256 x) internal pure returns (uint128) {
         if (x > type(uint128).max) revert SafeCastOverflow();
+        // casting to uint128 is safe because overflow is checked on the line above
+        // forge-lint: disable-next-line(unsafe-typecast)
         return uint128(x);
     }
 
     /// @dev uint128 → int128 with overflow check (liquidity is always positive)
     function _toInt128(uint128 x) internal pure returns (int128) {
         if (x > uint128(type(int128).max)) revert SafeCastOverflow();
+        // casting to int128 is safe because overflow is checked on the line above
+        // forge-lint: disable-next-line(unsafe-typecast)
         return int128(x);
     }
 }
