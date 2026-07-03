@@ -1,0 +1,15 @@
+{
+  "id": "UC-K1MK-001",
+  "use_case": "UC-K1MK",
+  "feature": "FEAT-K1MD",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260702T160256-merge-positions-pause-trading",
+  "completed_at": "2026-07-02T17:00:00Z",
+  "files_touched": [
+    "src/LPVault.sol",
+    "test/features/FEAT-K1MD-pause-trading/UC-K1MK-pause-and-unpause-vault/001-contract-call-pause-and-unpause-vault.t.sol"
+  ],
+  "covers": ["SC-K1ML", "SC-K1MM", "SC-K1MN", "SC-K1MO", "SC-K1MP", "FR-K1ME", "FR-K1MF", "FR-K1MG", "FR-K1MH", "FR-K1MI", "NFR-K1MJ"],
+  "summary": "Added pauseTrading(), unpauseTrading(), bool paused storage, TradingIsPaused error, TradingPaused/TradingUnpaused events, and whenNotPaused modifier to LPVault.sol. Applied whenNotPaused to mintPositionFor, notifyFees, updateTick, and mergePositions. LP exit paths (collect, reclaimDeposit) and emergencyCancelAll are unaffected. 15 integration tests covering pause+gate, unpause, access control, collect-while-paused, reclaim-while-paused, and phase independence."
+}

@@ -2,7 +2,7 @@
 id: UC-K1MK
 name: Pause and Unpause Vault
 feature: FEAT-K1MD
-status: pending
+status: implemented
 version: 1
 actor: Admin
 ---

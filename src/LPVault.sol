@@ -26,6 +26,9 @@ pragma solidity 0.8.20;
 // FEAT-K1M2: Merge Positions
 // UC-K1M8: Merge Same-Range Positions
 // UC-K1M8-001: merge-same-range-positions
+// FEAT-K1MD: Pause Trading
+// UC-K1MK: Pause and Unpause Vault
+// UC-K1MK-001: pause-and-unpause-vault
 
 /// @dev Minimal ERC-20 interface — only approve needed for exchange setup.
 interface IERC20 {
@@ -111,6 +114,12 @@ contract LPVault {
 
     /// @dev Phase lifecycle: 1 = Active, 2 = WindDown, 3 = Cancelled (terminal)
     uint8 public phase;
+
+    /// @dev Circuit breaker flag. When true, trading entry points
+    ///      (mintPositionFor, notifyFees, updateTick, mergePositions) revert.
+    ///      LP exit paths (collect, reclaimDeposit) and emergencyCancelAll
+    ///      are unaffected. Independent of the phase state machine.
+    bool public paused;
 
     /// @dev Running total of liquidity in range
     uint128 public activeLiquidity;
@@ -254,6 +263,7 @@ contract LPVault {
     error VaultCancelled();
     error RangeMismatch();
     error InsufficientPositions();
+    error TradingIsPaused();
 
     // ──────────────────────────────────────────────
     // Events
@@ -284,6 +294,12 @@ contract LPVault {
 
     // SC-K1M9: emitted when Operator merges same-range positions
     event PositionsMerged(uint256[] positionIds, uint256 survivorId);
+
+    // SC-K1ML: emitted when Admin pauses trading
+    event TradingPaused(address indexed caller);
+
+    // SC-K1MM: emitted when Admin unpauses trading
+    event TradingUnpaused(address indexed caller);
 
     // SC-T7AH, SC-T7AI, SC-T7AJ: emitted on every successful position mint
     event PositionMinted(
@@ -324,6 +340,13 @@ contract LPVault {
 
     modifier onlyOracle() {
         if (msg.sender != ILPVaultFactory(factory).oracle()) revert NotOracle();
+        _;
+    }
+
+    /// @dev Gates trading entry points while the vault is paused.
+    ///      LP exit paths (collect, reclaimDeposit) are NOT gated.
+    modifier whenNotPaused() {
+        if (paused) revert TradingIsPaused();
         _;
     }
 
@@ -448,6 +471,26 @@ contract LPVault {
     }
 
     // ──────────────────────────────────────────────
+    // Pause trading (FEAT-K1MD, UC-K1MK)
+    // ──────────────────────────────────────────────
+
+    // SC-K1ML, SC-K1MM, SC-K1MN: admin-only circuit breaker
+    /// @notice Halts all trading entry points (mintPositionFor, notifyFees,
+    ///         updateTick, mergePositions) while keeping LP exit paths live.
+    /// @dev Does not change the vault's phase — pause and phase are orthogonal.
+    function pauseTrading() external onlyAdmin {
+        paused = true;
+        emit TradingPaused(msg.sender);
+    }
+
+    /// @notice Resumes normal trading after a pause.
+    /// @dev Does not change the vault's phase.
+    function unpauseTrading() external onlyAdmin {
+        paused = false;
+        emit TradingUnpaused(msg.sender);
+    }
+
+    // ──────────────────────────────────────────────
     // Emergency cancel (FEAT-JXQO, UC-JXQW)
     // ──────────────────────────────────────────────
 
@@ -548,7 +591,7 @@ contract LPVault {
         uint256 usdcAmount,
         bytes32 intentId,
         bytes calldata signature
-    ) external onlyOperator nonReentrant returns (uint256 positionId) {
+    ) external onlyOperator whenNotPaused nonReentrant returns (uint256 positionId) {
         // --- Checks ---
 
         // Vault must be active (not wound down)
@@ -753,7 +796,7 @@ contract LPVault {
     ///      an accounting mismatch that would strand LP claims. This matches the CTF Exchange
     ///      trust model where the operator manages fee sweeps.
     /// @param amount The amount of USDC fee revenue to distribute across active liquidity
-    function notifyFees(uint256 amount) external onlyOperator {
+    function notifyFees(uint256 amount) external onlyOperator whenNotPaused {
         // Cancelled vaults have already distributed all funds
         if (phase == 3) revert VaultCancelled();
 
@@ -790,7 +833,7 @@ contract LPVault {
     ///      Crosses every initialized tick between currentTick and newTick, flipping
     ///      feeGrowthOutsideX128 and applying liquidityNet to activeLiquidity.
     /// @param newTick The new price tick to set
-    function updateTick(int24 newTick) external onlyOperator nonReentrant {
+    function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant {
         // Phase check: only Active vaults accept tick updates
         if (phase != 1) revert VaultNotActive();
 
@@ -848,7 +891,7 @@ contract LPVault {
     ///      liquidityNet) is unchanged since total liquidity on the range stays the same.
     /// @param positionIds Array of position IDs to merge — must have >= 2 elements,
     ///        all sharing the same owner, tickLower, and tickUpper
-    function mergePositions(uint256[] calldata positionIds) external onlyOperator nonReentrant {
+    function mergePositions(uint256[] calldata positionIds) external onlyOperator whenNotPaused nonReentrant {
         // At least two positions required to merge
         if (positionIds.length < 2) revert InsufficientPositions();
 

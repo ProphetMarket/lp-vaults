@@ -4,7 +4,7 @@ name: pause-and-unpause-vault
 use_case: UC-K1MK
 feature: FEAT-K1MD
 objective: implement
-status: pending
+status: implemented
 files:
   create: []
   modify: [src/LPVault.sol]

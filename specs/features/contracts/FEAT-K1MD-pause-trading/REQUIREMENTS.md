@@ -3,7 +3,7 @@ id: FEAT-K1MD
 name: Pause Trading
 module: contracts
 domain: "@vault"
-status: pending
+status: implemented
 version: 1
 refs: [FEAT-REPZ]
 ---
