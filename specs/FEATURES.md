@@ -19,6 +19,7 @@
 | FEAT-JGE7 | Vault Wind-Down Lifecycle | Oracle-driven phase transition from Active to WindDown that gates off new mints while keeping exit paths open for existing LPs | implemented |
 | FEAT-JXQO | Emergency Cancel All Positions | Position-holder-triggered force-close of all positions after operator-silence timelock, distributing principal + fees and entering terminal Cancelled state | implemented |
 | FEAT-K1MD | Pause Trading | Admin-callable circuit breaker that halts trading entry points while keeping LP exit paths live | implemented |
+| FEAT-KX5N | Upgradeable Vault Implementation Pointer | Admin-driven two-step timelocked upgrade of the factory's implementation pointer with per-clone version tracking | implemented |
 
 ## @positions
 

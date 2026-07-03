@@ -1,0 +1,16 @@
+{
+  "id": "UC-KX5O-001",
+  "use_case": "UC-KX5O",
+  "feature": "FEAT-KX5N",
+  "objective": "implement",
+  "status": "implemented",
+  "plan_id": "20260702T173500-upgradeable-impl-pointer",
+  "completed_at": "2026-07-02T18:00:00Z",
+  "files_touched": [
+    "src/LPVaultFactory.sol",
+    "src/LPVault.sol",
+    "test/features/FEAT-KX5N-upgradeable-vault-impl-pointer/UC-KX5O-schedule-and-apply-impl-upgrade/001-contract-call-schedule-apply-cancel-impl-upgrade.t.sol"
+  ],
+  "covers": ["SC-KX5P", "SC-KX5Q", "SC-KX5R", "SC-KX5S", "SC-KX5T", "SC-KX5U", "SC-KX5V", "SC-KX5W", "FR-KX5X", "FR-KX5Y", "FR-KX5Z", "FR-KX60", "FR-KX61", "FR-KX62", "FR-KX63", "FR-KX64", "FR-KX65", "NFR-KX66", "NFR-KX67"],
+  "summary": "Changed LPVaultFactory.implementation from immutable to regular storage. Added scheduleImplementation(), applyImplementation(), cancelScheduledImplementation() with 7-day timelock, pendingImplementation/implementationUnlockAt/implementationVersion storage, IMPLEMENTATION_TIMELOCK constant, 3 events, 3 errors. Updated createVault to pass implementationVersion to initialize(). Extended LPVault.initialize() to accept and store version_ parameter. 23 integration tests covering schedule, apply, cancel, new-vault-version, early-apply revert, no-pending revert, zero-address revert, non-admin revert, and double-schedule guard."
+}

@@ -182,7 +182,7 @@ contract CloneInitializeSuccessTest is Test {
         );
 
         vm.prank(address(realFactory));
-        vault.initialize(mktId, usdcAddr, exchangeAddr, ctAddr, spacing, address(realFactory), minLiq);
+        vault.initialize(mktId, usdcAddr, exchangeAddr, ctAddr, spacing, address(realFactory), minLiq, 1);
 
         assertEq(vault.factory(), address(realFactory), "factory should be the real factory");
         assertEq(vault.marketId(), mktId, "marketId should match");
@@ -212,13 +212,13 @@ contract CloneInitializeSuccessTest is Test {
 
         vm.prank(address(realFactory));
         vault.initialize(
-            bytes32(uint256(1)), usdc1, makeAddr("exchange"), ct1, int24(10), address(realFactory), uint128(1000)
+            bytes32(uint256(1)), usdc1, makeAddr("exchange"), ct1, int24(10), address(realFactory), uint128(1000), 1
         );
 
         vm.prank(address(realFactory));
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
         vault.initialize(
-            bytes32(uint256(2)), usdc2, makeAddr("exchange2"), ct2, int24(20), address(realFactory), uint128(2000)
+            bytes32(uint256(2)), usdc2, makeAddr("exchange2"), ct2, int24(20), address(realFactory), uint128(2000), 1
         );
     }
 
@@ -260,7 +260,8 @@ contract ImplementationNotInitializableTest is Test {
             makeAddr("ct"),
             int24(10),
             address(this),
-            uint128(1000)
+            uint128(1000),
+            1
         );
     }
 }
@@ -367,7 +368,8 @@ contract VaultModifierTest is Test {
                 ctAddr,
                 int24(10),
                 address(realFactory),
-                uint128(1000)
+                uint128(1000),
+                1
             );
         factoryAddr = address(realFactory);
     }

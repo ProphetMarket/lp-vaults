@@ -8,6 +8,9 @@ import {LPVault} from "./LPVault.sol";
 // UC-REQ0-001: deploy-factory-with-role-registry
 // UC-REQ1-001: create-vault-and-initialize
 // UC-REQ2-001: factory-role-management
+// FEAT-KX5N: Upgradeable Vault Implementation Pointer
+// UC-KX5O: Schedule and Apply Implementation Upgrade
+// UC-KX5O-001: schedule-apply-cancel-impl-upgrade
 
 /// @title LPVaultFactory
 /// @notice Deploys per-market LP vault clones (EIP-1167) and manages the factory-level role registry.
@@ -37,9 +40,6 @@ contract LPVaultFactory {
     // Immutables
     // ──────────────────────────────────────────────
 
-    /// @notice LPVault implementation used as the EIP-1167 clone target
-    address public immutable implementation;
-
     /// @notice USDC ERC-20 contract address
     address public immutable usdc;
 
@@ -48,6 +48,28 @@ contract LPVaultFactory {
 
     /// @notice Gnosis ConditionalTokens (ERC-1155) contract address
     address public immutable conditionalTokens;
+
+    // ──────────────────────────────────────────────
+    // Implementation pointer (FEAT-KX5N)
+    // ──────────────────────────────────────────────
+
+    /// @notice LPVault implementation used as the EIP-1167 clone target.
+    ///         Was immutable; now regular storage so applyImplementation() can update it.
+    address public implementation;
+
+    /// @notice Scheduled implementation address awaiting timelock.
+    address public pendingImplementation;
+
+    /// @notice Timestamp after which applyImplementation() succeeds.
+    uint256 public implementationUnlockAt;
+
+    /// @notice Monotonically increasing counter incremented on each apply.
+    ///         Passed to vault initialize() so off-chain systems can identify code version.
+    uint256 public implementationVersion;
+
+    /// @dev 7-day delay between schedule and apply. Polygon block.timestamp
+    ///      tolerance is ±15s, negligible at this scale.
+    uint256 public constant IMPLEMENTATION_TIMELOCK = 7 days;
 
     // ──────────────────────────────────────────────
     // Vault registry
@@ -70,6 +92,9 @@ contract LPVaultFactory {
     error NotPendingAdmin();
     error ZeroAddress();
     error AlreadyAdmin();
+    error NoPendingSchedule();
+    error ScheduleAlreadyPending();
+    error TimelockNotElapsed();
 
     // ──────────────────────────────────────────────
     // Events
@@ -81,6 +106,13 @@ contract LPVaultFactory {
     event RemovedOperator(address indexed removedOperator, address indexed admin);
     event AdminTransferProposed(address indexed currentAdmin, address indexed proposedAdmin);
     event VaultCreated(bytes32 indexed marketId, address vault, uint128 minimumFirstLiquidity);
+
+    // SC-KX5P: emitted when Admin schedules a new implementation
+    event ImplementationScheduled(address indexed newImpl, uint256 unlockAt);
+    // SC-KX5Q: emitted when Admin applies the scheduled implementation
+    event ImplementationApplied(address indexed newImpl, uint256 version);
+    // SC-KX5S: emitted when Admin cancels a pending schedule
+    event ImplementationCancelled(address indexed cancelledImpl);
 
     // ──────────────────────────────────────────────
     // Modifiers
@@ -126,11 +158,14 @@ contract LPVaultFactory {
         // Compromise of one must not unlock the other's powers.
         if (oracle_ == operator_) revert RoleSeparation();
 
-        // Store immutable external contract addresses
+        // Store external contract addresses
         implementation = implementation_;
         usdc = usdc_;
         exchange = exchange_;
         conditionalTokens = conditionalTokens_;
+
+        // Start version counter at 1 (the initial deployment is version 1)
+        implementationVersion = 1;
 
         // Initialize Auth registry: one admin, one oracle, one operator
         admins[admin_] = 1;
@@ -170,7 +205,14 @@ contract LPVaultFactory {
         // Initialize the clone with per-market configuration (role state delegated, not copied)
         LPVault(vault)
             .initialize(
-                marketId_, usdc, exchange, conditionalTokens, tickSpacing_, address(this), minimumFirstLiquidity_
+                marketId_,
+                usdc,
+                exchange,
+                conditionalTokens,
+                tickSpacing_,
+                address(this),
+                minimumFirstLiquidity_,
+                implementationVersion
             );
 
         emit VaultCreated(marketId_, vault, minimumFirstLiquidity_);
@@ -192,6 +234,59 @@ contract LPVaultFactory {
             clone := create(0, ptr, 0x37)
         }
         if (clone == address(0)) revert CloneDeployFailed();
+    }
+
+    // ──────────────────────────────────────────────
+    // Implementation upgrade (FEAT-KX5N, UC-KX5O)
+    // ──────────────────────────────────────────────
+
+    // SC-KX5P: admin-only schedule with zero-address guard and double-schedule guard
+    /// @notice Schedules a new LPVault implementation address for upgrade after
+    ///         IMPLEMENTATION_TIMELOCK elapses. Does not change the active pointer.
+    /// @param newImpl Address of the new implementation contract
+    function scheduleImplementation(address newImpl) external onlyAdmin {
+        if (newImpl == address(0)) revert ZeroAddress();
+        if (pendingImplementation != address(0)) revert ScheduleAlreadyPending();
+
+        pendingImplementation = newImpl;
+        uint256 unlockAt = block.timestamp + IMPLEMENTATION_TIMELOCK;
+        implementationUnlockAt = unlockAt;
+
+        emit ImplementationScheduled(newImpl, unlockAt);
+    }
+
+    // SC-KX5Q: admin-only apply after timelock, increments version
+    /// @notice Applies the scheduled implementation, updating the active pointer
+    ///         and incrementing the version counter. Clears the pending state.
+    function applyImplementation() external onlyAdmin {
+        if (pendingImplementation == address(0)) revert NoPendingSchedule();
+        if (block.timestamp < implementationUnlockAt) revert TimelockNotElapsed();
+
+        address newImpl = pendingImplementation;
+
+        // Update active pointer and bump version
+        implementation = newImpl;
+        implementationVersion += 1;
+
+        // Clear pending state
+        pendingImplementation = address(0);
+        implementationUnlockAt = 0;
+
+        emit ImplementationApplied(newImpl, implementationVersion);
+    }
+
+    // SC-KX5S: admin-only cancel, clears pending state
+    /// @notice Cancels a pending implementation schedule without changing the active pointer.
+    function cancelScheduledImplementation() external onlyAdmin {
+        if (pendingImplementation == address(0)) revert NoPendingSchedule();
+
+        address cancelled = pendingImplementation;
+
+        // Clear pending state
+        pendingImplementation = address(0);
+        implementationUnlockAt = 0;
+
+        emit ImplementationCancelled(cancelled);
     }
 
     // ──────────────────────────────────────────────

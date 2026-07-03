@@ -138,6 +138,11 @@ contract LPVault {
     ///      prolonged Operator silence.
     uint256 public lastOperatorActivityTimestamp;
 
+    /// @dev Identifies which LPVault implementation this clone was deployed from.
+    ///      Set once in initialize() from the factory's implementationVersion counter.
+    ///      Off-chain systems use this to determine which code version a vault runs.
+    uint256 public implementationVersion;
+
     // ──────────────────────────────────────────────
     // Position and tick state (FEAT-T7AF)
     // ──────────────────────────────────────────────
@@ -395,6 +400,7 @@ contract LPVault {
     /// @param tickSpacing_ Minimum tick increment for positions
     /// @param factory_ Factory contract address — must equal msg.sender
     /// @param minimumFirstLiquidity_ Floor for the first mint when activeLiquidity == 0
+    /// @param version_ Implementation version from the factory's counter
     function initialize(
         bytes32 marketId_,
         address usdc_,
@@ -402,7 +408,8 @@ contract LPVault {
         address conditionalTokens_,
         int24 tickSpacing_,
         address factory_,
-        uint128 minimumFirstLiquidity_
+        uint128 minimumFirstLiquidity_,
+        uint256 version_
     ) external initializer {
         // Factory guard: caller must be the factory that deployed this clone
         if (msg.sender != factory_) revert NotFactory();
@@ -417,6 +424,7 @@ contract LPVault {
         conditionalTokens = conditionalTokens_;
         tickSpacing = tickSpacing_;
         minimumFirstLiquidity = minimumFirstLiquidity_;
+        implementationVersion = version_;
 
         // Set vault lifecycle to Active
         phase = 1;

@@ -274,7 +274,8 @@ contract VaultReInitializeTest is Test {
                 makeAddr("ct2"),
                 int24(20),
                 address(this),
-                uint128(2000)
+                uint128(2000),
+                1
             );
     }
 }
@@ -327,7 +328,8 @@ contract VaultOnlyFactoryInitializeTest is Test {
                 makeAddr("ct"),
                 int24(10),
                 address(factory), // declared factory address that msg.sender doesn't match
-                uint128(1000)
+                uint128(1000),
+                1
             );
     }
 
