@@ -123,9 +123,10 @@ OPERATOR_ADDRESS=0x...
 
 # ── Verification ─────────────────────────────────────────────────────────────
 
-# Polygonscan API key — REQUIRED for --verify; without this the verify step is skipped
-# Get one free at https://polygonscan.com/apis
-ETHERSCAN_API_KEY=<your-polygonscan-api-key>
+# Etherscan API key — REQUIRED for --verify; without this the verify step is skipped
+# One key works across all Etherscan V2 supported chains (including Polygon).
+# Get one free at https://etherscan.io/apis
+ETHERSCAN_API_KEY=<your-etherscan-api-key>
 ```
 
 > **Important:** `ORACLE_ADDRESS` and `OPERATOR_ADDRESS` **must be different wallets**. The constructor enforces this with a `RoleSeparation` revert. Using the same address for both causes the deployment to fail.
@@ -213,11 +214,13 @@ forge script script/Deploy.s.sol \
   --broadcast \
   --verify \
   --verifier etherscan \
-  --verifier-url https://api-amoy.polygonscan.com/api \
+  --verifier-url "https://api.etherscan.io/v2/api?chainid=80002" \
   --etherscan-api-key $ETHERSCAN_API_KEY
 ```
 
-> **`ETHERSCAN_API_KEY` is mandatory for `--verify`.** If it is not set (or set to an empty string), Foundry will broadcast successfully but skip verification silently — your contract will show as unverified on Polygonscan. Get a free API key at [polygonscan.com/apis](https://polygonscan.com/apis).
+> **Etherscan V2 API.** Polygonscan is now served through Etherscan's unified V2 endpoint (`https://api.etherscan.io/v2/api?chainid=<id>`). The old `api-amoy.polygonscan.com/api` and `api.polygonscan.com/api` V1 URLs are deprecated and return `NOTOK` — see the [V2 migration guide](https://docs.etherscan.io/v2-migration). Your **Etherscan API key** works across all supported chains (including Polygon); you no longer need a chain-specific key.
+>
+> **`ETHERSCAN_API_KEY` is mandatory for `--verify`.** If it is not set (or set to an empty string), Foundry will broadcast successfully but skip verification silently — your contract will show as unverified on Polygonscan. Get a free API key at [etherscan.io/apis](https://etherscan.io/apis).
 
 You will be prompted for the keystore password you set in §5.
 
@@ -266,7 +269,7 @@ forge script script/Deploy.s.sol \
   --broadcast \
   --verify \
   --verifier etherscan \
-  --verifier-url https://api.polygonscan.com/api \
+  --verifier-url "https://api.etherscan.io/v2/api?chainid=137" \
   --etherscan-api-key $ETHERSCAN_API_KEY
 ```
 
@@ -291,9 +294,8 @@ If verification was skipped (e.g., you forgot the API key), you can verify manua
 forge verify-contract \
   <FACTORY_ADDRESS> \
   src/LPVaultFactory.sol:LPVaultFactory \
-  --rpc-url https://polygon-rpc.com \
   --etherscan-api-key $ETHERSCAN_API_KEY \
-  --verifier-url https://api.polygonscan.com/api \
+  --verifier-url "https://api.etherscan.io/v2/api?chainid=137" \
   --chain-id 137 \
   --constructor-args $(cast abi-encode "constructor(address,address,address,address,address,address,address)" \
     <IMPL_ADDRESS> $USDC_ADDRESS $EXCHANGE_ADDRESS $CTF_ADDRESS $ADMIN_ADDRESS $ORACLE_ADDRESS $OPERATOR_ADDRESS)
@@ -302,13 +304,12 @@ forge verify-contract \
 forge verify-contract \
   <IMPL_ADDRESS> \
   src/LPVault.sol:LPVault \
-  --rpc-url https://polygon-rpc.com \
   --etherscan-api-key $ETHERSCAN_API_KEY \
-  --verifier-url https://api.polygonscan.com/api \
+  --verifier-url "https://api.etherscan.io/v2/api?chainid=137" \
   --chain-id 137
 ```
 
-For Amoy, replace `--chain-id 137` with `--chain-id 80002` and the mainnet verifier URL with `https://api-amoy.polygonscan.com/api`.
+For Amoy, replace both instances of `chainid=137` (in the URL) and `--chain-id 137` with `80002`.
 
 ---
 

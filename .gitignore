@@ -18,3 +18,5 @@ docs/
 
 # Claude
 plans/
+
+.claude/scheduled_tasks.lock
