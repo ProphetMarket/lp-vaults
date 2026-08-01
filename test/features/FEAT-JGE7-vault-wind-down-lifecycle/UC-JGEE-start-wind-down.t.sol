@@ -2,11 +2,12 @@
 pragma solidity 0.8.20;
 
 // UC-JGEE: Start Wind Down
-// SLICE-001: start-wind-down
+// Integration tests for every scenario in this use case.
+// Covers: SC-JGEF, SC-JGEG, SC-JGEH, SC-JGEI, SC-JGEJ, SC-JGEK
 
 import {Test} from "forge-std/Test.sol";
-import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
-import {LPVault} from "../../../../src/LPVault.sol";
+import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
+import {LPVault} from "../../../src/LPVault.sol";
 
 // ──────────────────────────────────────────────
 // Minimal ERC-20 mock with transfer + transferFrom + balanceOf + approve.

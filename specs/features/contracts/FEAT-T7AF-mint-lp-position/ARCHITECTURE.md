@@ -115,7 +115,7 @@ erDiagram
 | File | Role | Key Exports |
 |------|------|-------------|
 | `src/LPVault.sol` | Per-market vault -- position minting, tick initialization, EIP-712 verification, fee growth computation | `mintPositionFor()`, `_mintPosition()`, `_initializeTick()`, `_computeFeeGrowthInside()`, `_verifyMintIntent()` |
-| `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp/001-contract-call-operator-mint-position.t.sol` | Integration tests for all 11 scenarios | SC-T7AH through SC-T7AR |
+| `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp.t.sol` | Integration tests for all 11 scenarios | SC-T7AH through SC-T7AR |
 
 ## Event Topology
 

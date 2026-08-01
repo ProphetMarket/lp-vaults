@@ -94,7 +94,7 @@ forge test -vvv          # with call traces
 forge coverage           # coverage report
 ```
 
-The test suite includes 300+ integration tests scoped to `test/features/FEAT-*/UC-*/*.t.sol`, plus fuzz tests on Q128 math and invariant tests on tick state.
+The test suite includes 300+ integration tests, one file per use case at `test/features/FEAT-*/UC-*.t.sol`, plus fuzz tests on Q128 math and invariant tests on tick state.
 
 ### Format
 

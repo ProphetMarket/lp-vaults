@@ -2,11 +2,17 @@
 pragma solidity 0.8.20;
 
 // UC-K1MK: Pause and Unpause Vault
-// SLICE-001: pause-and-unpause-vault
+// Integration tests for every scenario in this use case.
+// Covers: SC-K1ML, SC-K1MM, SC-K1MN, SC-K1MO, SC-K1MP
 
 import {Test} from "forge-std/Test.sol";
-import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
-import {LPVault} from "../../../../src/LPVault.sol";
+import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
+import {LPVault} from "../../../src/LPVault.sol";
+
+// ──────────────────────────────────────────────
+// Minimal ERC-20 and ERC-1155 mocks — only the entry points the vault's
+// initialize(), mint, and collect paths call.
+// ──────────────────────────────────────────────
 
 contract MockERC20 {
     mapping(address => uint256) public balanceOf;

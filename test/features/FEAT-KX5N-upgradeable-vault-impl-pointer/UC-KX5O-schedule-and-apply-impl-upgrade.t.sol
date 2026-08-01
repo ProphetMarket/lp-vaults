@@ -2,11 +2,12 @@
 pragma solidity 0.8.20;
 
 // UC-KX5O: Schedule and Apply Implementation Upgrade
-// SLICE-001: schedule-apply-cancel-impl-upgrade
+// Integration tests for every scenario in this use case.
+// Covers: SC-KX5P, SC-KX5Q, SC-KX5R, SC-KX5S, SC-KX5T, SC-KX5U, SC-KX5V, SC-KX5W
 
 import {Test} from "forge-std/Test.sol";
-import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
-import {LPVault} from "../../../../src/LPVault.sol";
+import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
+import {LPVault} from "../../../src/LPVault.sol";
 
 // Minimal mocks — only the methods LPVault.initialize() calls are included.
 // This test never mints, transfers, or reads balances, so the full ERC-20

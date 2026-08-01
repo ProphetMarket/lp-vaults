@@ -82,7 +82,7 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 - Compiler: `pragma solidity 0.8.20;` (exact, not `^0.8.20`).
 - `forge fmt` on every commit. Set up a pre-commit hook.
 - Tests:
-  - `test/{Contract}.t.sol` — unit tests
+  - `test/features/{FEAT-dir}/{UC-dir}.t.sol` — integration tests, **one file per use case**. The path is derived from `specs/MODULES.md` (`Tests` column) and the spec tree; it is never chosen ad hoc. Every task and fix that touches a UC appends to that UC's single file — never a new numbered file.
   - `test/invariants/` — invariant tests (Foundry's `forge-std/StdInvariant.sol`)
   - `test/integration/` — forked-Polygon scenarios against deployed `ProphetCTFExchange`
 - Fuzz tests on all arithmetic-heavy code (Q128 math, liquidity formula, tick crossing).

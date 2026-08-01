@@ -2,11 +2,12 @@
 pragma solidity 0.8.20;
 
 // UC-REQ0: Deploy Factory
-// SLICE-001: deploy-factory-with-role-registry
+// Integration tests for every scenario in this use case.
+// Covers: SC-REQ3, SC-REQ4, SC-REQ5
 
 import {Test} from "forge-std/Test.sol";
-import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
-import {LPVault} from "../../../../src/LPVault.sol";
+import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
+import {LPVault} from "../../../src/LPVault.sol";
 
 // ──────────────────────────────────────────────
 // Minimal mocks — stub the ERC-20 and ERC-1155 entry points that

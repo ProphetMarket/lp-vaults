@@ -2,11 +2,12 @@
 pragma solidity 0.8.20;
 
 // UC-REQ1: Create Vault for Market
-// SLICE-001: create-vault-and-initialize
+// Integration tests for every scenario in this use case.
+// Covers: SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77
 
 import {Test} from "forge-std/Test.sol";
-import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
-import {LPVault} from "../../../../src/LPVault.sol";
+import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
+import {LPVault} from "../../../src/LPVault.sol";
 
 // ──────────────────────────────────────────────
 // Minimal mocks — test-only contracts that stub the ERC-20 and ERC-1155
