@@ -4,7 +4,7 @@ name: Merge Positions
 module: contracts
 domain: "@positions"
 status: implemented
-version: 1
+version: 2
 refs: [FEAT-T7AF]
 ---
 
@@ -44,6 +44,12 @@ Linked to: UC-K1M8
 
 **FR-K1M6** `When mergePositions completes, the surviving position's fee accounting shall reflect the sum of all consumed positions' uncollected fees with no loss or double-counting.`
 Fit Criterion: Given two positions with accrued fees, after merge the surviving position's `tokensOwed` includes both positions' uncollected fees and `feeGrowthInsideLastX128` is set to the current value.
+Linked to: UC-K1M8
+
+### Operator Liveness
+
+**FR-3XU7** `When mergePositions completes successfully, the system shall reset lastOperatorActivityTimestamp to block.timestamp.`
+Fit Criterion: Given the Operator successfully merges same-range positions, `lastOperatorActivityTimestamp == block.timestamp` after the call. Given the merge reverts for any reason, `lastOperatorActivityTimestamp` is unchanged. The silence timer this feeds is consumed by `emergencyCancelAll` (FEAT-JXQO, FR-JXQS).
 Linked to: UC-K1M8
 
 ## Non-Functional Requirements

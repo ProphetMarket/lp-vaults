@@ -2,8 +2,8 @@
 id: FEAT-K1M2
 name: Merge Positions
 use_cases: [UC-K1M8]
-scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC]
-last_update: 2026-07-02
+scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC, SC-3XUP, SC-3XUQ]
+last_update: 2026-08-01
 ---
 
 # Architecture: Merge Positions
@@ -69,7 +69,7 @@ erDiagram
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| call | `LPVault.mergePositions(uint256[])` | `mergePositions` | onlyOperator | `positionIds` | void | NotOperator, RangeMismatch, InsufficientPositions |
+| call | `LPVault.mergePositions(uint256[])` | `mergePositions` | onlyOperator | `positionIds` | void | NotOperator, VaultCancelled, RangeMismatch, InsufficientPositions |
 
 ## Integration Points
 
@@ -81,6 +81,8 @@ _None — merge is a pure storage operation with no external calls._
 |---------|-----------|---------------------|
 | UC-K1M8 | Merge Same-Range Positions | `src/LPVault.sol:mergePositions()` |
 | SC-K1M9 | Successful merge | `src/LPVault.sol:mergePositions()` |
+| SC-3XUP | Successful merge refreshes silence timer | `src/LPVault.sol:mergePositions()`, `src/LPVault.sol:touchesHeartbeat` |
+| SC-3XUQ | Reverted merge leaves silence timer untouched | `src/LPVault.sol:mergePositions()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-K1MA | Revert on mismatched ranges | `src/LPVault.sol:mergePositions()` |
 | SC-K1MB | Revert on empty/single input | `src/LPVault.sol:mergePositions()` |
 | SC-K1MC | Fee accounting preserved | `src/LPVault.sol:mergePositions()` |

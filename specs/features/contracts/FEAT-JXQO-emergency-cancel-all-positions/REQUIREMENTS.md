@@ -4,7 +4,7 @@ name: Emergency Cancel All Positions
 module: contracts
 domain: "@vault"
 status: implemented
-version: 1
+version: 2
 refs: [FEAT-REPZ, FEAT-JGE7]
 ---
 
@@ -17,7 +17,7 @@ refs: [FEAT-REPZ, FEAT-JGE7]
 - Does not handle individual position cancellation -- this is a vault-wide emergency operation
 - Does not handle Operator key recovery -- the assumption is the Operator is permanently absent
 - Does not provide a mechanism to un-cancel -- the Cancelled state is terminal
-- Does not handle `mergePositions` -- that function does not exist yet
+- Does not prevent an Operator that is alive but uncooperative from calling `heartbeat()` indefinitely to hold off `emergencyCancelAll` -- see ADR-3XU3
 
 ## Actors
 
@@ -43,14 +43,26 @@ Linked to: UC-JXQW
 
 ### Operator Silence Timer
 
-**FR-JXQS** `When the Operator calls notifyFees or updateTick, the system shall reset lastOperatorActivityTimestamp to block.timestamp.`
-Fit Criterion: Given Operator calls `notifyFees(amount)`, `lastOperatorActivityTimestamp == block.timestamp`. (updateTick already does this; notifyFees does not yet.)
+**FR-JXQS** `When any Operator-gated vault function completes successfully, the system shall reset lastOperatorActivityTimestamp to block.timestamp.`
+Fit Criterion: Given the Operator successfully calls any of `mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`, `lastOperatorActivityTimestamp == block.timestamp` after the call. Given the call reverts for any reason, `lastOperatorActivityTimestamp` is unchanged.
+Linked to: UC-JXQW
+
+**FR-3XTW** `When the Operator calls heartbeat(), the system shall reset lastOperatorActivityTimestamp to block.timestamp and change no other vault state.`
+Fit Criterion: Given the Operator calls `heartbeat()`, `lastOperatorActivityTimestamp == block.timestamp` and `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, `phase`, and every position and tick record are unchanged. `heartbeat()` succeeds while the vault is paused, because a pause is an Admin decision about trading and says nothing about whether the Operator is alive.
+Linked to: UC-JXQW
+
+**FR-3XTX** `If any caller other than a registered Operator calls heartbeat(), then the system shall revert.`
+Fit Criterion: Given an LP, Admin, Oracle, or arbitrary address calls `heartbeat()`, the call reverts with an access control error and `lastOperatorActivityTimestamp` is unchanged.
+Linked to: UC-JXQW
+
+**FR-3XTY** `If heartbeat() is called while the vault phase is Cancelled (3), then the system shall revert.`
+Fit Criterion: Given `phase == 3`, `heartbeat()` reverts. There is nothing left to protect once every position has been closed and distributed, so refreshing the silence timer serves no purpose.
 Linked to: UC-JXQW
 
 ### Cancelled Phase Gating
 
 **FR-JXQT** `While the vault phase is Cancelled (3), when any address calls any state-changing function, the system shall revert.`
-Fit Criterion: Given `phase == 3`, calls to `mintPositionFor`, `collect`, `notifyFees`, `updateTick`, `startWindDown`, `reclaimDeposit`, and `emergencyCancelAll` all revert.
+Fit Criterion: Given `phase == 3`, calls to `mintPositionFor`, `collect`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat`, `startWindDown`, `reclaimDeposit`, and `emergencyCancelAll` all revert.
 Linked to: UC-JXQW
 
 ## Non-Functional Requirements
@@ -71,6 +83,8 @@ Linked to: UC-JXQW
 - activeLiquidity zeroed
 - Vault enters terminal Cancelled state (phase 3)
 - All vault operations revert after cancel
-- Operator activity (notifyFees, updateTick) resets the silence timer
+- Every successful Operator-gated call (mintPositionFor, notifyFees, updateTick, mergePositions, heartbeat) resets the silence timer
+- A reverted Operator call leaves the silence timer untouched
+- `heartbeat()` is Operator-only, changes no other state, works while paused, and reverts once the vault is Cancelled
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
 - FEATURES.md status is `implemented`

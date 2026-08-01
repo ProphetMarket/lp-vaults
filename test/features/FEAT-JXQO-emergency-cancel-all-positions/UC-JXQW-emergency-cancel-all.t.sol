@@ -419,6 +419,27 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
         vault.updateTick(int24(50));
     }
 
+    // SC-JXR1: mergePositions reverts with VaultCancelled.
+    // emergencyCancelAll zeroes each position's liquidity but preserves its owner and
+    // tick range, so without an explicit phase guard the range-match checks would still
+    // pass and the merge would succeed against a fully distributed vault.
+    function test_mergePositionsReverts() public {
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = positionIdA;
+        ids[1] = positionIdA;
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.VaultCancelled.selector);
+        vault.mergePositions(ids);
+    }
+
+    // SC-JXR1: heartbeat reverts with VaultCancelled
+    function test_heartbeatReverts() public {
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.VaultCancelled.selector);
+        vault.heartbeat();
+    }
+
     // SC-JXR1: startWindDown reverts with VaultNotActive
     function test_startWindDownReverts() public {
         vm.prank(oracleAddr);
@@ -478,6 +499,234 @@ contract OperatorActivityResetsTimelockTest is EmergencyCancelTestBase {
         vault.updateTick(int24(10));
 
         assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "updateTick should reset timestamp");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-3XTZ: Heartbeat defers emergency cancel on a quiet market
+// What: On a market where the tick has not moved and no fee revenue arrived —
+//       so updateTick reverts SameTick and notifyFees reverts ZeroAmount —
+//       heartbeat() still refreshes the silence timer and pushes the
+//       emergencyCancelAll deadline back.
+// Why:  This is the whole point of the change. Before it, a healthy Operator
+//       running a quiet, stable market had no way to prove liveness, because
+//       the only two functions that touched the timer both legitimately
+//       revert when there is nothing to do.
+// Example: timelock has elapsed; operator calls heartbeat(); an immediate
+//          emergencyCancelAll() reverts with TimelockNotElapsed.
+// ──────────────────────────────────────────────
+contract HeartbeatOnQuietMarketTest is EmergencyCancelTestBase {
+    function setUp() public override {
+        super.setUp();
+        _warpPastTimelock();
+    }
+
+    // SC-3XTZ: on a quiet market the two pre-existing liveness paths both revert,
+    // which is exactly the condition that made a live Operator look silent
+    function test_quietMarketLeavesOperatorNoOtherWayToProveLiveness() public {
+        // Read the tick up front: an inline call here would consume the prank
+        int24 unchangedTick = vault.currentTick();
+
+        // The tick has not moved since vault creation, so updateTick has nothing to do
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.SameTick.selector);
+        vault.updateTick(unchangedTick);
+
+        // No fee revenue arrived, so notifyFees has nothing to distribute
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.ZeroAmount.selector);
+        vault.notifyFees(0);
+    }
+
+    // SC-3XTZ: heartbeat refreshes the silence timer
+    function test_heartbeatRefreshesSilenceTimer() public {
+        vm.prank(operatorAddr);
+        vault.heartbeat();
+
+        assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "heartbeat should refresh the silence timer");
+    }
+
+    // SC-3XTZ: refreshing the timer defers emergencyCancelAll that was already in reach
+    function test_heartbeatDefersEmergencyCancel() public {
+        vm.prank(operatorAddr);
+        vault.heartbeat();
+
+        vm.prank(lpA);
+        vm.expectRevert(LPVault.TimelockNotElapsed.selector);
+        vault.emergencyCancelAll();
+    }
+
+    // SC-3XTZ: heartbeat is purely a liveness signal — it moves no accounting state
+    function test_heartbeatChangesNoOtherVaultState() public {
+        uint128 liquidityBefore = vault.activeLiquidity();
+        int24 tickBefore = vault.currentTick();
+        uint256 feeGrowthBefore = vault.feeGrowthGlobalX128();
+        uint256 nextIdBefore = vault.nextPositionId();
+        uint8 phaseBefore = vault.phase();
+
+        vm.prank(operatorAddr);
+        vault.heartbeat();
+
+        assertEq(vault.activeLiquidity(), liquidityBefore, "activeLiquidity must not move");
+        assertEq(vault.currentTick(), tickBefore, "currentTick must not move");
+        assertEq(vault.feeGrowthGlobalX128(), feeGrowthBefore, "feeGrowthGlobalX128 must not move");
+        assertEq(vault.nextPositionId(), nextIdBefore, "nextPositionId must not move");
+        assertEq(vault.phase(), phaseBefore, "phase must not move");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-3XU0: Position minting and merging reset the timelock
+// What: mintPositionFor and mergePositions each refresh the silence timer,
+//       so active deposit processing and position housekeeping now count as
+//       proof of life.
+// Why:  Previously neither touched the timer at all — an Operator could be
+//       busy onboarding LPs and still be treated as silent.
+// Example: timelock has elapsed; operator mints a position; an immediate
+//          emergencyCancelAll() reverts with TimelockNotElapsed.
+// ──────────────────────────────────────────────
+contract MintAndMergeResetTimelockTest is EmergencyCancelTestBase {
+    function setUp() public override {
+        super.setUp();
+        _warpPastTimelock();
+    }
+
+    // SC-3XU0: minting a position for an LP is proof the Operator is alive
+    function test_mintPositionForRefreshesSilenceTimer() public {
+        mockUsdc.mint(lpB, 1_000_000);
+        vm.prank(lpB);
+        mockUsdc.approve(address(vault), type(uint256).max);
+
+        bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-live"));
+        vm.prank(operatorAddr);
+        vault.mintPositionFor(lpB, int24(0), int24(100), 1000, keccak256("mint-b-live"), sigB);
+
+        assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "mint should refresh the silence timer");
+    }
+
+    // SC-3XU0: and that refresh actually defers the emergency cancel
+    function test_mintPositionForDefersEmergencyCancel() public {
+        mockUsdc.mint(lpB, 1_000_000);
+        vm.prank(lpB);
+        mockUsdc.approve(address(vault), type(uint256).max);
+
+        bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-defer"));
+        vm.prank(operatorAddr);
+        vault.mintPositionFor(lpB, int24(0), int24(100), 1000, keccak256("mint-b-defer"), sigB);
+
+        vm.prank(lpA);
+        vm.expectRevert(LPVault.TimelockNotElapsed.selector);
+        vault.emergencyCancelAll();
+    }
+
+    // SC-3XU0: merging same-range positions is likewise proof of life
+    function test_mergePositionsRefreshesSilenceTimer() public {
+        // Give LP-A a second position on the identical range so the two can be merged
+        bytes memory sigA2 = _signMintIntent(LP_A_PK, lpA, int24(0), int24(100), 1000, keccak256("mint-a-2"));
+        vm.prank(operatorAddr);
+        uint256 positionIdA2 = vault.mintPositionFor(lpA, int24(0), int24(100), 1000, keccak256("mint-a-2"), sigA2);
+
+        // Let the timelock lapse again so the merge has something to push back
+        _warpPastTimelock();
+
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = positionIdA;
+        ids[1] = positionIdA2;
+        vm.prank(operatorAddr);
+        vault.mergePositions(ids);
+
+        assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "merge should refresh the silence timer");
+
+        vm.prank(lpA);
+        vm.expectRevert(LPVault.TimelockNotElapsed.selector);
+        vault.emergencyCancelAll();
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-3XU1, SC-3XUO, SC-3XU2: heartbeat access control and phase behavior
+// What: heartbeat() is Operator-only, keeps working while trading is paused,
+//       and reverts once the vault reaches the terminal Cancelled phase.
+// Why:  A non-Operator must not be able to hold off emergencyCancelAll. A
+//       pause is an Admin decision about trading and says nothing about
+//       whether the Operator is alive, so a paused vault must not drift
+//       toward cancellation. Once every position is closed there is nothing
+//       left to protect.
+// Example: LP calls heartbeat() -> NotOperator; admin pauses, operator
+//          heartbeats fine; after cancel, heartbeat() -> VaultCancelled.
+// ──────────────────────────────────────────────
+contract HeartbeatAccessAndPhaseTest is EmergencyCancelTestBase {
+    // SC-3XU1: an LP cannot refresh the timer that protects them
+    function test_revertsWhenLpCallsHeartbeat() public {
+        uint256 before = vault.lastOperatorActivityTimestamp();
+
+        vm.prank(lpA);
+        vm.expectRevert(LPVault.NotOperator.selector);
+        vault.heartbeat();
+
+        assertEq(vault.lastOperatorActivityTimestamp(), before, "a rejected call must not move the timer");
+    }
+
+    // SC-3XU1: neither can the Admin or the Oracle — the gate is the Operator role
+    function test_revertsWhenAdminOrOracleCallsHeartbeat() public {
+        vm.prank(admin);
+        vm.expectRevert(LPVault.NotOperator.selector);
+        vault.heartbeat();
+
+        vm.prank(oracleAddr);
+        vm.expectRevert(LPVault.NotOperator.selector);
+        vault.heartbeat();
+    }
+
+    // SC-3XUO: while paused, every other Operator entry point is gated off by
+    // whenNotPaused, leaving heartbeat as the only way to signal liveness
+    function test_heartbeatWorksWhileTradingIsPaused() public {
+        vm.prank(admin);
+        vault.pauseTrading();
+
+        // All four other Operator entry points are gated off by whenNotPaused
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.TradingIsPaused.selector);
+        vault.updateTick(int24(10));
+
+        mockUsdc.mint(address(vault), 100);
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.TradingIsPaused.selector);
+        vault.notifyFees(100);
+
+        bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-paused"));
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.TradingIsPaused.selector);
+        vault.mintPositionFor(lpB, int24(0), int24(100), 1000, keccak256("mint-b-paused"), sigB);
+
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = positionIdA;
+        ids[1] = positionIdA;
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.TradingIsPaused.selector);
+        vault.mergePositions(ids);
+
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(operatorAddr);
+        vault.heartbeat();
+
+        assertEq(
+            vault.lastOperatorActivityTimestamp(), block.timestamp, "heartbeat must still work while trading is paused"
+        );
+    }
+
+    // SC-3XU2: once the vault is Cancelled there is nothing left to protect
+    function test_revertsWhenVaultIsCancelled() public {
+        _warpPastTimelock();
+        vm.prank(lpA);
+        vault.emergencyCancelAll();
+
+        assertEq(vault.phase(), 3, "vault should be in the terminal Cancelled phase");
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.VaultCancelled.selector);
+        vault.heartbeat();
     }
 }
 

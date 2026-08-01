@@ -212,6 +212,23 @@ contract NotifyFeesSuccessTest is NotifyFeesTestBase {
         assertEq(mockUsdc.balanceOf(address(vault)), vaultBalBefore, "vault USDC balance should not change");
     }
 
+    // SC-TOGT: a successful notification refreshes the Operator silence timer.
+    // notifyFees has always written this, but the side effect was undocumented
+    // and unasserted here; it feeds the emergency-cancel timelock (FEAT-JXQO).
+    function test_refreshesOperatorSilenceTimer() public {
+        // Move well past vault creation so a stale timer would be obvious
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(operatorAddr);
+        vault.notifyFees(amount);
+
+        assertEq(
+            vault.lastOperatorActivityTimestamp(),
+            block.timestamp,
+            "a successful notification should refresh the silence timer"
+        );
+    }
+
     // SC-TOGT: no position-level state changes
     function test_positionStateUnchanged() public {
         (address owner, int24 tl, int24 tu, uint128 liq, uint256 feeGrowthLast, uint256 owed) = vault.positions(0);
@@ -367,6 +384,25 @@ contract NotifyFeesZeroAmountTest is NotifyFeesTestBase {
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.ZeroAmount.selector);
         vault.notifyFees(0);
+    }
+
+    // SC-TOGX: the rejected call does not refresh the Operator silence timer.
+    // This is why heartbeat() exists — on a market with no fee revenue, an
+    // Operator cannot prove liveness through this path (FEAT-JXQO).
+    function test_revertedNotifyLeavesSilenceTimerUntouched() public {
+        uint256 timerBefore = vault.lastOperatorActivityTimestamp();
+
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.ZeroAmount.selector);
+        vault.notifyFees(0);
+
+        assertEq(
+            vault.lastOperatorActivityTimestamp(),
+            timerBefore,
+            "a reverted notification must not count as proof of life"
+        );
     }
 }
 

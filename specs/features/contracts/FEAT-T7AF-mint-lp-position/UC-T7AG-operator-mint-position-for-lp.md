@@ -3,7 +3,7 @@ id: UC-T7AG
 name: Operator Mint Position for LP
 feature: FEAT-T7AF
 status: implemented
-version: 1
+version: 2
 actor: Operator
 ---
 
@@ -59,6 +59,7 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 - `usedIntents[intentId]` storage: set to true
 - `nextPositionId` storage: incremented
 - `activeLiquidity` storage: increased by liquidity
+- `lastOperatorActivityTimestamp` storage: refreshed to `block.timestamp` -- a successful mint is proof the Operator is alive (FEAT-JXQO)
 - No fee distribution triggered
 - No tick crossing triggered
 
@@ -285,3 +286,44 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 - No state changes
 - No USDC transferred
 - No events emitted
+
+### SC-3XU5: Successful mint refreshes the Operator silence timer
+
+**Given:**
+- Vault is in Active phase and the Operator holds a valid LP mint intent
+- `lastOperatorActivityTimestamp` is old enough that the emergency-cancel timelock would otherwise be within reach
+
+**Steps:**
+1. Operator submits the LP's signed mint intent to `mintPositionFor`
+2. The mint completes as in SC-T7AH
+3. System refreshes `lastOperatorActivityTimestamp` to `block.timestamp`
+
+**Outcomes:**
+- `lastOperatorActivityTimestamp == block.timestamp`
+- Processing LP deposits now counts as proof of life, where previously it did not
+
+**Side Effects:**
+- All the normal side effects of a successful mint (SC-T7AH)
+- `lastOperatorActivityTimestamp` storage refreshed
+
+---
+
+### SC-3XU6: Reverted mint leaves the Operator silence timer untouched
+
+**Given:**
+- Vault is in Active phase
+- `lastOperatorActivityTimestamp` holds some earlier value T
+
+**Steps:**
+1. Operator submits a mint that fails validation -- for example a duplicate `intentId` (SC-T7AP) or an inverted range (SC-T7AK)
+2. The whole transaction reverts
+
+**Outcomes:**
+- The call reverts with the relevant error
+- `lastOperatorActivityTimestamp` is still T -- a failed call is not proof of life
+
+**Side Effects:**
+- No state changes at all
+- No events emitted
+
+---
