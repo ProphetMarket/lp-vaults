@@ -3,7 +3,7 @@ id: UC-TVS1
 name: Update Current Tick
 feature: FEAT-TVS0
 status: implemented
-version: 1
+version: 2
 actor: Operator
 ---
 
@@ -19,6 +19,8 @@ actor: Operator
 ## Trigger
 
 Operator calls `updateTick(int24 newTick)` on the vault.
+
+The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the shared Operator-liveness mechanism owned by FEAT-JXQO (FR-JXQS): every successful Operator-gated call refreshes it, and a reverted call does not. A `SameTick` revert (SC-TVS7) therefore leaves the timer untouched -- which is why `heartbeat()` exists for markets whose tick does not move.
 
 ---
 

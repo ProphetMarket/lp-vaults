@@ -619,3 +619,72 @@ contract MintPositionSignatureTest is MintPositionTestBase {
         vault.mintPositionFor(lp, int24(20), int24(80), 600, keccak256("empty"), "");
     }
 }
+
+// ──────────────────────────────────────────────
+// SC-3XU5, SC-3XU6: Minting feeds the Operator silence timer
+// What: A successful mintPositionFor refreshes lastOperatorActivityTimestamp;
+//       a mint that reverts leaves it exactly where it was.
+// Why:  Processing LP deposits is real Operator work and should count as proof
+//       of life against the emergency-cancel timelock (FEAT-JXQO, FR-JXQS).
+//       A failed call must not count — otherwise a broken Operator could prove
+//       liveness by failing repeatedly.
+// Example: warp a day forward, mint succeeds → timer == block.timestamp;
+//          replay the same intentId → reverts, timer unchanged.
+// ──────────────────────────────────────────────
+contract MintRefreshesOperatorSilenceTimerTest is MintPositionTestBase {
+    // SC-3XU5: a successful mint advances the timer to the current block
+    function test_successfulMintRefreshesSilenceTimer() public {
+        // Move well past vault creation so a stale timer would be obvious
+        vm.warp(block.timestamp + 1 days);
+
+        bytes32 intentId = keccak256("mint-refreshes-timer");
+        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, intentId);
+
+        vm.prank(operatorAddr);
+        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, sig);
+
+        assertEq(
+            vault.lastOperatorActivityTimestamp(), block.timestamp, "a successful mint should refresh the silence timer"
+        );
+    }
+
+    // SC-3XU6: a mint rejected for a duplicate intentId leaves the timer alone
+    function test_revertedMintOnDuplicateIntentLeavesSilenceTimerUntouched() public {
+        bytes32 intentId = keccak256("mint-duplicate-intent");
+        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, intentId);
+
+        vm.prank(operatorAddr);
+        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, sig);
+
+        uint256 timerAfterFirstMint = vault.lastOperatorActivityTimestamp();
+
+        // Time passes, then the same intent is replayed and rejected
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.IntentAlreadyUsed.selector);
+        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, sig);
+
+        assertEq(
+            vault.lastOperatorActivityTimestamp(),
+            timerAfterFirstMint,
+            "a reverted mint must not count as proof of life"
+        );
+    }
+
+    // SC-3XU6: the same holds for a mint rejected on range validation
+    function test_revertedMintOnInvertedRangeLeavesSilenceTimerUntouched() public {
+        uint256 timerBefore = vault.lastOperatorActivityTimestamp();
+
+        vm.warp(block.timestamp + 1 days);
+
+        bytes32 intentId = keccak256("mint-inverted-range");
+        bytes memory sig = _signMintIntent(LP_PK, lp, int24(80), int24(20), 600, intentId);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.InvalidRange.selector);
+        vault.mintPositionFor(lp, int24(80), int24(20), 600, intentId, sig);
+
+        assertEq(vault.lastOperatorActivityTimestamp(), timerBefore, "a reverted mint must not count as proof of life");
+    }
+}

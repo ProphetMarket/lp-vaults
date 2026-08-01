@@ -2,8 +2,8 @@
 id: FEAT-JXQO
 name: Emergency Cancel All Positions
 use_cases: [UC-JXQW]
-scenarios: [SC-JXQX, SC-JXQY, SC-JXQZ, SC-JXR0, SC-JXR1, SC-JXR2]
-last_update: 2026-07-02
+scenarios: [SC-JXQX, SC-JXQY, SC-JXQZ, SC-JXR0, SC-JXR1, SC-JXR2, SC-3XTZ, SC-3XU0, SC-3XU1, SC-3XUO, SC-3XU2]
+last_update: 2026-08-01
 ---
 
 # Architecture: Emergency Cancel All Positions
@@ -21,7 +21,7 @@ C4Context
     System(factory, "LPVaultFactory", "Role registry (not directly involved)")
     System_Ext(usdc, "USDC", "ERC-20 stablecoin distributed to position owners")
     Rel(lp, vault, "emergencyCancelAll()", "contract call")
-    Rel(operator, vault, "notifyFees/updateTick (resets timer)", "contract call")
+    Rel(operator, vault, "any Operator call or heartbeat() (refreshes timer)", "contract call")
     Rel(vault, usdc, "transfer to each position owner", "ERC-20")
 ```
 
@@ -47,7 +47,7 @@ C4Container
 erDiagram
     LPVAULT {
         uint8 phase "Active(1), WindDown(2), or Cancelled(3)"
-        uint256 lastOperatorActivityTimestamp "reset by notifyFees and updateTick"
+        uint256 lastOperatorActivityTimestamp "refreshed by every successful Operator-gated call"
         uint256 nextPositionId "total positions minted (iteration bound)"
         uint128 activeLiquidity "zeroed by emergencyCancelAll"
     }
@@ -73,8 +73,8 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | Vault with emergency cancel, silence timer, terminal state | `emergencyCancelAll()`, `EMERGENCY_CANCEL_TIMELOCK`, `EmergencyCancelExecuted` event; modified `notifyFees` (timestamp reset) |
-| `test/features/FEAT-JXQO-emergency-cancel-all-positions/UC-JXQW-emergency-cancel-all.t.sol` | Integration tests | All 6 scenarios |
+| `src/LPVault.sol` | Vault with emergency cancel, silence timer, terminal state | `emergencyCancelAll()`, `heartbeat()`, `touchesHeartbeat` modifier, `EMERGENCY_CANCEL_TIMELOCK`, `EmergencyCancelExecuted` event |
+| `test/features/FEAT-JXQO-emergency-cancel-all-positions/UC-JXQW-emergency-cancel-all.t.sol` | Integration tests | All 11 scenarios |
 
 ## Event Topology
 
@@ -94,7 +94,8 @@ erDiagram
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| call | `LPVault.emergencyCancelAll()` | `emergencyCancelAll` | any position holder + timelock | none | void | TimelockNotElapsed, NoPositionHeld, VaultNotActive |
+| call | `LPVault.emergencyCancelAll()` | `emergencyCancelAll` | any position holder + timelock | none | void | TimelockNotElapsed, NoPositionHeld, VaultCancelled |
+| call | `LPVault.heartbeat()` | `heartbeat` | onlyOperator | none | void | NotOperator, VaultCancelled |
 
 ## Integration Points
 
@@ -133,12 +134,30 @@ stateDiagram-v2
 | SC-JXQZ | Revert if no position | `src/LPVault.sol:emergencyCancelAll()` |
 | SC-JXR0 | Multi-LP distribution | `src/LPVault.sol:emergencyCancelAll()` |
 | SC-JXR1 | Terminal state gates operations | `src/LPVault.sol:emergencyCancelAll()`, phase guards on all functions |
-| SC-JXR2 | Operator activity resets timelock | `src/LPVault.sol:notifyFees()`, `src/LPVault.sol:updateTick()` |
+| SC-JXR2 | Operator activity resets timelock | `src/LPVault.sol:touchesHeartbeat`, `src/LPVault.sol:notifyFees()`, `src/LPVault.sol:updateTick()` |
+| SC-3XTZ | Heartbeat defers emergency cancel | `src/LPVault.sol:heartbeat()`, `src/LPVault.sol:touchesHeartbeat` |
+| SC-3XU0 | Mint and merge reset the timelock | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:mergePositions()`, `src/LPVault.sol:touchesHeartbeat` |
+| SC-3XU1 | Non-Operator cannot heartbeat | `src/LPVault.sol:heartbeat()`, `src/LPVault.sol:onlyOperator` |
+| SC-3XUO | Heartbeat works while paused | `src/LPVault.sol:heartbeat()` |
+| SC-3XU2 | Heartbeat reverts once Cancelled | `src/LPVault.sol:heartbeat()` |
 
 ## Architecture Decisions
 
 **ADR-JXQO:** Iterate all positions in a single transaction
 In the context of emergency cancel, facing the choice between iterating all positions atomically vs. a claim-based withdrawal pattern (each LP withdraws individually after cancel), we decided to iterate and distribute in one transaction to achieve simplicity and finality -- once emergencyCancelAll succeeds, no LP action is needed to recover funds, accepting the gas bound of O(nextPositionId) which is acceptable for Prophet markets (expected low hundreds of positions per vault).
+
+**ADR-3XU3:** Two liveness mechanisms -- an automatic modifier plus a dedicated heartbeat
+In the context of proving the Operator is alive, facing the fact that `lastOperatorActivityTimestamp` was written only inside `updateTick` and `notifyFees` -- both of which legitimately revert on a quiet market (`SameTick`, `ZeroAmount`), while `mintPositionFor` and `mergePositions` did not touch it at all -- we decided on two mechanisms rather than one: a `touchesHeartbeat` modifier stacked alongside `onlyOperator` on every Operator-gated function so that any successful Operator call counts as proof of life automatically, plus a dedicated `heartbeat()` for markets with no other Operator action to piggyback on. This achieves liveness that tracks what the Operator actually is rather than what the market happens to be doing.
+
+We chose a separate modifier over folding the write into `onlyOperator` so that `onlyOperator` keeps doing exactly one thing (access control), and so the requirement stays visible in each function's signature -- a reviewer immediately notices a new Operator-gated function missing it, which a write buried in the modifier body would not surface. Because a revert rolls back the whole transaction, writing the timestamp before the function body is observationally identical to writing it after: the timer advances if and only if the call succeeds.
+
+We deliberately left `updateTick`'s `SameTick` revert and `notifyFees`'s `ZeroAmount` revert intact. Both are legitimate guards against wasted or mistaken calls; weakening them so they could double as liveness pings would be worse than giving the Operator a clean, dedicated function.
+
+We accept a residual risk this does not address: an Operator that is technically alive but uncooperative can call `heartbeat()` indefinitely to keep `emergencyCancelAll` out of reach without doing any real work. That is the opposite failure mode (a false-positive freeze rather than a false-negative liveness signal) and materially lower stakes; it matters mainly because `emergencyCancelAll` is currently the only unconditional exit path, and later work in this sequence makes the individual exit paths work regardless of Operator behavior, which shrinks the exposure further.
+
+**Rejected alternative -- fold the timestamp write into `onlyOperator`:** Fewer modifiers at each call site, but it gives one modifier two responsibilities and hides a state write inside something named for access control. A reader auditing `onlyOperator` would not expect an SSTORE.
+
+**Rejected alternative -- treat any Operator call as liveness, including reverted ones:** Impossible on-chain by construction -- a reverted call leaves no state behind. Any scheme approximating it (for example a `try`/`catch` wrapper) would let a broken Operator prove liveness by failing repeatedly, which inverts the intent.
 
 **ADR-JXQP:** Position-holder gating instead of open-access
 In the context of who can trigger the emergency cancel, facing the choice between allowing any address vs. restricting to position holders, we decided to require the caller to hold at least one position to prevent griefing by external addresses that have no stake in the vault, accepting that an LP with even a dust position can trigger the cancel once the timelock elapses.

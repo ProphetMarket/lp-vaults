@@ -3,7 +3,7 @@ id: UC-TOGS
 name: Operator Notify Fee Revenue
 feature: FEAT-TOGR
 status: implemented
-version: 1
+version: 2
 actor: Operator
 ---
 
@@ -41,6 +41,7 @@ Operator calls `notifyFees(amount)` on the vault.
 
 **Side Effects:**
 - `feeGrowthGlobalX128` storage: incremented by `mulDiv(amount, Q128, activeLiquidity)`
+- `lastOperatorActivityTimestamp` storage: refreshed to `block.timestamp` -- a successful notification is proof the Operator is alive (FEAT-JXQO)
 - `FeesNotified(amount, feeGrowthGlobalX128)` event emitted
 - No USDC transfers during the call
 - No position-level state changes (fees accrue lazily via the global accumulator)
@@ -65,6 +66,7 @@ Operator calls `notifyFees(amount)` on the vault.
 
 **Side Effects:**
 - `feeGrowthGlobalX128` storage updated twice
+- `lastOperatorActivityTimestamp` storage refreshed on each call
 - Two `FeesNotified` events emitted
 - No USDC transfers
 - No position-level state changes
@@ -124,7 +126,7 @@ Operator calls `notifyFees(amount)` on the vault.
 - Call reverts; no state changes
 
 **Side Effects:**
-- No storage updates
+- No storage updates -- in particular `lastOperatorActivityTimestamp` is NOT refreshed, so a market with no fee revenue cannot prove Operator liveness through this path; `heartbeat()` exists for that (FEAT-JXQO)
 - No events emitted
 
 ---

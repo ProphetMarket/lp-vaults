@@ -364,6 +364,18 @@ contract LPVault {
         _;
     }
 
+    /// @dev Records Operator liveness (FEAT-JXQO, FR-JXQS). Stacked alongside onlyOperator
+    ///      on every Operator-gated function so any successful Operator call refreshes the
+    ///      emergency-cancel silence timer. Kept separate from onlyOperator so that modifier
+    ///      does access control only, and so the requirement stays visible in each function's
+    ///      signature — a new Operator-gated function missing it is obvious at a glance.
+    ///      Writing before the body is equivalent to writing after: a revert rolls back the
+    ///      whole transaction, so the timer advances if and only if the call succeeds.
+    modifier touchesHeartbeat() {
+        lastOperatorActivityTimestamp = block.timestamp;
+        _;
+    }
+
     /// @dev Inlined reentrancy guard. _reentrancyGuard is set to 1 in initialize().
     modifier nonReentrant() {
         if (_reentrancyGuard != 1) revert Reentrancy();
@@ -665,7 +677,7 @@ contract LPVault {
         uint256 usdcAmount,
         bytes32 intentId,
         bytes calldata signature
-    ) external onlyOperator whenNotPaused nonReentrant returns (uint256 positionId) {
+    ) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat returns (uint256 positionId) {
         // --- Checks ---
 
         // Vault must be active (not wound down)
@@ -885,7 +897,7 @@ contract LPVault {
     ///      an accounting mismatch that would strand LP claims. This matches the CTF Exchange
     ///      trust model where the operator manages fee sweeps.
     /// @param amount The amount of USDC fee revenue to distribute across active liquidity
-    function notifyFees(uint256 amount) external onlyOperator whenNotPaused {
+    function notifyFees(uint256 amount) external onlyOperator whenNotPaused touchesHeartbeat {
         // Cancelled vaults have already distributed all funds
         if (phase == 3) revert VaultCancelled();
 
@@ -903,10 +915,29 @@ contract LPVault {
         // (< 1/2^128 USDC per unit of liquidity per call).
         feeGrowthGlobalX128 += _mulDiv(amount, Q128, uint256(activeL));
 
-        // Reset operator-silence timer so emergencyCancelAll timelock restarts
-        lastOperatorActivityTimestamp = block.timestamp;
-
         emit FeesNotified(amount, feeGrowthGlobalX128);
+    }
+
+    // ──────────────────────────────────────────────
+    // Operator liveness (FEAT-JXQO, UC-JXQW)
+    // ──────────────────────────────────────────────
+
+    // SC-3XTZ, SC-3XU1, SC-3XUO, SC-3XU2: dedicated Operator liveness signal
+    /// @notice Records that the Operator is still alive, refreshing the emergency-cancel
+    ///         silence timer without changing any other vault state.
+    /// @dev OPERATOR TRUST ASSUMPTION: The Operator can call this indefinitely to keep
+    ///      `emergencyCancelAll` out of reach without doing any real work. LPs trust the
+    ///      Operator not to hold the vault hostage this way. This is the accepted residual
+    ///      risk recorded in ADR-3XU3; it is the inverse of the problem this function solves,
+    ///      which is a genuinely healthy Operator being unable to prove liveness at all on a
+    ///      quiet market, where `updateTick` reverts SameTick and `notifyFees` reverts ZeroAmount.
+    ///
+    ///      Deliberately not gated by `whenNotPaused`: a pause is an Admin decision about
+    ///      trading and says nothing about whether the Operator is alive, so a paused vault
+    ///      must not drift toward emergency cancellation while its Operator still responds.
+    function heartbeat() external onlyOperator touchesHeartbeat {
+        // Cancelled vaults have already distributed all funds — nothing left to protect
+        if (phase == 3) revert VaultCancelled();
     }
 
     // ──────────────────────────────────────────────
@@ -922,7 +953,7 @@ contract LPVault {
     ///      Crosses every initialized tick between currentTick and newTick, flipping
     ///      feeGrowthOutsideX128 and applying liquidityNet to activeLiquidity.
     /// @param newTick The new price tick to set
-    function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant {
+    function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
         // Phase check: only Active vaults accept tick updates
         if (phase != 1) revert VaultNotActive();
 
@@ -958,7 +989,6 @@ contract LPVault {
         }
 
         currentTick = newTick;
-        lastOperatorActivityTimestamp = block.timestamp;
 
         emit TickUpdated(oldTick, newTick, crossCount);
     }
@@ -980,7 +1010,18 @@ contract LPVault {
     ///      liquidityNet) is unchanged since total liquidity on the range stays the same.
     /// @param positionIds Array of position IDs to merge — must have >= 2 elements,
     ///        all sharing the same owner, tickLower, and tickUpper
-    function mergePositions(uint256[] calldata positionIds) external onlyOperator whenNotPaused nonReentrant {
+    function mergePositions(uint256[] calldata positionIds)
+        external
+        onlyOperator
+        whenNotPaused
+        nonReentrant
+        touchesHeartbeat
+    {
+        // Cancelled vaults have already distributed all funds — nothing left to merge.
+        // Deliberately Cancelled-only rather than `phase != 1`: FEAT-JGE7 documents that
+        // the Operator may still merge positions during WindDown while LPs exit.
+        if (phase == 3) revert VaultCancelled();
+
         // At least two positions required to merge
         if (positionIds.length < 2) revert InsufficientPositions();
 

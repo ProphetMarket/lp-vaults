@@ -3,7 +3,7 @@ id: UC-K1M8
 name: Merge Same-Range Positions
 feature: FEAT-K1M2
 status: implemented
-version: 1
+version: 2
 actor: Operator
 ---
 
@@ -42,6 +42,7 @@ Operator calls `mergePositions(uint256[] calldata positionIds)` on the vault.
 **Side Effects:**
 - `PositionsMerged(uint256[] positionIds, uint256 survivorId)` event emitted
 - Tick `liquidityGross` unchanged (net liquidity on the range is the same)
+- `lastOperatorActivityTimestamp` storage: refreshed to `block.timestamp` -- a successful merge is proof the Operator is alive (FEAT-JXQO)
 - No USDC transferred (fees rolled into tokensOwed on survivor)
 
 ---
@@ -104,5 +105,46 @@ Operator calls `mergePositions(uint256[] calldata positionIds)` on the vault.
 **Side Effects:**
 - No fees lost
 - No double-counting possible on next collect
+
+---
+
+### SC-3XUP: Successful merge refreshes the Operator silence timer
+
+**Given:**
+- Vault is in Active phase with two same-range positions owned by the same LP
+- `lastOperatorActivityTimestamp` is old enough that the emergency-cancel timelock would otherwise be within reach
+
+**Steps:**
+1. Operator calls `mergePositions([posA, posB])`
+2. The merge completes as in SC-K1M9
+3. System refreshes `lastOperatorActivityTimestamp` to `block.timestamp`
+
+**Outcomes:**
+- `lastOperatorActivityTimestamp == block.timestamp`
+- Position housekeeping now counts as proof of life, where previously it did not
+
+**Side Effects:**
+- All the normal side effects of a successful merge (SC-K1M9)
+- `lastOperatorActivityTimestamp` storage refreshed
+
+---
+
+### SC-3XUQ: Reverted merge leaves the Operator silence timer untouched
+
+**Given:**
+- Vault is in Active phase
+- `lastOperatorActivityTimestamp` holds some earlier value T
+
+**Steps:**
+1. Operator calls `mergePositions` with input that fails validation -- for example mismatched ranges (SC-K1MA) or a single-item array (SC-K1MB)
+2. The whole transaction reverts
+
+**Outcomes:**
+- The call reverts with the relevant error
+- `lastOperatorActivityTimestamp` is still T -- a failed call is not proof of life
+
+**Side Effects:**
+- No state changes at all
+- No events emitted
 
 ---

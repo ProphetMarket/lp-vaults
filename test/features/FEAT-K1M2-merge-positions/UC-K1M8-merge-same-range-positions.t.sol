@@ -617,3 +617,46 @@ contract MergePositionsWraparoundConsumedTest is MergePositionsWraparoundTestBas
         assertEq(consumedLiq, 0, "consumed position liquidity should be zeroed");
     }
 }
+
+// ──────────────────────────────────────────────
+// SC-3XUP, SC-3XUQ: Merging feeds the Operator silence timer
+// What: A successful mergePositions refreshes lastOperatorActivityTimestamp;
+//       a merge that reverts leaves it exactly where it was.
+// Why:  Position housekeeping is real Operator work and should count as proof
+//       of life against the emergency-cancel timelock (FEAT-JXQO, FR-JXQS).
+//       A failed call must not count.
+// Example: warp a day forward, merge posA+posB → timer == block.timestamp;
+//          merge a single-item array → reverts, timer unchanged.
+// ──────────────────────────────────────────────
+contract MergeRefreshesOperatorSilenceTimerTest is MergePositionsTestBase {
+    // SC-3XUP: a successful merge advances the timer to the current block
+    function test_successfulMergeRefreshesSilenceTimer() public {
+        // Move well past the setUp mints so a stale timer would be obvious
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(operatorAddr);
+        vault.mergePositions(_buildIds(posA, posB));
+
+        assertEq(
+            vault.lastOperatorActivityTimestamp(),
+            block.timestamp,
+            "a successful merge should refresh the silence timer"
+        );
+    }
+
+    // SC-3XUQ: a merge rejected for insufficient input leaves the timer alone
+    function test_revertedMergeOnSingleItemInputLeavesSilenceTimerUntouched() public {
+        uint256 timerBefore = vault.lastOperatorActivityTimestamp();
+
+        vm.warp(block.timestamp + 1 days);
+
+        uint256[] memory single = new uint256[](1);
+        single[0] = posA;
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.InsufficientPositions.selector);
+        vault.mergePositions(single);
+
+        assertEq(vault.lastOperatorActivityTimestamp(), timerBefore, "a reverted merge must not count as proof of life");
+    }
+}

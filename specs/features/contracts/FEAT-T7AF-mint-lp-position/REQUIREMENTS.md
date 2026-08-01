@@ -3,8 +3,8 @@ id: FEAT-T7AF
 name: Mint LP Position
 module: contracts
 domain: "@positions"
-status: implemented
-version: 1
+status: dirty
+version: 2
 refs: [FEAT-REPZ]
 ---
 
@@ -97,6 +97,12 @@ Linked to: UC-T7AG
 
 **FR-T7B5** `If usdcAmount in a mint intent is 0, then the system shall revert.`
 Fit Criterion: Given usdcAmount == 0, the call reverts with a ZeroAmount error.
+Linked to: UC-T7AG
+
+### Operator Liveness
+
+**FR-3XU4** `When mintPositionFor completes successfully, the system shall reset lastOperatorActivityTimestamp to block.timestamp.`
+Fit Criterion: Given the Operator successfully mints a position for an LP, `lastOperatorActivityTimestamp == block.timestamp` after the call. Given the mint reverts for any reason, `lastOperatorActivityTimestamp` is unchanged. The silence timer this feeds is consumed by `emergencyCancelAll` (FEAT-JXQO, FR-JXQS).
 Linked to: UC-T7AG
 
 ## Non-Functional Requirements
