@@ -4,4 +4,15 @@ out = "out"
 libs = ["lib"]
 no_match_coverage = "script/"
 
+# forge's own defaults (runs=256, depth=500 -> 128k calls/run) are sized for
+# large multi-contract protocols. This vault's invariant handler is a single
+# contract with a handful of actions; depth=500 mostly re-exercises the same
+# few code paths while checking an O(positions) invariant after every single
+# call, which made a single invariant suite take >10 minutes for no added
+# coverage. These values keep meaningful randomized coverage while running in
+# seconds.
+[invariant]
+runs = 100
+depth = 50
+
 # See more config options https://github.com/foundry-rs/foundry/blob/master/crates/config/README.md#all-options

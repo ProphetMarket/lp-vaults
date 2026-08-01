@@ -6,4 +6,4 @@
 
 | ID | Name | Status | Description | File |
 |----|------|--------|-------------|------|
-| UC-K1M8 | Merge Same-Range Positions | pending | Operator combines positions with identical owner and tick range into a single record | [UC-K1M8-merge-same-range-positions.md](UC-K1M8-merge-same-range-positions.md) |
+| UC-K1M8 | Merge Same-Range Positions | implemented | Operator combines positions with identical owner and tick range into a single record | [UC-K1M8-merge-same-range-positions.md](UC-K1M8-merge-same-range-positions.md) |

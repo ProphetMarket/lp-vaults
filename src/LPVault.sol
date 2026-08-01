@@ -546,7 +546,19 @@ contract LPVault {
 
             // Compute uncollected fees using the same accumulator formula as collect
             uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
-            uint256 fees = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+            // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 are each
+            // individually wrapped mod 2^256 (see _computeFeeGrowthInside), and this
+            // subtraction is designed to cancel that wraparound out, mirroring Uniswap
+            // v3's audited fee-growth accounting. Do NOT route this product through
+            // _mulDiv: _mulDiv computes the exact mathematical product specifically to
+            // prevent overflow, which is the opposite of what's needed here -- applied
+            // to a wrapped near-2^256 delta it would compute an astronomically wrong
+            // (non-reverting) fee amount instead of the correct small one, a fund-drain
+            // risk strictly worse than reverting.
+            uint256 fees;
+            unchecked {
+                fees = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+            }
             fees += p.tokensOwed;
 
             // Reconstruct original principal from liquidity and tick range width
@@ -703,8 +715,20 @@ contract LPVault {
         // Compute current feeGrowthInside for this position's tick range
         uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
 
-        // Calculate fees accrued since the last collect (or mint)
-        uint256 owed = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+        // Calculate fees accrued since the last collect (or mint).
+        // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 are each
+        // individually wrapped mod 2^256 (see _computeFeeGrowthInside), and this
+        // subtraction is designed to cancel that wraparound out, mirroring Uniswap
+        // v3's audited fee-growth accounting. Do NOT route this product through
+        // _mulDiv: _mulDiv computes the exact mathematical product specifically to
+        // prevent overflow, which is the opposite of what's needed here -- applied
+        // to a wrapped near-2^256 delta it would compute an astronomically wrong
+        // (non-reverting) fee amount instead of the correct small one, a fund-drain
+        // risk strictly worse than reverting.
+        uint256 owed;
+        unchecked {
+            owed = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+        }
 
         // Include previously accumulated fees (e.g., rolled up from mergePositions)
         owed += p.tokensOwed;
@@ -916,9 +940,20 @@ contract LPVault {
         // Compute current feeGrowthInside for this range (same formula as collect)
         uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(tickLower, tickUpper);
 
-        // Compute uncollected fees for the survivor before updating its snapshot
-        uint256 survivorFees =
-            uint256(survivor.liquidity) * (feeGrowthInsideX128 - survivor.feeGrowthInsideLastX128) / Q128;
+        // Compute uncollected fees for the survivor before updating its snapshot.
+        // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 are each
+        // individually wrapped mod 2^256 (see _computeFeeGrowthInside), and this
+        // subtraction is designed to cancel that wraparound out, mirroring Uniswap
+        // v3's audited fee-growth accounting. Do NOT route this product through
+        // _mulDiv: _mulDiv computes the exact mathematical product specifically to
+        // prevent overflow, which is the opposite of what's needed here -- applied
+        // to a wrapped near-2^256 delta it would compute an astronomically wrong
+        // (non-reverting) fee amount instead of the correct small one, a fund-drain
+        // risk strictly worse than reverting.
+        uint256 survivorFees;
+        unchecked {
+            survivorFees = uint256(survivor.liquidity) * (feeGrowthInsideX128 - survivor.feeGrowthInsideLastX128) / Q128;
+        }
 
         // Start accumulation from the survivor's current state
         uint128 totalLiquidity = survivor.liquidity;
@@ -933,9 +968,14 @@ contract LPVault {
                 revert RangeMismatch();
             }
 
-            // Compute uncollected fees for the consumed position
-            uint256 consumedFees =
-                uint256(consumed.liquidity) * (feeGrowthInsideX128 - consumed.feeGrowthInsideLastX128) / Q128;
+            // Compute uncollected fees for the consumed position.
+            // unchecked: same wraparound-cancellation as survivorFees above -- and
+            // the same "do not route through _mulDiv" rule applies here too.
+            uint256 consumedFees;
+            unchecked {
+                consumedFees =
+                    uint256(consumed.liquidity) * (feeGrowthInsideX128 - consumed.feeGrowthInsideLastX128) / Q128;
+            }
 
             // Accumulate liquidity and fees
             totalLiquidity += consumed.liquidity;
@@ -1060,23 +1100,30 @@ contract LPVault {
     ///      the vault's inception. Used to snapshot feeGrowthInsideLastX128 at mint time.
     ///      Formula: feeGrowthInside = global - below(tickLower) - above(tickUpper)
     function _computeFeeGrowthInside(int24 tickLower, int24 tickUpper) internal view returns (uint256) {
-        // feeGrowthBelow: fees that grew while price was below tickLower
-        uint256 feeGrowthBelow;
-        if (currentTick >= tickLower) {
-            feeGrowthBelow = ticks[tickLower].feeGrowthOutsideX128;
-        } else {
-            feeGrowthBelow = feeGrowthGlobalX128 - ticks[tickLower].feeGrowthOutsideX128;
-        }
+        // unchecked: feeGrowthOutside snapshots are taken at different points in time
+        // than they're read, so feeGrowthBelow + feeGrowthAbove can legitimately,
+        // temporarily exceed feeGrowthGlobalX128 at the moment of subtraction. This
+        // is expected to wrap mod 2^256 -- mirroring Uniswap v3's audited fee-growth
+        // accounting -- not an "overflow is provably impossible" situation.
+        unchecked {
+            // feeGrowthBelow: fees that grew while price was below tickLower
+            uint256 feeGrowthBelow;
+            if (currentTick >= tickLower) {
+                feeGrowthBelow = ticks[tickLower].feeGrowthOutsideX128;
+            } else {
+                feeGrowthBelow = feeGrowthGlobalX128 - ticks[tickLower].feeGrowthOutsideX128;
+            }
 
-        // feeGrowthAbove: fees that grew while price was above tickUpper
-        uint256 feeGrowthAbove;
-        if (currentTick < tickUpper) {
-            feeGrowthAbove = ticks[tickUpper].feeGrowthOutsideX128;
-        } else {
-            feeGrowthAbove = feeGrowthGlobalX128 - ticks[tickUpper].feeGrowthOutsideX128;
-        }
+            // feeGrowthAbove: fees that grew while price was above tickUpper
+            uint256 feeGrowthAbove;
+            if (currentTick < tickUpper) {
+                feeGrowthAbove = ticks[tickUpper].feeGrowthOutsideX128;
+            } else {
+                feeGrowthAbove = feeGrowthGlobalX128 - ticks[tickUpper].feeGrowthOutsideX128;
+            }
 
-        return feeGrowthGlobalX128 - feeGrowthBelow - feeGrowthAbove;
+            return feeGrowthGlobalX128 - feeGrowthBelow - feeGrowthAbove;
+        }
     }
 
     // ──────────────────────────────────────────────
@@ -1089,8 +1136,13 @@ contract LPVault {
     function _crossTick(int24 tick, bool ltr) internal {
         TickInfo storage info = ticks[tick];
 
-        // Flip feeGrowthOutside: the "outside" side swaps relative to currentTick
-        info.feeGrowthOutsideX128 = feeGrowthGlobalX128 - info.feeGrowthOutsideX128;
+        // Flip feeGrowthOutside: the "outside" side swaps relative to currentTick.
+        // unchecked: this subtraction is designed to wrap mod 2^256 -- mirroring
+        // Uniswap v3's audited fee-growth accounting -- not an "overflow is
+        // provably impossible" situation.
+        unchecked {
+            info.feeGrowthOutsideX128 = feeGrowthGlobalX128 - info.feeGrowthOutsideX128;
+        }
 
         // Apply liquidityNet: positive when moving L-to-R, negated when R-to-L
         int128 liquidityDelta = ltr ? info.liquidityNet : -info.liquidityNet;
