@@ -23,11 +23,67 @@ contract MockERC20 {
     }
 }
 
+/// @dev The receiver surface under test. Declared here rather than reaching through
+///      the LPVault type so these tests compile — and therefore run and fail at
+///      runtime — against a vault that does not implement the hooks yet.
+interface IERC1155Receiver {
+    function onERC1155Received(address, address, uint256, uint256, bytes calldata) external returns (bytes4);
+    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata)
+        external
+        returns (bytes4);
+    function supportsInterface(bytes4) external view returns (bool);
+}
+
+/// @dev Minimal but *real* ERC-1155. It tracks balances and, on a safe transfer to a
+///      contract, invokes the receiver hook and reverts unless the acknowledgement
+///      value comes back — the behavior that makes an unimplemented hook a hard DOS.
+///      A stub that skipped the callback would let these tests pass against a vault
+///      that cannot actually receive tokens.
 contract MockConditionalTokens {
     mapping(address => mapping(address => bool)) public isApprovedForAll;
+    mapping(uint256 => mapping(address => uint256)) public balanceOf;
 
     function setApprovalForAll(address operator, bool approved) external {
         isApprovedForAll[msg.sender][operator] = approved;
+    }
+
+    function mint(address to, uint256 id, uint256 amount) external {
+        balanceOf[id][to] += amount;
+    }
+
+    function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes calldata data) external {
+        balanceOf[id][from] -= amount;
+        balanceOf[id][to] += amount;
+        if (to.code.length > 0) {
+            bytes4 ack = IERC1155Receiver(to).onERC1155Received(msg.sender, from, id, amount, data);
+            require(ack == 0xf23a6e61, "ERC1155: receiver rejected");
+        }
+    }
+
+    function safeBatchTransferFrom(
+        address from,
+        address to,
+        uint256[] calldata ids,
+        uint256[] calldata amounts,
+        bytes calldata data
+    ) external {
+        for (uint256 i = 0; i < ids.length; i++) {
+            balanceOf[ids[i]][from] -= amounts[i];
+            balanceOf[ids[i]][to] += amounts[i];
+        }
+        if (to.code.length > 0) {
+            bytes4 ack = IERC1155Receiver(to).onERC1155BatchReceived(msg.sender, from, ids, amounts, data);
+            require(ack == 0xbc197c81, "ERC1155: receiver rejected");
+        }
+    }
+}
+
+/// @dev An unrelated ERC-1155 contract — stands in for any token contract that is not
+///      the vault's own ConditionalTokens. Used to prove foreign token IDs cannot be
+///      pushed into the vault via a safe transfer.
+contract ForeignERC1155 {
+    function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes calldata data) external {
+        IERC1155Receiver(to).onERC1155Received(msg.sender, from, id, amount, data);
     }
 }
 
@@ -523,6 +579,240 @@ contract SetMinFirstLiqZeroTest is Test {
         vm.prank(oracleAddr);
         vm.expectRevert(LPVault.ZeroFloor.selector);
         vault.setMinimumFirstLiquidity(uint128(0));
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-3WLL, SC-3WLM: Vault accepts inbound ERC-1155 outcome tokens
+// What: A safeTransferFrom / safeBatchTransferFrom of outcome tokens from the
+//       vault's own ConditionalTokens contract lands in the vault, because the
+//       vault answers the receiver hooks with the ERC-1155 acknowledgement values.
+// Why:  The vault exists to hold outcome tokens acquired through trading. Without
+//       the hooks every such transfer reverts, which is a permanent denial of the
+//       vault's core function rather than an edge case.
+// Example: holder transfers 500e6 of the YES token id to the vault → the transfer
+//          completes, the vault's balance is 500e6, and the hook returned 0xf23a6e61.
+// ──────────────────────────────────────────────
+contract VaultReceivesOutcomeTokensTest is Test {
+    LPVaultFactory factory;
+    LPVault vault;
+    MockConditionalTokens mockCt;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+    address holder = makeAddr("holder");
+
+    bytes32 marketId = bytes32(uint256(1));
+
+    // Realistic CTF position ids for the two outcomes of one market
+    uint256 yesTokenId = uint256(keccak256("YES"));
+    uint256 noTokenId = uint256(keccak256("NO"));
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        mockCt = new MockConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+        );
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(marketId, int24(10), uint128(1000)));
+
+        mockCt.mint(holder, yesTokenId, 1_000e6);
+        mockCt.mint(holder, noTokenId, 1_000e6);
+    }
+
+    // SC-3WLL: a single safeTransferFrom from ConditionalTokens completes and credits the vault
+    function test_acceptsSingleOutcomeTokenTransfer() public {
+        vm.prank(holder);
+        mockCt.safeTransferFrom(holder, address(vault), yesTokenId, 500e6, "");
+
+        assertEq(mockCt.balanceOf(yesTokenId, address(vault)), 500e6, "vault should hold the transferred YES tokens");
+        assertEq(mockCt.balanceOf(yesTokenId, holder), 500e6, "holder balance should be debited");
+    }
+
+    // SC-3WLL: the hook returns the ERC-1155 single-transfer acknowledgement value
+    function test_onERC1155ReceivedReturnsMagicValue() public {
+        vm.prank(address(mockCt));
+        bytes4 ack = IERC1155Receiver(address(vault)).onERC1155Received(holder, holder, yesTokenId, 500e6, "");
+
+        assertEq(ack, bytes4(0xf23a6e61), "onERC1155Received must return 0xf23a6e61");
+    }
+
+    // SC-3WLM: a batch safeBatchTransferFrom of both outcomes completes and credits the vault
+    function test_acceptsBatchOutcomeTokenTransfer() public {
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = yesTokenId;
+        ids[1] = noTokenId;
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = 300e6;
+        amounts[1] = 200e6;
+
+        vm.prank(holder);
+        mockCt.safeBatchTransferFrom(holder, address(vault), ids, amounts, "");
+
+        assertEq(mockCt.balanceOf(yesTokenId, address(vault)), 300e6, "vault should hold the transferred YES tokens");
+        assertEq(mockCt.balanceOf(noTokenId, address(vault)), 200e6, "vault should hold the transferred NO tokens");
+    }
+
+    // SC-3WLM: the batch hook returns the ERC-1155 batch-transfer acknowledgement value
+    function test_onERC1155BatchReceivedReturnsMagicValue() public {
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = yesTokenId;
+        ids[1] = noTokenId;
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = 300e6;
+        amounts[1] = 200e6;
+
+        vm.prank(address(mockCt));
+        bytes4 ack = IERC1155Receiver(address(vault)).onERC1155BatchReceived(holder, holder, ids, amounts, "");
+
+        assertEq(ack, bytes4(0xbc197c81), "onERC1155BatchReceived must return 0xbc197c81");
+    }
+
+    // SC-3WLL, SC-3WLM: receiving tokens is invisible to position/tick/fee accounting.
+    // Vault bookkeeping is driven by mint, burn, collect, and notifyFees — never by
+    // observing an inbound transfer — so an arriving token must move no accounting state.
+    function test_receivingTokensLeavesVaultAccountingUntouched() public {
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = yesTokenId;
+        ids[1] = noTokenId;
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = 300e6;
+        amounts[1] = 200e6;
+
+        vm.startPrank(holder);
+        mockCt.safeTransferFrom(holder, address(vault), yesTokenId, 100e6, "");
+        mockCt.safeBatchTransferFrom(holder, address(vault), ids, amounts, "");
+        vm.stopPrank();
+
+        assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move on an inbound transfer");
+        assertEq(vault.currentTick(), int24(0), "currentTick must not move on an inbound transfer");
+        assertEq(vault.feeGrowthGlobalX128(), 0, "feeGrowthGlobalX128 must not move on an inbound transfer");
+        assertEq(vault.nextPositionId(), 0, "nextPositionId must not move on an inbound transfer");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-3WLN: Receiver hook called by a non-ConditionalTokens address reverts
+// What: Both receiver hooks revert unless msg.sender is the vault's configured
+//       conditionalTokens address.
+// Why:  Inside a receiver hook msg.sender is the token contract. Guarding on it
+//       turns the assumption documented at the setApprovalForAll call site — that
+//       the vault only ever holds outcome tokens for its one market — into an
+//       enforced on-chain check instead of a comment.
+// Example: an arbitrary EOA, or an unrelated ERC-1155 contract trying to push its
+//          own token ids into the vault, both revert with NotConditionalTokens.
+// ──────────────────────────────────────────────
+contract VaultRejectsForeignERC1155Test is Test {
+    LPVaultFactory factory;
+    LPVault vault;
+    MockConditionalTokens mockCt;
+    ForeignERC1155 foreignToken;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+    address stranger = makeAddr("stranger");
+
+    bytes32 marketId = bytes32(uint256(1));
+    uint256 foreignTokenId = uint256(keccak256("SOME OTHER MARKET"));
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        mockCt = new MockConditionalTokens();
+        foreignToken = new ForeignERC1155();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+        );
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(marketId, int24(10), uint128(1000)));
+    }
+
+    // SC-3WLN: an arbitrary EOA calling the single-transfer hook directly reverts
+    function test_revertsWhenSingleHookCalledByEOA() public {
+        vm.prank(stranger);
+        vm.expectRevert(LPVault.NotConditionalTokens.selector);
+        IERC1155Receiver(address(vault)).onERC1155Received(stranger, stranger, foreignTokenId, 1e6, "");
+    }
+
+    // SC-3WLN: an arbitrary EOA calling the batch hook directly reverts
+    function test_revertsWhenBatchHookCalledByEOA() public {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = foreignTokenId;
+        uint256[] memory amounts = new uint256[](1);
+        amounts[0] = 1e6;
+
+        vm.prank(stranger);
+        vm.expectRevert(LPVault.NotConditionalTokens.selector);
+        IERC1155Receiver(address(vault)).onERC1155BatchReceived(stranger, stranger, ids, amounts, "");
+    }
+
+    // SC-3WLN: an unrelated ERC-1155 contract cannot push its token ids into the vault
+    function test_revertsWhenForeignTokenContractTransfersToVault() public {
+        vm.prank(stranger);
+        vm.expectRevert(LPVault.NotConditionalTokens.selector);
+        foreignToken.safeTransferFrom(stranger, address(vault), foreignTokenId, 1e6, "");
+    }
+
+    // SC-3WLN: the operator holds no special power here either — the guard is on the
+    // token contract identity, not on a role
+    function test_revertsWhenOperatorCallsHook() public {
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.NotConditionalTokens.selector);
+        IERC1155Receiver(address(vault)).onERC1155Received(operatorAddr, operatorAddr, foreignTokenId, 1e6, "");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-3WLO: Vault reports ERC-1155 receiver interface support
+// What: supportsInterface returns true for IERC1155Receiver and for ERC-165 itself,
+//       and false for anything else.
+// Why:  Some callers ERC-165-probe a recipient before transferring. Without a truthful
+//       answer they skip the transfer entirely, even though the hooks work.
+// Example: supportsInterface(0x4e2312e0) == true, supportsInterface(0xffffffff) == false.
+// ──────────────────────────────────────────────
+contract VaultSupportsInterfaceTest is Test {
+    LPVault vault;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        MockConditionalTokens mockCt = new MockConditionalTokens();
+        LPVaultFactory factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+        );
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+    }
+
+    // SC-3WLO: the IERC1155Receiver interface id is reported as supported
+    function test_reportsIERC1155ReceiverSupport() public view {
+        assertTrue(
+            IERC1155Receiver(address(vault)).supportsInterface(bytes4(0x4e2312e0)),
+            "vault must report IERC1155Receiver support"
+        );
+    }
+
+    // SC-3WLO: the ERC-165 interface id itself is reported as supported
+    function test_reportsERC165Support() public view {
+        assertTrue(
+            IERC1155Receiver(address(vault)).supportsInterface(bytes4(0x01ffc9a7)), "vault must report ERC-165 support"
+        );
+    }
+
+    // SC-3WLO: an unsupported interface id is reported as unsupported
+    function test_reportsUnsupportedInterfaceAsFalse() public view {
+        assertFalse(
+            IERC1155Receiver(address(vault)).supportsInterface(bytes4(0xffffffff)),
+            "vault must not claim support for an arbitrary interface id"
+        );
     }
 }
 

@@ -4,7 +4,7 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 2
+version: 3
 refs: []
 ---
 
@@ -71,6 +71,20 @@ Linked to: UC-REQ1
 
 **FR-REQQ** `If a non-factory address calls initialize() on a vault clone, then the system shall revert.`
 Fit Criterion: Given any address != factory, calling `initialize()` reverts with an onlyFactory error.
+Linked to: UC-REQ1
+
+### ERC-1155 Receiver Compatibility
+
+**FR-3WLI** `When the vault's configured ConditionalTokens contract transfers outcome tokens to the vault via safeTransferFrom or safeBatchTransferFrom, the system shall accept the transfer by returning the ERC-1155 receiver acknowledgement values.`
+Fit Criterion: Given an initialized vault, `onERC1155Received(...)` called by `conditionalTokens` returns `0xf23a6e61` and `onERC1155BatchReceived(...)` called by `conditionalTokens` returns `0xbc197c81`. A `safeTransferFrom` and a `safeBatchTransferFrom` from the ConditionalTokens contract to the vault both complete without reverting, and the vault's token balances reflect the transferred amounts. Neither hook mutates position, tick, or fee-accumulator state -- vault bookkeeping is driven by mint, burn, and collect, not by inbound transfers.
+Linked to: UC-REQ1
+
+**FR-3WLJ** `If any address other than the vault's configured ConditionalTokens contract calls onERC1155Received or onERC1155BatchReceived, then the system shall revert.`
+Fit Criterion: Given an initialized vault and any caller address != `conditionalTokens`, both `onERC1155Received(...)` and `onERC1155BatchReceived(...)` revert. Inside an ERC-1155 receiver hook `msg.sender` is the token contract, so this enforces on-chain that the vault only ever acknowledges tokens from its own market's ConditionalTokens contract, rather than relying on the documented no-other-entry-point assumption alone.
+Linked to: UC-REQ1
+
+**FR-3WLK** `When supportsInterface is called on a vault with the IERC1155Receiver or ERC-165 interface identifier, the system shall return true, and false for any other identifier.`
+Fit Criterion: Given an initialized vault, `supportsInterface(0x4e2312e0)` (IERC1155Receiver) returns `true`, `supportsInterface(0x01ffc9a7)` (ERC-165) returns `true`, and `supportsInterface(0xffffffff)` returns `false`.
 Linked to: UC-REQ1
 
 ### Factory-Delegated Authorization
@@ -167,6 +181,7 @@ Linked to: UC-REQ2
 - Mints below `MINIMUM_FIRST_LIQUIDITY` revert when `activeLiquidity == 0` (verified by fuzz test)
 - EIP-1167 clones use storage for all per-vault config (no `immutable` usage in LPVault)
 - Implementation contract cannot be initialized directly
+- The vault accepts inbound ERC-1155 transfers from its own ConditionalTokens contract and rejects receiver-hook calls from every other address
 - Forge fmt passes; no console.log in production code
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
 - Factory role rotation (addOperator, removeOperator, setOracle, transferAdmin/acceptAdmin) propagates immediately to all existing vaults deployed by that factory
