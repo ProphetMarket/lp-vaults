@@ -3,7 +3,7 @@ id: UC-REQ1
 name: Create Vault for Market
 feature: FEAT-REPZ
 status: implemented
-version: 4
+version: 5
 actor: Oracle
 ---
 
@@ -41,6 +41,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 - The vault is in Active phase with `activeLiquidity == 0`, ready for the Operator to credit the first position
 - The vault delegates operator, oracle, and admin authorization to the factory contract -- no local role state is stored
 - The minimum-first-liquidity floor is set to the Oracle-supplied value
+- The vault can receive ERC-1155 outcome tokens from its ConditionalTokens contract (SC-3WLL, SC-3WLM)
 
 **Side Effects:**
 - `VaultCreated(marketId, vaultAddress, minimumFirstLiquidity)` event emitted by the factory
@@ -201,5 +202,96 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 **Side Effects:**
 - No state changes
 - No events emitted
+
+---
+
+### SC-3WLL: Vault accepts a single ERC-1155 outcome token transfer
+
+**Given:**
+- A vault has been created and initialized (SC-REQ6 completed)
+- The ConditionalTokens contract holds outcome tokens for the vault's market on behalf of some holder
+
+**Steps:**
+1. The holder calls `safeTransferFrom(holder, vault, tokenId, amount, "")` on the ConditionalTokens contract
+2. ConditionalTokens credits the vault's balance and invokes `onERC1155Received` on the vault
+3. The vault checks that `msg.sender` is its configured `conditionalTokens` address
+4. The vault returns the ERC-1155 single-transfer acknowledgement value
+
+**Outcomes:**
+- The transfer completes without reverting
+- `onERC1155Received` returns `0xf23a6e61`
+- The vault's ERC-1155 balance for `tokenId` increased by `amount`
+
+**Side Effects:**
+- No change to `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, or any position or tick record
+- No USDC transferred
+- No vault events emitted -- only the ConditionalTokens `TransferSingle` event
+
+---
+
+### SC-3WLM: Vault accepts a batch ERC-1155 outcome token transfer
+
+**Given:**
+- A vault has been created and initialized (SC-REQ6 completed)
+- The ConditionalTokens contract holds YES and NO outcome tokens for the vault's market on behalf of some holder
+
+**Steps:**
+1. The holder calls `safeBatchTransferFrom(holder, vault, [yesId, noId], [amountA, amountB], "")` on the ConditionalTokens contract
+2. ConditionalTokens credits the vault's balances and invokes `onERC1155BatchReceived` on the vault
+3. The vault checks that `msg.sender` is its configured `conditionalTokens` address
+4. The vault returns the ERC-1155 batch-transfer acknowledgement value
+
+**Outcomes:**
+- The transfer completes without reverting
+- `onERC1155BatchReceived` returns `0xbc197c81`
+- The vault's ERC-1155 balances for both token IDs increased by the transferred amounts
+
+**Side Effects:**
+- No change to `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, or any position or tick record
+- No USDC transferred
+- No vault events emitted -- only the ConditionalTokens `TransferBatch` event
+
+---
+
+### SC-3WLN: Receiver hook called by a non-ConditionalTokens address reverts
+
+**Given:**
+- A vault has been created and initialized (SC-REQ6 completed)
+- The caller is any address other than the vault's configured `conditionalTokens` -- an LP, the Operator, the Oracle, an arbitrary EOA, or an unrelated ERC-1155 contract
+
+**Steps:**
+1. The caller invokes `onERC1155Received(operator, from, id, value, "")` directly on the vault
+2. The vault checks `msg.sender` against its configured `conditionalTokens` address
+3. The same is attempted with `onERC1155BatchReceived(operator, from, ids, values, "")`
+
+**Outcomes:**
+- Both calls revert with a not-conditional-tokens error
+- Neither hook returns an acknowledgement value, so an unrelated ERC-1155 contract cannot push foreign token IDs into the vault via a safe transfer
+
+**Side Effects:**
+- No state changes on the vault
+- No events emitted
+
+---
+
+### SC-3WLO: Vault reports ERC-1155 receiver interface support
+
+**Given:**
+- A vault has been created and initialized (SC-REQ6 completed)
+
+**Steps:**
+1. A caller invokes `supportsInterface` with the `IERC1155Receiver` interface identifier `0x4e2312e0`
+2. A caller invokes `supportsInterface` with the ERC-165 interface identifier `0x01ffc9a7`
+3. A caller invokes `supportsInterface` with `0xffffffff`
+
+**Outcomes:**
+- The first two calls return `true`
+- The third returns `false`
+- Callers that gate transfers on an ERC-165 check will proceed to transfer outcome tokens to the vault
+
+**Side Effects:**
+- None -- `supportsInterface` is a pure view
+
+---
 
 ---

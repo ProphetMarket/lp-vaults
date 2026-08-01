@@ -269,6 +269,7 @@ contract LPVault {
     error RangeMismatch();
     error InsufficientPositions();
     error TradingIsPaused();
+    error NotConditionalTokens();
 
     // ──────────────────────────────────────────────
     // Events
@@ -345,6 +346,14 @@ contract LPVault {
 
     modifier onlyOracle() {
         if (msg.sender != ILPVaultFactory(factory).oracle()) revert NotOracle();
+        _;
+    }
+
+    /// @dev Gates the ERC-1155 receiver hooks. Inside a receiver hook msg.sender is the
+    ///      token contract itself, so comparing it to `conditionalTokens` pins the vault
+    ///      to its own market's ERC-1155 and rejects every other token contract.
+    modifier onlyConditionalTokens() {
+        if (msg.sender != conditionalTokens) revert NotConditionalTokens();
         _;
     }
 
@@ -443,6 +452,50 @@ contract LPVault {
         // Pre-approve the exchange to spend USDC and outcome tokens on behalf of this vault
         IERC20(usdc_).approve(exchange_, type(uint256).max);
         IERC1155(conditionalTokens_).setApprovalForAll(exchange_, true);
+    }
+
+    // ──────────────────────────────────────────────
+    // ERC-1155 reception (FR-3WLI, FR-3WLJ, FR-3WLK)
+    // ──────────────────────────────────────────────
+
+    // SC-3WLL, SC-3WLN: acknowledge single outcome-token transfers from this vault's CTF
+    /// @notice Accepts a single ERC-1155 outcome token transfer into the vault.
+    /// @dev Stateless by design. The vault's position, tick, and fee accounting is driven
+    ///      by mintPositionFor, burnPosition, collect, and notifyFees — never by observing
+    ///      an inbound transfer — so this hook deliberately records nothing. Reconciling
+    ///      raw token balances against position accounting is the Operator's off-chain job.
+    ///      No nonReentrant guard: the hook mutates nothing and makes no external call, and
+    ///      guarding it would revert legitimate transfers that occur inside an already-
+    ///      guarded vault call.
+    /// @return The ERC-1155 single-transfer acknowledgement value.
+    function onERC1155Received(address, address, uint256, uint256, bytes calldata)
+        external
+        view
+        onlyConditionalTokens
+        returns (bytes4)
+    {
+        return 0xf23a6e61;
+    }
+
+    // SC-3WLM, SC-3WLN: acknowledge batch outcome-token transfers from this vault's CTF
+    /// @notice Accepts a batch ERC-1155 outcome token transfer into the vault.
+    /// @dev Stateless for the same reasons as onERC1155Received above.
+    /// @return The ERC-1155 batch-transfer acknowledgement value.
+    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata)
+        external
+        view
+        onlyConditionalTokens
+        returns (bytes4)
+    {
+        return 0xbc197c81;
+    }
+
+    // SC-3WLO: ERC-165 reporting so callers that probe before transferring proceed
+    /// @notice Reports whether the vault implements a given interface.
+    /// @param interfaceId The ERC-165 interface identifier to query.
+    /// @return True for IERC1155Receiver (0x4e2312e0) and ERC-165 itself (0x01ffc9a7).
+    function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
+        return interfaceId == 0x4e2312e0 || interfaceId == 0x01ffc9a7;
     }
 
     // ──────────────────────────────────────────────
