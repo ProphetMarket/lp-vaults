@@ -3,12 +3,13 @@ pragma solidity 0.8.20;
 
 // FEAT-J92H: Deploy Contracts
 // UC-J92I: Deploy Factory and Implementation
-// SLICE-001: deploy-script
+// Integration tests for every scenario in this use case.
+// Covers: SC-J92J, SC-J92K, SC-J92L, SC-J92M, SC-K49S
 
 import {Test} from "forge-std/Test.sol";
-import {DeployScript} from "../../../../script/Deploy.s.sol";
-import {LPVault} from "../../../../src/LPVault.sol";
-import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
+import {DeployScript} from "../../../script/Deploy.s.sol";
+import {LPVault} from "../../../src/LPVault.sol";
+import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 
 // SC-J92J: Successful deployment with valid configuration
 // What: Running the deploy helper with all valid, distinct addresses deploys both

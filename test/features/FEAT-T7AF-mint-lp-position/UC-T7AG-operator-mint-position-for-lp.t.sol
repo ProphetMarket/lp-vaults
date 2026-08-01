@@ -2,12 +2,13 @@
 pragma solidity 0.8.20;
 
 // UC-T7AG: Operator Mint Position for LP
-// SLICE-001: operator-mint-position
+// Integration tests for every scenario in this use case.
+// Covers: SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AR, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AQ
 
 import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
-import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
-import {LPVault} from "../../../../src/LPVault.sol";
+import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
+import {LPVault} from "../../../src/LPVault.sol";
 
 // ──────────────────────────────────────────────
 // MockERC20 with transferFrom support for mint tests.

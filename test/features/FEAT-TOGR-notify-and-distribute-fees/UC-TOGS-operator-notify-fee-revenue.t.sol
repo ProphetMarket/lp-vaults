@@ -2,12 +2,13 @@
 pragma solidity 0.8.20;
 
 // UC-TOGS: Operator Notify Fee Revenue
-// SLICE-001: notify-fees
+// Integration tests for every scenario in this use case.
+// Covers: SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY
 
 import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
-import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
-import {LPVault} from "../../../../src/LPVault.sol";
+import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
+import {LPVault} from "../../../src/LPVault.sol";
 
 // ──────────────────────────────────────────────
 // Minimal ERC-20 mock with balanceOf, approve, transferFrom.

@@ -74,7 +74,7 @@ erDiagram
 | File | Role | Key Exports |
 |------|------|-------------|
 | `src/LPVault.sol` | Vault with emergency cancel, silence timer, terminal state | `emergencyCancelAll()`, `EMERGENCY_CANCEL_TIMELOCK`, `EmergencyCancelExecuted` event; modified `notifyFees` (timestamp reset) |
-| `test/features/FEAT-JXQO-emergency-cancel-all-positions/UC-JXQW-emergency-cancel-all/001-contract-call-emergency-cancel-all.t.sol` | Integration tests | All 6 scenarios |
+| `test/features/FEAT-JXQO-emergency-cancel-all-positions/UC-JXQW-emergency-cancel-all.t.sol` | Integration tests | All 6 scenarios |
 
 ## Event Topology
 

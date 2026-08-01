@@ -2,11 +2,12 @@
 pragma solidity 0.8.20;
 
 // UC-JAIK: Reclaim Deposit
-// SLICE-001: reclaim-deposit
+// Integration tests for every scenario in this use case.
+// Covers: SC-JAIL, SC-JAIM, SC-JAIN, SC-JAIO, SC-JAIP
 
 import {Test} from "forge-std/Test.sol";
-import {LPVaultFactory} from "../../../../src/LPVaultFactory.sol";
-import {LPVault} from "../../../../src/LPVault.sol";
+import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
+import {LPVault} from "../../../src/LPVault.sol";
 
 // ──────────────────────────────────────────────
 // MockERC20 with transfer and transferFrom support for reclaim tests.

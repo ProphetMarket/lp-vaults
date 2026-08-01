@@ -77,7 +77,7 @@ erDiagram
 |------|------|-------------|
 | `src/LPVault.sol` | Business logic | `updateTick(int24)`, `_crossTick(int24, bool)`, `_nextInitializedTick(int24, bool)`, `_setTickBitmapBit(int24)`, `_clearTickBitmapBit(int24)`, `tickBitmap`, `lastOperatorActivityTimestamp` |
 | `src/LPVault.sol` | Existing (modified) | `_initializeTick(int24)` — gains `_setTickBitmapBit` call inside `liquidityGross == 0` branch |
-| `test/features/FEAT-TVS0-update-tick-and-cross-ticks/UC-TVS1-update-current-tick/` | Test | Integration tests for all 7 scenarios |
+| `test/features/FEAT-TVS0-update-tick-and-cross-ticks/UC-TVS1-update-current-tick.t.sol` | Test | Integration tests for all 7 scenarios |
 
 ## Event Topology
 
