@@ -117,8 +117,9 @@ contract LPVault {
 
     /// @dev Circuit breaker flag. When true, trading entry points
     ///      (depositForIntent, mintPositionFor, notifyFees, updateTick, mergePositions) revert.
-    ///      LP exit paths (collect, reclaimDeposit) and emergencyCancelAll
-    ///      are unaffected. Independent of the phase state machine.
+    ///      Exit paths (collect, reclaimDeposit, reclaimDepositFor) and
+    ///      emergencyCancelAll are unaffected — a pause must never trap an LP's
+    ///      capital. Independent of the phase state machine.
     bool public paused;
 
     /// @dev Running total of liquidity in range
@@ -240,6 +241,16 @@ contract LPVault {
     bytes32 private constant MINT_INTENT_TYPEHASH =
         keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
 
+    /// @dev Authorizes CANCELLING a pending deposit, as opposed to funding and
+    ///      minting one. Carries the same five fields as MintIntent, so the two
+    ///      differ only by typehash — which is the entire point (ADR-4029). Reusing
+    ///      MintIntent here would mean the one signature an LP produces to fund a
+    ///      position doubles as authorization to cancel it, letting an Operator who
+    ///      holds that signature unilaterally reverse the LP's intent. The same
+    ///      reasoning applies to any future burnPositionFor / collectFor authorization.
+    bytes32 private constant RECLAIM_INTENT_TYPEHASH =
+        keccak256("ReclaimIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
+
     uint256 private constant SECP256K1N_HALF = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
     // ──────────────────────────────────────────────
@@ -308,6 +319,8 @@ contract LPVault {
     error TradingIsPaused();
     error NotConditionalTokens();
     error DepositAlreadyEscrowed();
+    error DepositNotEscrowed();
+    error NothingToReclaim();
 
     // ──────────────────────────────────────────────
     // Events
@@ -787,15 +800,28 @@ contract LPVault {
     // ──────────────────────────────────────────────
 
     // SC-T7AH through SC-T7AR: operator-gated LP position mint via EIP-712 signed intent
+    // SC-3Z9J, SC-3Z9K, SC-45IE: the mint's escrow requirement and ownership check
     /// @notice Executes an LP's signed EIP-712 mint intent to create a concentrated-liquidity position.
-    /// @dev OPERATOR TRUST ASSUMPTION: The Operator can submit any LP's signed intent
+    /// @dev Funding comes entirely from the intent's escrow (FEAT-3ZRI): this function
+    ///      makes no external token call at all. The escrow must have been recorded
+    ///      against this exact LP, for this exact amount, by a prior depositForIntent.
+    ///
+    ///      OPERATOR TRUST ASSUMPTION: The Operator can submit any LP's signed intent
     ///      at any time. LPs must trust that the Operator submits their intent promptly.
-    ///      This trust is bounded by the reclaimDeposit escape hatch planned in feature 7.
-    /// @param lp LP wallet address — must match the signer of the EIP-712 intent
+    ///      This trust is bounded by the reclaimDeposit escape hatch (FEAT-JAIJ), which
+    ///      lets the LP recover an escrow the Operator never mints without needing the
+    ///      Operator's cooperation. What the Operator cannot do is redirect one LP's
+    ///      deposit to another: the escrow records its depositor, and this function
+    ///      rejects any mint whose named LP is not that address.
+    /// @param lp LP wallet address — must match both the signer of the EIP-712 intent
+    ///        and the depositor recorded on the intent's escrow
     /// @param tickLower Lower tick bound — must be < tickUpper and aligned to tickSpacing
     /// @param tickUpper Upper tick bound — must be > tickLower and aligned to tickSpacing
-    /// @param usdcAmount USDC to pull from the LP's wallet — must be > 0
-    /// @param intentId Unique identifier for replay protection
+    /// @param usdcAmount Position principal — must be > 0 and must exactly equal the
+    ///        amount escrowed against intentId. Not pulled from the LP's wallet here;
+    ///        it was debited earlier, at escrow time.
+    /// @param intentId Unique identifier for replay protection, and the key of the
+    ///        escrow this mint consumes
     /// @param signature EIP-712 signature from the LP over the MintIntent struct
     /// @return positionId The ID of the newly created position
     function mintPositionFor(
@@ -823,11 +849,42 @@ contract LPVault {
         // Verify EIP-712 signature from the LP
         _verifyMintIntent(lp, tickLower, tickUpper, usdcAmount, intentId, signature);
 
-        // Replay protection: each intentId can only be used once
+        // Replay protection: each intentId can only be used once. Checked ahead of the
+        // escrow so that a mint replayed after a successful one reports
+        // IntentAlreadyUsed — the first mint deleted the escrow on its way out, so an
+        // escrow-first order would misreport the replay as DepositNotEscrowed.
         if (usedIntents[intentId]) revert IntentAlreadyUsed();
-        usedIntents[intentId] = true;
+
+        // The intent must already be funded — by this LP, for exactly this amount.
+        PendingDeposit memory deposit = pendingDeposits[intentId];
+
+        // Nothing escrowed at all. Minting here would create liquidity against USDC
+        // the vault never collected (FR-3Z9W). The sentinel is the zero lp address.
+        if (deposit.lp == address(0)) revert DepositNotEscrowed();
+
+        // Escrowed, but by someone else. A valid signature over an intentId proves
+        // only that someone signed it, never that they funded it: _verifyMintIntent
+        // compares the recovered signer against this caller-supplied `lp`, so any
+        // party can sign over any intentId by naming their own address. The recorded
+        // depositor is what settles ownership (FR-45ID). Without this check a
+        // colluding or compromised Operator could mint one LP a position funded
+        // entirely by another's deposit. Checked before the amount so a foreign claim
+        // reports NotIntentOwner rather than being masked by an amount mismatch.
+        if (deposit.lp != lp) revert NotIntentOwner();
+
+        // Exact equality, not sufficiency (FR-3Z9W): a position must never be minted
+        // larger than the USDC actually collected for it, and a smaller one would
+        // silently strand the remainder in an escrow this mint is about to delete.
+        if (deposit.amount != usdcAmount) revert DepositNotEscrowed();
 
         // --- Effects ---
+
+        usedIntents[intentId] = true;
+
+        // Consume the escrow. Deleting it here is what makes mint and reclaim mutually
+        // exclusive on the same deposit (FR-3ZVK): neither a second mint nor a reclaim
+        // can draw on an escrow that no longer exists.
+        delete pendingDeposits[intentId];
 
         // Compute liquidity weight from USDC and range width
         // casting to uint256 is safe because tickUpper > tickLower is validated above
@@ -870,10 +927,12 @@ contract LPVault {
             activeLiquidity += liquidity;
         }
 
-        // --- Interactions (external calls last, per checks-effects-interactions) ---
-
-        // Pull USDC from the LP's wallet into the vault
-        _safeTransferFrom(usdc, lp, address(this), usdcAmount);
+        // No interactions: the USDC backing this position was pulled at escrow time
+        // (FEAT-3ZRI), so mint makes no external token call. The nonReentrant modifier
+        // stays as defense-in-depth (NFR-T7B7) — it guards position, tick, and
+        // activeLiquidity state that other guarded paths read, and ensures a future
+        // revision that reintroduces an external call cannot silently inherit an
+        // unguarded function.
 
         emit PositionMinted(positionId, lp, tickLower, tickUpper, liquidity, usdcAmount, intentId);
     }
@@ -942,31 +1001,44 @@ contract LPVault {
     // Deposit reclaim (FEAT-JAIJ, UC-JAIK)
     // ──────────────────────────────────────────────
 
-    // SC-JAIL through SC-JAIP: two-phase LP escape hatch for unfulfilled mint intents
-    /// @notice Allows an LP to reclaim USDC deposited via the deposit-then-credit flow when
+    // SC-JAIL, SC-3Z9L, SC-45IG, SC-JAIM, SC-JAIN, SC-3ZA0, SC-JAIP:
+    // two-phase LP escape hatch for unfulfilled mint intents
+    /// @notice Allows an LP to reclaim the USDC escrowed against their mint intent when
     ///         the Operator fails to call mintPositionFor. Two-phase operation (ADR-JB78):
     ///         Phase 1 (first call): records intentTimestamps[intentId] = block.timestamp and
     ///         emits ReclaimSubmitted. Phase 2 (after RECLAIM_TIMELOCK): marks usedIntents,
-    ///         transfers usdcAmount back to the LP, and emits DepositReclaimed.
-    /// @dev OPERATOR TRUST ASSUMPTION: The Operator's co-signature attests that the deposit
-    ///      was received. LPs must trust that the Operator signs promptly and honestly. A
-    ///      dishonest Operator who refuses to co-sign can block reclaim, but the LP's USDC
-    ///      is still recoverable via emergencyCancelAll (feature 8, not yet implemented).
-    /// @param lp LP wallet address — must match msg.sender and LP EIP-712 signature
+    ///         deletes the escrow, transfers the escrowed amount back to the LP, and emits
+    ///         DepositReclaimed.
+    /// @dev Permissionless by design: this function requires no Operator signature, no
+    ///      Operator action, and reads no Operator registry state (NFR-3Z9X, ADR-3ZA1).
+    ///      That independence is what makes it an escape hatch — a path that consulted
+    ///      Operator state would fail exactly when it is needed. It also means an Admin
+    ///      removing an operator can never strand an LP's deposit.
+    ///
+    ///      The refund amount and its recipient both come from on-chain escrow, never from
+    ///      the caller-supplied `usdcAmount`. Two guards enforce that, and BOTH run before
+    ///      Phase 1 records a timestamp, so an attacker cannot even start the clock against
+    ///      a victim's intentId. The ownership guard is the security-critical one: neither
+    ///      the `msg.sender == lp` gate nor the signature check stops an attacker, because
+    ///      they genuinely are themselves and genuinely signed. intentIds are public in the
+    ///      DepositEscrowed log, and _verifyMintIntent compares the recovered signer against
+    ///      a caller-supplied `lp`, so anyone can produce a valid signature over anyone's
+    ///      intentId. Only the recorded depositor settles ownership (FR-45IF).
+    /// @param lp LP wallet address — must match msg.sender, the LP EIP-712 signature, and
+    ///        the depositor recorded on the intent's escrow
     /// @param tickLower Lower tick bound from the original MintIntent
     /// @param tickUpper Upper tick bound from the original MintIntent
-    /// @param usdcAmount USDC amount from the original MintIntent
+    /// @param usdcAmount USDC amount from the original MintIntent. Part of the signed
+    ///        digest only — the refund is the escrowed amount, not this number.
     /// @param intentId Unique identifier from the original MintIntent
     /// @param lpSignature EIP-712 signature from the LP over the MintIntent struct
-    /// @param operatorSignature EIP-712 signature from a registered Operator over the same MintIntent
     function reclaimDeposit(
         address lp,
         int24 tickLower,
         int24 tickUpper,
         uint256 usdcAmount,
         bytes32 intentId,
-        bytes calldata lpSignature,
-        bytes calldata operatorSignature
+        bytes calldata lpSignature
     ) external nonReentrant {
         // --- Checks ---
 
@@ -979,18 +1051,29 @@ contract LPVault {
         // Verify LP's EIP-712 signature over the MintIntent struct
         _verifyMintIntent(lp, tickLower, tickUpper, usdcAmount, intentId, lpSignature);
 
-        // Verify operator's EIP-712 signature over the same MintIntent struct
-        // and confirm the recovered signer is a registered operator
-        _verifyOperatorSignature(lp, tickLower, tickUpper, usdcAmount, intentId, operatorSignature);
-
         // Replay protection: intentId must not have been used by mintPositionFor or a prior reclaim
         if (usedIntents[intentId]) revert IntentAlreadyUsed();
+
+        // Both escrow guards run here, ahead of Phase 1, so a rejected claim cannot
+        // start the timelock clock on someone else's intentId.
+        PendingDeposit memory deposit = pendingDeposits[intentId];
+
+        // Nothing escrowed under this intentId. This is what stops a caller who
+        // deposited nothing from draining the vault's general balance after waiting
+        // out the timelock: signing an intent for an arbitrary amount grants no claim
+        // on funds the vault never collected for it (FR-3ZVM).
+        if (deposit.lp == address(0)) revert NothingToReclaim();
+
+        // Escrowed, but by someone else — see the ownership note in the NatSpec above (FR-45IF).
+        if (deposit.lp != lp) revert NotIntentOwner();
 
         // --- Phase 1: Record submission timestamp ---
 
         if (intentTimestamps[intentId] == 0) {
             intentTimestamps[intentId] = block.timestamp;
-            emit ReclaimSubmitted(intentId, lp, usdcAmount);
+            // Report the escrowed amount, not the caller-supplied one, so the pending
+            // refund an indexer or LP UI shows is the number Phase 2 will actually pay.
+            emit ReclaimSubmitted(intentId, lp, deposit.amount);
             return;
         }
 
@@ -1007,10 +1090,117 @@ contract LPVault {
         // Mark intentId as used to prevent double-refund and mutual exclusion with mintPositionFor
         usedIntents[intentId] = true;
 
+        // Refund exactly what was escrowed, then clear the entry so neither a second
+        // reclaim nor a mint can draw on it.
+        uint256 refund = deposit.amount;
+        delete pendingDeposits[intentId];
+
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
-        _safeTransfer(usdc, lp, usdcAmount);
-        emit DepositReclaimed(intentId, lp, usdcAmount);
+        _safeTransfer(usdc, lp, refund);
+        emit DepositReclaimed(intentId, lp, refund);
+    }
+
+    // SC-3Z9C through SC-3Z9I, SC-45IH: operator-relayed reclaim of an LP's escrow
+    /// @notice Refunds an LP's escrowed USDC on their behalf, from an EIP-712
+    ///         ReclaimIntent they signed off-chain, with the Operator paying the gas.
+    ///         Two-phase and timelocked exactly like `reclaimDeposit`, sharing the same
+    ///         `intentTimestamps` slot: a Phase 1 submitted through either entry point
+    ///         starts the one clock.
+    /// @dev This is the convenience twin for an ordinary voluntary cancellation, not a
+    ///      second escape hatch — the LP's own permissionless `reclaimDeposit` is what
+    ///      guarantees they can always exit, and this gate does not affect it.
+    ///
+    ///      OPERATOR TRUST ASSUMPTION: The Operator chooses whether and when to relay a
+    ///      reclaim, so they can censor, reorder, or delay a cancellation. What they
+    ///      cannot do is initiate one: every refund needs the LP's own signature over a
+    ///      ReclaimIntent, a struct with its own typehash. A mint authorization is
+    ///      therefore NOT replayable here (ADR-4029) — an Operator holding the signature
+    ///      that funded a position cannot use it to unwind that position. Nor can the
+    ///      Operator redirect the money: funds always go to the depositor recorded on the
+    ///      escrow, never to `msg.sender` and never to a different named LP, so a
+    ///      compromised Operator key colluding with an attacker's valid signature still
+    ///      cannot move another LP's deposit. An Operator who simply refuses to relay
+    ///      leaves the LP with `reclaimDeposit`, which needs no Operator at all.
+    ///
+    ///      MEV analysis: this function returns an LP's own escrow to that LP. It creates
+    ///      no position, touches no tick, reads no price, and changes no fee accounting,
+    ///      so its ordering relative to other transactions offers an observer nothing to
+    ///      profit from. The one ordering effect is the race against `mintPositionFor` for
+    ///      the same intentId — both consume the shared `usedIntents` slot, so whichever
+    ///      lands first wins and the other reverts. That race is bounded by
+    ///      RECLAIM_TIMELOCK, is settled entirely between the Operator and the LP who
+    ///      signed both authorizations, and leaves no third party exposed.
+    /// @param lp LP wallet address — must match the ReclaimIntent's signer and the
+    ///        depositor recorded on the intent's escrow
+    /// @param tickLower Lower tick bound from the original MintIntent
+    /// @param tickUpper Upper tick bound from the original MintIntent
+    /// @param usdcAmount USDC amount from the original MintIntent. Part of the signed
+    ///        digest only — the refund is the escrowed amount, not this number.
+    /// @param intentId Unique identifier from the original MintIntent
+    /// @param lpSignature EIP-712 signature from the LP over the ReclaimIntent struct
+    function reclaimDepositFor(
+        address lp,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 usdcAmount,
+        bytes32 intentId,
+        bytes calldata lpSignature
+    ) external onlyOperator nonReentrant touchesHeartbeat {
+        // --- Checks ---
+
+        // Cancelled vaults have already distributed all funds
+        if (phase == 3) revert VaultCancelled();
+
+        // Verify the LP authorized this cancellation specifically. Verified against the
+        // ReclaimIntent typehash, so the MintIntent that funded the escrow is rejected here.
+        _verifyReclaimIntent(lp, tickLower, tickUpper, usdcAmount, intentId, lpSignature);
+
+        // Replay protection: shared with mintPositionFor and reclaimDeposit, so an
+        // intent settled through any one path cannot be settled again through another.
+        if (usedIntents[intentId]) revert IntentAlreadyUsed();
+
+        // Both escrow guards run ahead of Phase 1, so a rejected relay cannot start the
+        // timelock clock on someone else's intentId.
+        PendingDeposit memory deposit = pendingDeposits[intentId];
+
+        // Nothing escrowed: the relayed path offers no way around the escrow
+        // requirement, so it cannot become a second route to draining the vault (FR-3ZVM).
+        if (deposit.lp == address(0)) revert NothingToReclaim();
+
+        // Escrowed by a different LP. This is what stops the Operator redirecting one
+        // LP's deposit to another, even holding that other LP's valid signature (FR-45IF).
+        if (deposit.lp != lp) revert NotIntentOwner();
+
+        // --- Phase 1: Record submission timestamp ---
+
+        if (intentTimestamps[intentId] == 0) {
+            intentTimestamps[intentId] = block.timestamp;
+            emit ReclaimSubmitted(intentId, lp, deposit.amount);
+            return;
+        }
+
+        // --- Phase 2: Execute reclaim after timelock ---
+
+        // The Operator waits out the same period the LP does — gas sponsorship buys
+        // convenience, not privilege. (±15s Polygon tolerance is negligible at 24h scale)
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp - intentTimestamps[intentId] < RECLAIM_TIMELOCK) {
+            revert TimelockNotElapsed();
+        }
+
+        // --- Effects ---
+
+        usedIntents[intentId] = true;
+
+        uint256 refund = deposit.amount;
+        delete pendingDeposits[intentId];
+
+        // --- Interactions (external calls last, per checks-effects-interactions) ---
+
+        // Funds go to the recorded depositor, never to msg.sender.
+        _safeTransfer(usdc, lp, refund);
+        emit DepositReclaimed(intentId, lp, refund);
     }
 
     // ──────────────────────────────────────────────
@@ -1258,12 +1448,13 @@ contract LPVault {
         if (signer == address(0) || signer != lp) revert InvalidSignature();
     }
 
-    /// @dev Verifies that `signature` is a valid EIP-712 signature from a registered operator
-    ///      over a MintIntent struct with the given fields. Same digest as _verifyMintIntent
-    ///      (operator signs the same struct), but the recovered signer is checked against the
-    ///      factory's operator registry instead of a declared address.
-    ///      Rejects malleable signatures (high-s) and invalid v values per CLAUDE.md rule 5.
-    function _verifyOperatorSignature(
+    /// @dev Verifies that `signature` is a valid EIP-712 signature from `lp` over a
+    ///      ReclaimIntent struct with the given fields. Identical in shape to
+    ///      _verifyMintIntent — including the s-malleability bound and the
+    ///      v ∈ {27, 28} check per CLAUDE.md rule 5 — and differing only in the
+    ///      typehash, which is what keeps a mint authorization from doubling as a
+    ///      cancellation authorization (ADR-4029, FR-3ZVP).
+    function _verifyReclaimIntent(
         address lp,
         int24 tickLower,
         int24 tickUpper,
@@ -1271,8 +1462,9 @@ contract LPVault {
         bytes32 intentId,
         bytes calldata signature
     ) internal view {
-        // Build the EIP-712 digest (same struct as _verifyMintIntent)
-        bytes32 structHash = keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, tickLower, tickUpper, usdcAmount, intentId));
+        // Build the EIP-712 digest: \x19\x01 || domainSeparator || structHash
+        bytes32 structHash =
+            keccak256(abi.encode(RECLAIM_INTENT_TYPEHASH, lp, tickLower, tickUpper, usdcAmount, intentId));
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
 
         // Decode the 65-byte signature into r, s, v
@@ -1292,9 +1484,9 @@ contract LPVault {
         // v must be 27 or 28 — reject all other values
         if (v != 27 && v != 28) revert InvalidSignature();
 
-        // Recover the signer and verify it is a registered operator via factory delegation
+        // Recover the signer and verify it matches the declared LP address
         address signer = ecrecover(digest, v, r, s);
-        if (signer == address(0) || ILPVaultFactory(factory).operators(signer) != 1) revert InvalidSignature();
+        if (signer == address(0) || signer != lp) revert InvalidSignature();
     }
 
     // ──────────────────────────────────────────────

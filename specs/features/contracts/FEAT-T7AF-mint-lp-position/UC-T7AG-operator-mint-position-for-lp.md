@@ -2,7 +2,7 @@
 id: UC-T7AG
 name: Operator Mint Position for LP
 feature: FEAT-T7AF
-status: dirty
+status: implemented
 version: 4
 actor: Operator
 ---

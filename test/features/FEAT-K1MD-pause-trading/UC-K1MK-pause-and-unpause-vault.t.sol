@@ -105,6 +105,9 @@ contract PauseTradingTestBase is Test {
 
         // Mint one position: range [0, 100), 1000 USDC → liquidity = 10e18
         bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 1000, keccak256("setup-mint"));
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
         vm.prank(operatorAddr);
         positionId = vault.mintPositionFor(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
     }
@@ -196,6 +199,8 @@ contract PauseTradingPauseAndGateTest is PauseTradingTestBase {
     function test_mergePositionsRevertsWhilePaused() public {
         // Mint a second position to make merge possible
         bytes memory sig2 = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-2"));
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(100), 500, keccak256("mint-2"), sig2);
         vm.prank(operatorAddr);
         uint256 pos2 = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-2"), sig2);
 
@@ -329,38 +334,27 @@ contract PauseTradingCollectTest is PauseTradingTestBase {
 // Why:  LP exit paths must never be blocked by pause.
 // ──────────────────────────────────────────────
 contract PauseTradingReclaimTest is PauseTradingTestBase {
-    uint256 constant OPERATOR_PK = 0xBEEF;
-
-    function setUp() public override {
-        super.setUp();
-
-        // Register the operator key so we can sign operator signatures
-        address opSigner = vm.addr(OPERATOR_PK);
-        vm.prank(admin);
-        factory.addOperator(opSigner);
-    }
-
     // SC-K1MP: reclaimDeposit succeeds while paused
     function test_reclaimDepositSucceedsWhilePaused() public {
         // Set up an unfulfilled mint intent with a fresh intentId
         bytes32 intentId = keccak256("reclaim-intent");
         uint256 reclaimAmount = 200;
 
-        // LP signs the mint intent
+        // LP signs the mint intent. The same signature authorizes the escrow and,
+        // later, the reclaim — no Operator signature is involved on either path.
         bytes memory lpSig = _signMintIntent(LP_PK, lp, int24(0), int24(100), reclaimAmount, intentId);
 
-        // Operator signs the same mint intent
-        bytes memory opSig = _signMintIntent(OPERATOR_PK, lp, int24(0), int24(100), reclaimAmount, intentId);
+        // The Operator escrows the deposit while the vault is still active. This is
+        // what funds the refund; the vault is never credited out of thin air.
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(100), reclaimAmount, intentId, lpSig);
 
         // Phase 1: submit the reclaim (records timestamp)
         vm.prank(lp);
-        vault.reclaimDeposit(lp, int24(0), int24(100), reclaimAmount, intentId, lpSig, opSig);
+        vault.reclaimDeposit(lp, int24(0), int24(100), reclaimAmount, intentId, lpSig);
 
         // Advance past RECLAIM_TIMELOCK (24 hours)
         vm.warp(block.timestamp + 24 hours + 1);
-
-        // Fund vault with USDC for the refund
-        mockUsdc.mint(address(vault), reclaimAmount);
 
         // Pause the vault
         _pause();
@@ -368,7 +362,7 @@ contract PauseTradingReclaimTest is PauseTradingTestBase {
         // Phase 2: execute reclaim while paused — should succeed
         uint256 lpBalBefore = mockUsdc.balanceOf(lp);
         vm.prank(lp);
-        vault.reclaimDeposit(lp, int24(0), int24(100), reclaimAmount, intentId, lpSig, opSig);
+        vault.reclaimDeposit(lp, int24(0), int24(100), reclaimAmount, intentId, lpSig);
         uint256 lpBalAfter = mockUsdc.balanceOf(lp);
 
         assertEq(lpBalAfter - lpBalBefore, reclaimAmount, "LP should receive reclaim amount while paused");

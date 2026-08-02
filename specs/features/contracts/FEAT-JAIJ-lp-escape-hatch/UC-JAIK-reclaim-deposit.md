@@ -2,7 +2,7 @@
 id: UC-JAIK
 name: Reclaim Deposit
 feature: FEAT-JAIJ
-status: dirty
+status: implemented
 version: 3
 actor: LP
 ---

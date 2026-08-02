@@ -3,7 +3,7 @@ id: FEAT-JAIJ
 name: LP Escape Hatch
 module: contracts
 domain: "@positions"
-status: dirty
+status: implemented
 version: 3
 refs: [FEAT-T7AF, FEAT-3ZRI]
 ---

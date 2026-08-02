@@ -107,6 +107,9 @@ contract CollectFeesTestBase is Test {
         mockUsdc.approve(address(vault), type(uint256).max);
 
         bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 1000, keccak256("setup-mint"));
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
         vm.prank(operatorAddr);
         positionId = vault.mintPositionFor(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
 
@@ -622,6 +625,10 @@ contract FeeGrowthWraparoundTestBase is Test {
         returns (uint256)
     {
         bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI), so the
+        // Operator has to fund the intent first. One LP signature authorizes both.
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
         vm.prank(operatorAddr);
         return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
     }

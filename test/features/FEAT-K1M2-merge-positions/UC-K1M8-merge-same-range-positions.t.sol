@@ -104,11 +104,16 @@ contract MergePositionsTestBase is Test {
 
         // Mint position A: range [0, 100), 500 USDC → liquidity = 5e18
         bytes memory sigA = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-a"));
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(100), 500, keccak256("mint-a"), sigA);
         vm.prank(operatorAddr);
         posA = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-a"), sigA);
 
         // Mint position B: range [0, 100), 500 USDC → liquidity = 5e18
         bytes memory sigB = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-b"));
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(100), 500, keccak256("mint-b"), sigB);
         vm.prank(operatorAddr);
         posB = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-b"), sigB);
     }
@@ -222,6 +227,9 @@ contract MergePositionsRangeMismatchTest is MergePositionsTestBase {
         // Mint position C with a different upper tick: range [0, 200)
         mockUsdc.mint(lp, 1_000_000);
         bytes memory sigC = _signMintIntent(LP_PK, lp, int24(0), int24(200), 500, keccak256("mint-c"));
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(200), 500, keccak256("mint-c"), sigC);
         vm.prank(operatorAddr);
         posC = vault.mintPositionFor(lp, int24(0), int24(200), 500, keccak256("mint-c"), sigC);
     }
@@ -314,6 +322,9 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
 
         // Mint posA: 500 USDC on [0, 100) → liq = 5e18, activeLiquidity = 5e18
         bytes memory sigA = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-a"));
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(100), 500, keccak256("mint-a"), sigA);
         vm.prank(operatorAddr);
         posA = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-a"), sigA);
 
@@ -323,6 +334,8 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
 
         // Mint posB: 500 USDC on [0, 100) → liq = 5e18, activeLiquidity = 10e18
         bytes memory sigB = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-b"));
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(100), 500, keccak256("mint-b"), sigB);
         vm.prank(operatorAddr);
         posB = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-b"), sigB);
 
@@ -518,6 +531,10 @@ contract MergePositionsWraparoundTestBase is Test {
         returns (uint256)
     {
         bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI), so the
+        // Operator has to fund the intent first. One LP signature authorizes both.
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
         vm.prank(operatorAddr);
         return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
     }

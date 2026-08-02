@@ -109,6 +109,9 @@ contract UpdateTickTestBase is Test {
 
     function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId) internal {
         bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId, address(vault));
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
         vm.prank(operatorAddr);
         vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
     }
@@ -412,6 +415,9 @@ contract UpdateTickTooManyTicksTest is Test {
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(LP_PK, digest);
         bytes memory sig = abi.encodePacked(r, s, v);
 
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
         vm.prank(operatorAddr);
         vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
     }
@@ -693,6 +699,10 @@ contract CrossTickWraparoundTestBase is Test {
         returns (uint256)
     {
         bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI), so the
+        // Operator has to fund the intent first. One LP signature authorizes both.
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
         vm.prank(operatorAddr);
         return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
     }

@@ -107,6 +107,9 @@ contract EmergencyCancelTestBase is Test {
         mockUsdc.approve(address(vault), type(uint256).max);
 
         bytes memory sigA = _signMintIntent(LP_A_PK, lpA, int24(0), int24(100), 1000, keccak256("mint-a-1"));
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lpA, int24(0), int24(100), 1000, keccak256("mint-a-1"), sigA);
         vm.prank(operatorAddr);
         positionIdA = vault.mintPositionFor(lpA, int24(0), int24(100), 1000, keccak256("mint-a-1"), sigA);
 
@@ -135,6 +138,17 @@ contract EmergencyCancelTestBase is Test {
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
         (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
         return abi.encodePacked(r, s, v);
+    }
+
+    /// @dev Escrows an intent as the Operator on behalf of `lpAddr`, who signs it.
+    ///      Mint consumes escrow rather than pulling tokens (FEAT-3ZRI), so every
+    ///      successful mint needs this to have run first.
+    function _escrowFor(uint256 pk, address lpAddr, int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 id)
+        internal
+    {
+        bytes memory sig = _signMintIntent(pk, lpAddr, tickLower, tickUpper, usdcAmount, id);
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lpAddr, tickLower, tickUpper, usdcAmount, id, sig);
     }
 
     /// @dev Warps block.timestamp past the emergency cancel timelock.
@@ -293,6 +307,7 @@ contract MultiLPDistributionTest is EmergencyCancelTestBase {
         super.setUp();
 
         // Mint a second position for LP-A: range [0, 50) with 500 USDC
+        _escrowFor(LP_A_PK, lpA, int24(0), int24(50), 500, keccak256("mint-a-2"));
         bytes memory sigA2 = _signMintIntent(LP_A_PK, lpA, int24(0), int24(50), 500, keccak256("mint-a-2"));
         vm.prank(operatorAddr);
         positionIdA2 = vault.mintPositionFor(lpA, int24(0), int24(50), 500, keccak256("mint-a-2"), sigA2);
@@ -302,6 +317,7 @@ contract MultiLPDistributionTest is EmergencyCancelTestBase {
         vm.prank(lpB);
         mockUsdc.approve(address(vault), type(uint256).max);
 
+        _escrowFor(LP_B_PK, lpB, int24(0), int24(100), 2000, keccak256("mint-b-1"));
         bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 2000, keccak256("mint-b-1"));
         vm.prank(operatorAddr);
         positionIdB = vault.mintPositionFor(lpB, int24(0), int24(100), 2000, keccak256("mint-b-1"), sigB);
@@ -588,15 +604,24 @@ contract HeartbeatOnQuietMarketTest is EmergencyCancelTestBase {
 contract MintAndMergeResetTimelockTest is EmergencyCancelTestBase {
     function setUp() public override {
         super.setUp();
+
+        // Escrow every intent these tests will mint BEFORE the timelock lapses.
+        // depositForIntent is itself an Operator action and refreshes the silence
+        // timer, so funding must not happen inside the window under test — otherwise
+        // the escrow, not the mint, would be what defers the cancel.
+        mockUsdc.mint(lpB, 1_000_000);
+        vm.prank(lpB);
+        mockUsdc.approve(address(vault), type(uint256).max);
+
+        _escrowFor(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-live"));
+        _escrowFor(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-defer"));
+        _escrowFor(LP_A_PK, lpA, int24(0), int24(100), 1000, keccak256("mint-a-2"));
+
         _warpPastTimelock();
     }
 
     // SC-3XU0: minting a position for an LP is proof the Operator is alive
     function test_mintPositionForRefreshesSilenceTimer() public {
-        mockUsdc.mint(lpB, 1_000_000);
-        vm.prank(lpB);
-        mockUsdc.approve(address(vault), type(uint256).max);
-
         bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-live"));
         vm.prank(operatorAddr);
         vault.mintPositionFor(lpB, int24(0), int24(100), 1000, keccak256("mint-b-live"), sigB);
@@ -606,10 +631,6 @@ contract MintAndMergeResetTimelockTest is EmergencyCancelTestBase {
 
     // SC-3XU0: and that refresh actually defers the emergency cancel
     function test_mintPositionForDefersEmergencyCancel() public {
-        mockUsdc.mint(lpB, 1_000_000);
-        vm.prank(lpB);
-        mockUsdc.approve(address(vault), type(uint256).max);
-
         bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-defer"));
         vm.prank(operatorAddr);
         vault.mintPositionFor(lpB, int24(0), int24(100), 1000, keccak256("mint-b-defer"), sigB);
@@ -825,11 +846,26 @@ contract EmergencyCancelWraparoundTestBase is Test {
         return abi.encodePacked(r, s, v);
     }
 
+    /// @dev Escrows an intent as the Operator on behalf of `lpAddr`, who signs it.
+    ///      Mint consumes escrow rather than pulling tokens (FEAT-3ZRI), so every
+    ///      successful mint needs this to have run first.
+    function _escrowFor(uint256 pk, address lpAddr, int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 id)
+        internal
+    {
+        bytes memory sig = _signMintIntent(pk, lpAddr, tickLower, tickUpper, usdcAmount, id);
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lpAddr, tickLower, tickUpper, usdcAmount, id, sig);
+    }
+
     function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId)
         internal
         returns (uint256)
     {
         bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI), so the
+        // Operator has to fund the intent first. One LP signature authorizes both.
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
         vm.prank(operatorAddr);
         return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
     }

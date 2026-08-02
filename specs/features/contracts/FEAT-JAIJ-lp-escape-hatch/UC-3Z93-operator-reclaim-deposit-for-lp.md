@@ -2,7 +2,7 @@
 id: UC-3Z93
 name: Operator Reclaim Deposit for LP
 feature: FEAT-JAIJ
-status: pending
+status: implemented
 version: 2
 actor: Operator
 ---

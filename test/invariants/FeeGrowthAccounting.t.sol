@@ -122,6 +122,12 @@ contract FeeGrowthAccountingHandler is Test {
         bytes32 intentId = keccak256(abi.encode("handler-mint", intentNonce++));
         bytes memory sig = _sign(tickLower, tickUpper, usdcAmount, intentId);
 
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI), so the
+        // handler funds the intent first. Both calls are tolerant of failure: the
+        // handler explores arbitrary inputs, and a rejected mint is a valid outcome.
+        vm.prank(operatorAddr);
+        try vault.depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId, sig) {} catch {}
+
         vm.prank(operatorAddr);
         try vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig) returns (uint256 id) {
             positionIds.push(id);

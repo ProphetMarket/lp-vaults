@@ -99,6 +99,9 @@ contract NotifyFeesTestBase is Test {
         mockUsdc.approve(address(vault), type(uint256).max);
 
         bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 1000, keccak256("setup-mint"));
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
         vm.prank(operatorAddr);
         vault.mintPositionFor(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
     }
