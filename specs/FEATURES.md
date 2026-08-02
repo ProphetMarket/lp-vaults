@@ -25,9 +25,10 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
+| FEAT-3ZRI | Escrow Deposit for Mint Intent | Operator-executed per-intent USDC escrow that funds a signed mint intent, so mint and reclaim both draw on verified on-chain state instead of re-pulling or paying out unattributed funds | implemented |
 | FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation with EIP-712 signed intents, v3-style tick initialization, and fee-snapshot anchoring | dirty |
 | FEAT-U079 | Collect Fees on a Position | LP withdraws accumulated trading fees from a position using the v3 feeGrowthInside accumulator with snapshot-based double-counting prevention | implemented |
-| FEAT-JAIJ | LP Escape Hatch | LP-initiated USDC recovery when the Operator fails to fulfill a signed mint intent within RECLAIM_TIMELOCK | pending |
+| FEAT-JAIJ | LP Escape Hatch | Escrow-sourced refund of an unfulfilled mint intent through a permissionless LP path plus an Operator-relayed twin for voluntary cancellation | dirty |
 | FEAT-K1M2 | Merge Positions | Operator-called housekeeping to combine same-range same-owner positions into a single record preserving liquidity and fees | implemented |
 
 ## @fees

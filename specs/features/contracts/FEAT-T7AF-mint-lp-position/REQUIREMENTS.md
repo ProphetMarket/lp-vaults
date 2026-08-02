@@ -4,8 +4,8 @@ name: Mint LP Position
 module: contracts
 domain: "@positions"
 status: dirty
-version: 2
-refs: [FEAT-REPZ]
+version: 4
+refs: [FEAT-REPZ, FEAT-3ZRI]
 ---
 
 # Mint LP Position
@@ -16,7 +16,8 @@ refs: [FEAT-REPZ]
 
 - Does not handle fee collection -- see feature 5
 - Does not handle position burning -- see feature 6
-- Does not handle deposit-then-credit flow (USDC pre-sent to vault) or reclaimDeposit escape hatch -- see feature 7
+- Does not pull USDC from the LP's wallet; the intent must already be funded as per-intent escrow -- see FEAT-3ZRI
+- Does not refund an unfulfilled intent's escrow -- see FEAT-JAIJ
 - Does not handle tick crossing / updateTick -- see feature 4
 - Does not handle fee notification / notifyFees -- see feature 3
 - Does not handle vault wind-down or emergency cancel -- see feature 8
@@ -26,15 +27,27 @@ refs: [FEAT-REPZ]
 
 | Actor | Role | Notes |
 |-------|------|-------|
-| Operator | Executes the LP's signed mint intent on-chain | Gated by `onlyOperator` modifier; pulls USDC from LP's wallet via transferFrom |
-| LP | Signs EIP-712 mint intent off-chain | Their wallet is the USDC source; position ownership recorded as LP address |
+| Operator | Executes the LP's signed mint intent on-chain | Gated by `onlyOperator` modifier; consumes the intent's escrow (FEAT-3ZRI) rather than moving any tokens itself |
+| LP | Signs EIP-712 mint intent off-chain | One signature authorizes both the escrow (FEAT-3ZRI) and this mint; position ownership recorded as LP address |
 
 ## Functional Requirements
 
 ### Position Creation
 
-**FR-T7AS** `When the Operator submits a valid EIP-712 mint intent signed by an LP, the system shall pull usdcAmount USDC from the LP's wallet via transferFrom, compute liquidity as usdcAmount * PRECISION / (tickUpper - tickLower), create a position record with feeGrowthInsideLastX128 snapshot, and emit a PositionMinted event.`
-Fit Criterion: Given a valid intent with matching signature, the LP's USDC balance decreases by usdcAmount, a position record exists at the assigned positionId with correct tickLower, tickUpper, liquidity, and feeGrowthInsideLastX128, and a PositionMinted event is emitted with the correct fields.
+**FR-T7AS** `When the Operator submits a valid EIP-712 mint intent signed by an LP whose escrow already covers the intent, the system shall consume that escrow, compute liquidity as usdcAmount * PRECISION / (tickUpper - tickLower), create a position record with feeGrowthInsideLastX128 snapshot, and emit a PositionMinted event.`
+Fit Criterion: Given a valid intent with matching signature and `pendingDeposits[intentId] == usdcAmount`, a position record exists at the assigned positionId with correct tickLower, tickUpper, liquidity, and feeGrowthInsideLastX128, `pendingDeposits[intentId] == 0` afterwards, and a PositionMinted event is emitted with the correct fields. The LP's USDC balance is unchanged by this call -- it was debited earlier, at escrow time (FEAT-3ZRI FR-3Z9M).
+Linked to: UC-T7AG
+
+**FR-3Z9W** `If the Operator submits a mint intent whose escrowed amount does not exactly equal the intent's usdcAmount, then the system shall revert.`
+Fit Criterion: Given no escrow entry for the intentId (never funded, or already consumed), the call reverts with `DepositNotEscrowed`. Given `pendingDeposits[intentId].amount != usdcAmount` (funded against a different amount), the call reverts with the same error. Exact equality is required rather than a sufficiency check, so a position can never be minted larger than the USDC actually collected for it, nor silently leave a remainder stranded in escrow.
+Linked to: UC-T7AG
+
+**FR-45ID** `If the Operator submits a mint intent for an LP who is not the escrow entry's recorded depositor, then the system shall revert.`
+Fit Criterion: Given `pendingDeposits[intentId].lp == A` and a mint submitted for LP B with a signature validly produced by B over the same intentId, the call reverts with `NotIntentOwner` and no position is created. A valid signature over an intentId is necessary but not sufficient to spend that intentId's escrow, because any party can sign over any intentId (FEAT-3ZRI FR-45I9, ADR-45IC). Without this check a compromised or colluding Operator could mint B a position funded entirely by A's deposit.
+Linked to: UC-T7AG
+
+**FR-3ZVK** `When a mint consumes an intent's escrow, the system shall delete pendingDeposits[intentId] before performing any external call.`
+Fit Criterion: Given a successful mint, `pendingDeposits[intentId] == 0` and `usedIntents[intentId] == true`, so neither a second mint nor a reclaim can draw on the same escrow. The deletion sits in the Effects section, preserving checks-effects-interactions.
 Linked to: UC-T7AG
 
 **FR-T7AT** `When a position is minted, the system shall set feeGrowthInsideLastX128 to the current feeGrowthInside computed for the position's [tickLower, tickUpper] range, preventing the position from claiming pre-existing fees.`
@@ -109,15 +122,19 @@ Linked to: UC-T7AG
 
 **NFR-T7B6** Gas: `When an Operator mints a position (including tick initialization and USDC transfer), the total gas cost shall remain below 300,000 gas on Polygon.`
 
-**NFR-T7B7** Security: `The system shall apply an inline nonReentrant modifier to the mint function to prevent reentrancy via the USDC transferFrom callback.`
+**NFR-T7B7** Security: `The system shall apply an inline nonReentrant modifier to the mint function.`
+Rationale: mint performs no token transfer once funding moves to escrow (FEAT-3ZRI), so there is no callback to reenter through today. The guard is retained as defense-in-depth because mint mutates position, tick, and activeLiquidity state that other guarded paths read, and because a future revision that reintroduces an external call must not silently inherit an unguarded function.
 
-**NFR-T7B8** Security: `The system shall follow checks-effects-interactions ordering in the mint function: validate inputs and verify signature first, update position and tick state second, perform the external USDC transferFrom last.`
+**NFR-T7B8** Security: `The system shall follow checks-effects-interactions ordering in the mint function: validate inputs, verify the signature, and confirm the escrow covers the intent first; then consume the escrow and update position, tick, and activeLiquidity state.`
 
 ## Acceptance
 
 > The feature is complete when all of the following are true:
 
 - All scenarios in UC-T7AG pass with full coverage
+- `mintPositionFor` contains no `transferFrom` call and no token transfer of any kind
+- Minting an intent with no escrow, or with an escrow that does not exactly match the intent's amount, reverts with `DepositNotEscrowed`
+- A minted intent's escrow entry is deleted, so it can be neither re-minted nor reclaimed
 - Non-operator callers cannot mint (FR-RFS6 from FEAT-REPZ verified in scenario SC-T7AN)
 - First mint below minimumFirstLiquidity reverts when activeLiquidity == 0 (FR-RFS7 from FEAT-REPZ verified in scenario SC-T7AO)
 - Positions minted at time T cannot claim fees from before T (fuzz test on feeGrowthInsideLastX128 snapshot)

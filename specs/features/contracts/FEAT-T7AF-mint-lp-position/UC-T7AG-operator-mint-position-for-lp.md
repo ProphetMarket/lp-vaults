@@ -2,8 +2,8 @@
 id: UC-T7AG
 name: Operator Mint Position for LP
 feature: FEAT-T7AF
-status: implemented
-version: 2
+status: dirty
+version: 4
 actor: Operator
 ---
 
@@ -16,7 +16,7 @@ actor: Operator
 - A vault has been deployed and initialized for a market (FEAT-REPZ UC-REQ1)
 - The vault is in Active phase (phase == 1)
 - The Operator is registered in the vault's role registry (`operators[operator] == 1`)
-- The LP has approved the vault contract to spend their USDC (`IERC20(usdc).approve(vault, amount)`)
+- The intent's USDC is already held by the vault as per-intent escrow: `pendingDeposits[intentId] == usdcAmount`, recorded by a prior `depositForIntent` call (FEAT-3ZRI UC-3Z92). Mint moves no tokens; it converts escrow the vault already holds into a position.
 
 ## Trigger
 
@@ -28,32 +28,35 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 
 **Given:**
 - Vault with currentTick = 50, tickSpacing = 10, feeGrowthGlobalX128 = 1000
-- LP has sufficient USDC and has approved the vault for >= 600
 - LP signed a valid MintIntent: lp = LP address, tickLower = 20, tickUpper = 80, usdcAmount = 600, intentId = unique value
+- The Operator already escrowed that intent: `pendingDeposits[intentId] == 600`, and the vault holds the 600 USDC
 - Ticks 20 and 80 have never been used (liquidityGross == 0 on both)
 
 **Steps:**
 1. Operator submits the LP's signed mint intent to `mintPositionFor`
 2. System verifies the EIP-712 signature matches the LP's address using the cached domain separator
 3. System validates: tickLower (20) < tickUpper (80), both divisible by tickSpacing (10), phase == Active, usdcAmount > 0
-4. System records intentId as used in the usedIntents mapping
-5. System initializes tick 20: feeGrowthOutsideX128 = feeGrowthGlobalX128 (1000), since tick 20 <= currentTick (50)
-6. System initializes tick 80: feeGrowthOutsideX128 = 0, since tick 80 > currentTick (50)
-7. System updates tick state: liquidityGross += liquidity on ticks 20 and 80; liquidityNet += liquidity on tick 20, liquidityNet -= liquidity on tick 80
-8. System computes liquidity = 600 * PRECISION / (80 - 20)
-9. System creates position at nextPositionId with owner = LP, tickLower = 20, tickUpper = 80, computed liquidity, feeGrowthInsideLastX128 = feeGrowthInside([20, 80]), tokensOwed = 0
-10. System adds liquidity to activeLiquidity (position is in-range: 20 <= 50 < 80)
-11. System pulls 600 USDC from LP's wallet via transferFrom
+4. System confirms the escrow covers the intent exactly: `pendingDeposits[intentId] == 600`
+5. System records intentId as used in the usedIntents mapping and clears the escrow entry
+6. System initializes tick 20: feeGrowthOutsideX128 = feeGrowthGlobalX128 (1000), since tick 20 <= currentTick (50)
+7. System initializes tick 80: feeGrowthOutsideX128 = 0, since tick 80 > currentTick (50)
+8. System updates tick state: liquidityGross += liquidity on ticks 20 and 80; liquidityNet += liquidity on tick 20, liquidityNet -= liquidity on tick 80
+9. System computes liquidity = 600 * PRECISION / (80 - 20)
+10. System creates position at nextPositionId with owner = LP, tickLower = 20, tickUpper = 80, computed liquidity, feeGrowthInsideLastX128 = feeGrowthInside([20, 80]), tokensOwed = 0
+11. System adds liquidity to activeLiquidity (position is in-range: 20 <= 50 < 80)
 
 **Outcomes:**
 - Position record exists at positionId with owner = LP, liquidity > 0, feeGrowthInsideLastX128 set
-- LP's USDC balance decreased by 600; vault's USDC balance increased by 600
+- `pendingDeposits[intentId] == 0` -- the escrow has been converted into the position and can no longer be reclaimed
+- LP's USDC balance is unchanged by this call, and the vault's USDC balance is unchanged: the 600 moved at escrow time, not here
 - activeLiquidity increased by the position's liquidity
 - nextPositionId incremented by 1
 
 **Side Effects:**
 - `PositionMinted(positionId, lp, 20, 80, liquidity, 600, intentId)` event emitted
 - `positions[positionId]` storage: new record created
+- `pendingDeposits[intentId]` storage: deleted
+- No USDC transferred -- mint performs no external token call at all
 - `ticks[20]` storage: initialized with feeGrowthOutsideX128 = feeGrowthGlobalX128, liquidityGross and liquidityNet updated
 - `ticks[80]` storage: initialized with feeGrowthOutsideX128 = 0, liquidityGross and liquidityNet updated
 - `usedIntents[intentId]` storage: set to true
@@ -70,21 +73,22 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 **Given:**
 - Vault with currentTick = 50, tickSpacing = 10, feeGrowthGlobalX128 = 2000
 - LP signed a valid MintIntent: tickLower = 60, tickUpper = 90, usdcAmount = 300, unique intentId
+- The Operator already escrowed that intent: `pendingDeposits[intentId] == 300`
 - Ticks 60 and 90 have never been used
 
 **Steps:**
 1. Operator submits the LP's signed mint intent
 2. System verifies signature and validates inputs
-3. System records intentId as used
+3. System confirms the escrow covers the intent exactly and records intentId as used, clearing the escrow entry
 4. System initializes tick 60: feeGrowthOutsideX128 = 0 (tick 60 > currentTick 50)
 5. System initializes tick 90: feeGrowthOutsideX128 = 0 (tick 90 > currentTick 50)
 6. System updates tick state on both ticks
 7. System computes liquidity and creates position with feeGrowthInsideLastX128 snapshot
 8. System does NOT modify activeLiquidity (currentTick 50 < tickLower 60, position is out-of-range)
-9. System pulls 300 USDC from LP's wallet
 
 **Outcomes:**
 - Position exists with owner = LP but is out-of-range
+- `pendingDeposits[intentId] == 0`
 - activeLiquidity unchanged
 - Position will start earning fees when currentTick enters [60, 90) via future updateTick calls
 
@@ -92,7 +96,9 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 - `PositionMinted(positionId, lp, 60, 90, liquidity, 300, intentId)` event emitted
 - Position and tick storage updated
 - `usedIntents[intentId]` set to true
+- `pendingDeposits[intentId]` storage: deleted
 - No change to `activeLiquidity` storage
+- No USDC transferred
 
 ---
 
@@ -103,28 +109,31 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 - Tick 20 already initialized with liquidityGross = 100, feeGrowthOutsideX128 = 500 (from a previous mint)
 - Tick 60 never used
 - LP signed a valid MintIntent: tickLower = 20, tickUpper = 60, usdcAmount = 400, unique intentId
+- The Operator already escrowed that intent: `pendingDeposits[intentId] == 400`
 
 **Steps:**
 1. Operator submits the LP's signed mint intent
 2. System verifies signature and validates inputs
-3. System records intentId as used
+3. System confirms the escrow covers the intent exactly and records intentId as used, clearing the escrow entry
 4. System finds tick 20 already initialized (liquidityGross > 0) -- skips feeGrowthOutsideX128 initialization
 5. System initializes tick 60 (feeGrowthOutsideX128 = 0, since 60 > currentTick 50)
 6. System accumulates liquidityGross on tick 20 (existing 100 + new liquidity)
 7. System creates position with feeGrowthInsideLastX128 snapshot
 8. System adds liquidity to activeLiquidity (20 <= 50 < 60)
-9. System pulls 400 USDC from LP
 
 **Outcomes:**
 - Tick 20's liquidityGross increased by the new position's liquidity
 - Tick 20's feeGrowthOutsideX128 unchanged (preserved at 500, not re-initialized)
 - New position created with correct feeGrowthInsideLastX128
+- `pendingDeposits[intentId] == 0`
 
 **Side Effects:**
 - `PositionMinted` event emitted
 - `ticks[20].liquidityGross` storage: increased additively; `feeGrowthOutsideX128` preserved
 - `ticks[60]` storage: initialized
 - Position and intent storage updated
+- `pendingDeposits[intentId]` storage: deleted
+- No USDC transferred
 
 ---
 
@@ -286,6 +295,84 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 - No state changes
 - No USDC transferred
 - No events emitted
+
+---
+
+### SC-3Z9J: Revert when no deposit is escrowed for the intent
+
+**Given:**
+- Vault in Active phase, currentTick = 50, tickSpacing = 10
+- LP signed a valid MintIntent with a well-formed range and usdcAmount = 600, intentId = X
+- No `depositForIntent` has ever been called for X, so `pendingDeposits[X] == 0`
+
+**Steps:**
+1. Operator submits the LP's signed mint intent to `mintPositionFor`
+2. System verifies the signature and validates the range, tick alignment, phase, and amount
+3. System reads `pendingDeposits[X]` and finds 0
+
+**Outcomes:**
+- Call reverts with DepositNotEscrowed error
+- No position is created against USDC the vault never collected -- an unfunded intent cannot mint liquidity out of thin air
+
+**Side Effects:**
+- No state changes
+- No USDC transferred
+- No events emitted
+- `lastOperatorActivityTimestamp` unchanged -- a failed call is not proof of life
+
+---
+
+### SC-3Z9K: Revert when the escrowed amount does not match the intent
+
+**Given:**
+- Vault in Active phase
+- `pendingDeposits[X] == 400` from a prior `depositForIntent` against an intent for 400 USDC
+- Operator submits a MintIntent for the same intentId X but with usdcAmount = 600, validly signed by the LP
+
+**Steps:**
+1. Operator submits the LP's signed mint intent to `mintPositionFor`
+2. System verifies the signature and validates the range, tick alignment, phase, and amount
+3. System reads `pendingDeposits[X]` and finds 400, which is not equal to the intent's 600
+
+**Outcomes:**
+- Call reverts with DepositNotEscrowed error
+- The position's liquidity can never exceed the USDC actually collected for it, and no partial remainder is silently stranded in escrow
+
+**Side Effects:**
+- No state changes
+- `pendingDeposits[X]` still 400, still reclaimable by the LP
+- No USDC transferred
+- No events emitted
+- `lastOperatorActivityTimestamp` unchanged
+
+---
+
+### SC-45IE: Revert when the escrow belongs to a different LP
+
+**Given:**
+- Vault in Active phase, currentTick = 50, tickSpacing = 10
+- LP A funded intentId X: `pendingDeposits[X].lp == A`, `.amount == 600`
+- LP B validly signs their own MintIntent naming themselves, over the same intentId X and the same 600
+- The Operator submits B's intent
+
+**Steps:**
+1. Operator submits B's signed mint intent to `mintPositionFor`
+2. System verifies the EIP-712 signature, which recovers to B and matches the named LP B
+3. System reads the escrow for X and finds it is recorded against A, not B
+
+**Outcomes:**
+- Call reverts with NotIntentOwner error
+- No position is created for B, and A's escrow of 600 is untouched and still mintable
+- A valid signature over an intentId does not entitle the signer to that intentId's escrow: anyone can sign over any intentId, so the recorded depositor is what settles ownership
+
+**Side Effects:**
+- No state changes
+- `pendingDeposits[X]` still `(A, 600)`
+- No USDC transferred
+- No events emitted
+- `lastOperatorActivityTimestamp` unchanged
+
+---
 
 ### SC-3XU5: Successful mint refreshes the Operator silence timer
 

@@ -116,7 +116,7 @@ contract LPVault {
     uint8 public phase;
 
     /// @dev Circuit breaker flag. When true, trading entry points
-    ///      (mintPositionFor, notifyFees, updateTick, mergePositions) revert.
+    ///      (depositForIntent, mintPositionFor, notifyFees, updateTick, mergePositions) revert.
     ///      LP exit paths (collect, reclaimDeposit) and emergencyCancelAll
     ///      are unaffected. Independent of the phase state machine.
     bool public paused;
@@ -180,6 +180,43 @@ contract LPVault {
     ///      to enforce RECLAIM_TIMELOCK. Would be immutable in a non-clone contract;
     ///      storage because EIP-1167.
     mapping(bytes32 => uint256) public intentTimestamps;
+
+    // ──────────────────────────────────────────────
+    // Escrow state (FEAT-3ZRI)
+    // ──────────────────────────────────────────────
+
+    /// @dev A deposit escrowed against one intentId: who put it in, and how much.
+    ///      Packs into a single slot (20-byte address + 12-byte amount).
+    struct PendingDeposit {
+        address lp;
+        uint96 amount;
+    }
+
+    /// @dev intentId => the escrow held for that intent by depositForIntent.
+    ///      The single source of truth for "WHOSE USDC, and how much, is attributable
+    ///      to this intentId". mintPositionFor consumes the entry to fund a position;
+    ///      the reclaim paths refund it. Exactly one of those can ever happen.
+    ///
+    ///      The `lp` field is load-bearing, not bookkeeping. An intentId is NOT bound
+    ///      to an LP by the signature scheme: _verifyMintIntent recovers a signer and
+    ///      compares it to a caller-supplied `lp` argument, so anyone can produce a
+    ///      signature that verifies over any intentId by signing with their own key and
+    ///      naming their own address. Every path that spends an escrow must therefore
+    ///      check `lp` against this recorded depositor — a valid signature over an
+    ///      intentId is necessary but never sufficient. Without that check, an attacker
+    ///      could read a pending intentId out of the DepositEscrowed log, self-sign over
+    ///      it, and drain the deposit via the permissionless reclaimDeposit path.
+    ///
+    ///      `lp == address(0)` is the reserved "nothing escrowed" sentinel. A zero
+    ///      usdcAmount is still rejected (FR-3Z9O) because such an escrow could never be
+    ///      minted (mint rejects a zero amount) and could only be unwound through the
+    ///      24-hour reclaim timelock.
+    ///
+    ///      Declared after intentTimestamps rather than at the end of storage so
+    ///      escrow state sits beside the reclaim state that reads it. Safe because
+    ///      EIP-1167 clones are never upgraded in place: a layout change reaches
+    ///      only vaults deployed from a newly-published implementation.
+    mapping(bytes32 => PendingDeposit) public pendingDeposits;
 
     // ──────────────────────────────────────────────
     // TickBitmap (FEAT-TVS0)
@@ -270,6 +307,7 @@ contract LPVault {
     error InsufficientPositions();
     error TradingIsPaused();
     error NotConditionalTokens();
+    error DepositAlreadyEscrowed();
 
     // ──────────────────────────────────────────────
     // Events
@@ -306,6 +344,9 @@ contract LPVault {
 
     // SC-K1MM: emitted when Admin unpauses trading
     event TradingUnpaused(address indexed caller);
+
+    // SC-3Z94: emitted when the Operator escrows an LP's deposit against an intent
+    event DepositEscrowed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
 
     // SC-T7AH, SC-T7AI, SC-T7AJ: emitted on every successful position mint
     event PositionMinted(
@@ -652,6 +693,93 @@ contract LPVault {
         }
 
         emit EmergencyCancelExecuted(msg.sender);
+    }
+
+    // ──────────────────────────────────────────────
+    // Escrow deposit (FEAT-3ZRI, UC-3Z92)
+    // ──────────────────────────────────────────────
+
+    // SC-3Z94 through SC-3Z9B: operator-gated per-intent USDC escrow
+    /// @notice Pulls an LP's USDC into the vault and records it against a specific
+    ///         signed mint intent, funding that intent so `mintPositionFor` can later
+    ///         convert it into a position.
+    /// @dev Verifies the SAME `MintIntent` struct that `mintPositionFor` verifies, so
+    ///      the LP signs once and that one signature authorizes both the escrow and
+    ///      the mint. Range and tick-alignment rules are deliberately NOT checked here;
+    ///      they are enforced at mint, which keeps the validation rules in one place.
+    ///      The cost is that an LP can escrow against a malformed intent that mint will
+    ///      always reject, leaving them to recover it through the reclaim path.
+    ///
+    ///      OPERATOR TRUST ASSUMPTION: The Operator chooses whether and when to escrow
+    ///      an LP's signed intent. They cannot fabricate a deposit — every escrow needs
+    ///      that LP's own EIP-712 signature over these exact fields, so a compromised
+    ///      Operator key can censor, reorder, or delay an onboarding, but cannot pull
+    ///      funds from an LP who never signed. An Operator who simply refuses to call
+    ///      this leaves the LP's USDC untouched in the LP's own wallet: nothing is
+    ///      pulled until this function runs, so unlike the exit paths there is nothing
+    ///      to rescue and deliberately no permissionless twin (FR-3Z9V).
+    ///
+    ///      MEV analysis: this function moves value but creates no position, touches no
+    ///      tick, and reads no price, so its ordering relative to other transactions
+    ///      changes nothing an observer could profit from. The front-running risk the
+    ///      Operator chokepoint exists to prevent — an attacker seeding a tiny position
+    ///      ahead of a real LP's deposit to skew tick-initialization and fee-growth
+    ///      state — lives in `mintPositionFor`, which is separately Operator-gated. The
+    ///      one ordering effect here is that escrowing an intentId blocks a competing
+    ///      escrow of the same intentId, and intentIds are LP-chosen and signature-bound,
+    ///      so no third party can race for one.
+    /// @param lp LP wallet address — must match the signer of the EIP-712 intent
+    /// @param tickLower Lower tick bound from the MintIntent — part of the signed digest
+    /// @param tickUpper Upper tick bound from the MintIntent — part of the signed digest
+    /// @param usdcAmount USDC to pull from the LP's wallet — must be > 0
+    /// @param intentId Unique identifier this escrow is recorded against
+    /// @param lpSignature EIP-712 signature from the LP over the MintIntent struct
+    function depositForIntent(
+        address lp,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 usdcAmount,
+        bytes32 intentId,
+        bytes calldata lpSignature
+    ) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
+        // --- Checks ---
+
+        // Escrow only ever funds a mint, and mints are Active-only. Accepting a
+        // deposit into a wound-down or cancelled vault would strand the LP's USDC
+        // until the reclaim timelock elapsed.
+        if (phase != 1) revert VaultNotActive();
+
+        // A zero-value escrow could never be minted -- mint rejects a zero usdcAmount
+        // (FR-T7B5) -- so it could only ever be unwound through the 24-hour reclaim
+        // timelock. Rejecting it here keeps every entry in the mapping spendable.
+        // (The "nothing escrowed" sentinel is the entry's zero lp address, not its
+        // amount; see the pendingDeposits declaration.)
+        if (usdcAmount == 0) revert ZeroAmount();
+
+        // Verify the LP authorized this exact deposit
+        _verifyMintIntent(lp, tickLower, tickUpper, usdcAmount, intentId, lpSignature);
+
+        // Never escrow twice against one intent — that is the double-charge this
+        // whole mechanism exists to prevent. Keying the guard on the recorded
+        // depositor rather than the amount also stops a second, different LP from
+        // straddling an intentId another LP has already funded.
+        if (pendingDeposits[intentId].lp != address(0)) revert DepositAlreadyEscrowed();
+
+        // Never re-fund an intent already consumed by a mint or a completed reclaim.
+        if (usedIntents[intentId]) revert IntentAlreadyUsed();
+
+        // --- Effects ---
+
+        // Record WHO deposited alongside how much. Every consuming path checks the
+        // `lp` field, because a valid signature over an intentId does not prove
+        // ownership of it — see the mapping's declaration.
+        pendingDeposits[intentId] = PendingDeposit({lp: lp, amount: _toUint96(usdcAmount)});
+
+        // --- Interactions (external calls last, per checks-effects-interactions) ---
+
+        _safeTransferFrom(usdc, lp, address(this), usdcAmount);
+
+        emit DepositEscrowed(intentId, lp, usdcAmount);
     }
 
     // ──────────────────────────────────────────────
@@ -1492,6 +1620,19 @@ contract LPVault {
     // ──────────────────────────────────────────────
     // Internal: safe casts (inlined per pattern policy)
     // ──────────────────────────────────────────────
+
+    /// @dev uint256 → uint96 with overflow check. Used for escrowed USDC amounts,
+    ///      which pack alongside the depositor's address in one PendingDeposit slot.
+    ///      uint96 holds ~7.9e28 base units (~7.9e22 USDC at 6 decimals), far above
+    ///      the token's total supply, so the bound is unreachable in practice — but a
+    ///      truncating cast would record an escrow smaller than the USDC collected,
+    ///      so it reverts instead.
+    function _toUint96(uint256 x) internal pure returns (uint96) {
+        if (x > type(uint96).max) revert SafeCastOverflow();
+        // casting to uint96 is safe because overflow is checked on the line above
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint96(x);
+    }
 
     /// @dev uint256 → uint128 with overflow check
     function _toUint128(uint256 x) internal pure returns (uint128) {

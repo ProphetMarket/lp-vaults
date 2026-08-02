@@ -2,7 +2,7 @@
 id: FEAT-T7AF
 name: Mint LP Position
 use_cases: [UC-T7AG]
-scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AQ, SC-T7AR, SC-3XU5, SC-3XU6]
+scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AQ, SC-T7AR, SC-3Z9J, SC-3Z9K, SC-45IE, SC-3XU5, SC-3XU6]
 last_update: 2026-08-01
 ---
 
@@ -18,10 +18,11 @@ C4Context
     Person(operator, "Operator", "Executes LP mint intents on-chain")
     Person(lp, "LP", "Signs EIP-712 mint intent off-chain")
     System(vault, "LPVault (clone)", "Per-market vault with v3-style positions and tick state")
-    System_Ext(usdc, "USDC", "ERC-20 stablecoin — LP's deposit source")
+    System(escrow, "Escrow Deposit (FEAT-3ZRI)", "Holds the intent's USDC before mint")
     Rel(lp, operator, "signs MintIntent", "EIP-712 off-chain")
+    Rel(operator, escrow, "depositForIntent()", "funds the intent first")
     Rel(operator, vault, "mintPositionFor()", "contract call")
-    Rel(vault, usdc, "transferFrom(lp, vault, amount)", "ERC-20")
+    Rel(vault, escrow, "consumes pendingDeposits[intentId]", "storage")
 ```
 
 ## Container View (C4 L2)
@@ -39,15 +40,15 @@ C4Container
     ContainerDb(positions, "positions mapping", "Storage", "positionId -> Position struct")
     ContainerDb(ticks_db, "ticks mapping", "Storage", "int24 -> TickInfo struct")
     ContainerDb(intents, "usedIntents mapping", "Storage", "bytes32 -> bool")
-    System_Ext(usdc, "USDC", "ERC-20")
+    ContainerDb(escrow_db, "pendingDeposits mapping", "Storage", "bytes32 -> PendingDeposit{lp, amount} (FEAT-3ZRI)")
     Rel(operator, vault, "mintPositionFor()", "tx")
-    Rel(lp, vault, "approve(vault, amount)", "ERC-20 approval")
+    Rel(lp, operator, "signs MintIntent", "EIP-712 off-chain")
     Rel(vault, auth, "onlyOperator check")
     Rel(vault, eip712, "verify LP signature")
+    Rel(vault, escrow_db, "reads then deletes", "storage")
     Rel(vault, positions, "writes", "storage")
     Rel(vault, ticks_db, "reads/writes", "storage")
     Rel(vault, intents, "writes", "storage")
-    Rel(vault, usdc, "transferFrom(lp, vault)", "ERC-20")
 ```
 
 ## Data Model
@@ -105,6 +106,9 @@ erDiagram
 - `ticks[t].liquidityGross == sum of |liquidity| of all positions referencing tick t`
 - `activeLiquidity == sum of position.liquidity for all positions where tickLower <= currentTick < tickUpper`
 - `usedIntents[intentId] == true` after a successful mint -- never reset to false
+- A mint only proceeds when `pendingDeposits[intentId].amount == usdcAmount` exactly AND `pendingDeposits[intentId].lp == lp`, and deletes the entry -- position principal is always backed by USDC the vault already collected *from that same LP*
+- The owner check is not redundant with signature verification: any party can produce a valid signature over any intentId (FEAT-3ZRI ADR-45IC), so the escrow's recorded depositor is the only thing that stops one LP's deposit funding another LP's position
+- `mintPositionFor` makes no external token call: every dollar of position principal entered the vault earlier, via FEAT-3ZRI
 - When `activeLiquidity == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` (FEAT-REPZ invariant)
 - Newly initialized tick: `feeGrowthOutsideX128 = (tick <= currentTick) ? feeGrowthGlobalX128 : 0`
 
@@ -114,8 +118,8 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | Per-market vault -- position minting, tick initialization, EIP-712 verification, fee growth computation | `mintPositionFor()`, `_mintPosition()`, `_initializeTick()`, `_computeFeeGrowthInside()`, `_verifyMintIntent()` |
-| `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp.t.sol` | Integration tests for all 11 scenarios | SC-T7AH through SC-T7AR |
+| `src/LPVault.sol` | Per-market vault -- position minting, tick initialization, EIP-712 verification, fee growth computation | `mintPositionFor()`, `_mintPosition()`, `_initializeTick()`, `_computeFeeGrowthInside()`, `_verifyMintIntent()`, reads/deletes `pendingDeposits` |
+| `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp.t.sol` | Integration tests for all 15 scenarios | SC-T7AH through SC-T7AR, SC-3Z9J, SC-3Z9K, SC-3XU5, SC-3XU6 |
 
 ## Event Topology
 
@@ -135,7 +139,7 @@ erDiagram
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| call | `LPVault.mintPositionFor(address,int24,int24,uint256,bytes32,bytes)` | `mintPositionFor` | onlyOperator + nonReentrant | `lp, tickLower, tickUpper, usdcAmount, intentId, signature` | `uint256 positionId` | NotOperator, InvalidRange, TickNotAligned, VaultNotActive, ZeroAmount, IntentAlreadyUsed, InvalidSignature, BelowMinimumFirstLiquidity |
+| call | `LPVault.mintPositionFor(address,int24,int24,uint256,bytes32,bytes)` | `mintPositionFor` | onlyOperator + whenNotPaused + nonReentrant + touchesHeartbeat | `lp, tickLower, tickUpper, usdcAmount, intentId, signature` | `uint256 positionId` | NotOperator, InvalidRange, TickNotAligned, VaultNotActive, ZeroAmount, IntentAlreadyUsed, InvalidSignature, BelowMinimumFirstLiquidity, DepositNotEscrowed, NotIntentOwner |
 
 ## Integration Points
 
@@ -143,7 +147,7 @@ erDiagram
 
 | System | Protocol | Direction | Purpose |
 |--------|----------|-----------|---------|
-| USDC (ERC-20) | ERC-20 `transferFrom` | inbound (vault pulls from LP wallet) | Collects USDC deposit for the position |
+| FEAT-3ZRI escrow (`pendingDeposits`) | internal storage read + delete | inbound | Supplies the position's principal; mint consumes the entry rather than moving tokens |
 
 ## Code Map
 
@@ -165,6 +169,9 @@ erDiagram
 | SC-T7AP | Duplicate intentId revert | `src/LPVault.sol:mintPositionFor()` |
 | SC-T7AQ | Invalid signature revert | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_verifyMintIntent()` |
 | SC-T7AR | Zero amount revert | `src/LPVault.sol:mintPositionFor()` |
+| SC-3Z9J | Revert when no deposit is escrowed | `src/LPVault.sol:mintPositionFor()` (pendingDeposits check) |
+| SC-3Z9K | Revert when escrowed amount does not match | `src/LPVault.sol:mintPositionFor()` (pendingDeposits check) |
+| SC-45IE | Revert when the escrow belongs to a different LP | `src/LPVault.sol:mintPositionFor()` (escrow owner check) |
 
 ## Architecture Decisions
 
@@ -175,7 +182,10 @@ In the context of representing LP price ranges on a prediction market with bound
 In the context of computing position liquidity from a USDC deposit, facing the choice between v3's sqrt-price-based formula and a linear USDC-per-tick model, we decided to use `liquidity = usdcAmount * PRECISION / (tickUpper - tickLower)` to achieve a direct, auditable relationship between USDC deposited and liquidity weight, accepting that this is simpler than v3's model because the CLOB handles trade execution -- the vault only needs liquidity for fee-accounting weight, not for swap output computation. See `research/lp-provisioning-engine.md` section "Mapping L (liquidity) to USDC capital" for the derivation.
 
 **ADR-T7CF:** EIP-712 signed intent for operator-gated minting
-In the context of LP onboarding under the operator-executes-all model (ADR-RFS9 from FEAT-REPZ), facing the need for the LP to authorize specific mint parameters without directly calling the vault, we decided to use EIP-712 typed structured data (MintIntent struct) signed by the LP and submitted by the Operator, with intentId-based replay protection, to achieve cryptographic authorization verifiable on-chain while keeping the execution path operator-gated, accepting that the LP must pre-approve the vault for USDC (ERC-20 approve) and trust the Operator to submit their intent in a timely manner -- a trust assumption bounded by the reclaimDeposit escape hatch planned in feature 7.
+In the context of LP onboarding under the operator-executes-all model (ADR-RFS9 from FEAT-REPZ), facing the need for the LP to authorize specific mint parameters without directly calling the vault, we decided to use EIP-712 typed structured data (MintIntent struct) signed by the LP and submitted by the Operator, with intentId-based replay protection, to achieve cryptographic authorization verifiable on-chain while keeping the execution path operator-gated, accepting that the LP must pre-approve the vault for USDC (ERC-20 approve) and trust the Operator to submit their intent in a timely manner -- a trust assumption bounded by the reclaimDeposit escape hatch in FEAT-JAIJ.
+
+**ADR-3ZVL:** Mint consumes escrow instead of pulling tokens
+In the context of how a mint is funded, facing the original design in which `mintPositionFor` called `transferFrom` on every invocation while `reclaimDeposit` paid out assuming the USDC had been pre-sent, we decided to remove the transfer from mint entirely and require an exact-match escrow entry (`pendingDeposits[intentId] == usdcAmount`, FEAT-3ZRI) that mint deletes as it creates the position, to achieve a single unambiguous funding path shared by mint and reclaim, accepting one extra Operator transaction per LP onboarding. The two symptoms this closes are opposite faces of the same contradiction: a cooperative LP who pre-sent USDC was charged a second time and their first deposit was orphaned with no way to recover it, while an attacker who never deposited and never approved could wait out the 24h timelock and have `reclaimDeposit` pay them out of other LPs' funds. Exact equality is required rather than `>=`, so a mint can neither exceed its collateral nor strand a remainder.
 
 ## Testing Decisions
 
