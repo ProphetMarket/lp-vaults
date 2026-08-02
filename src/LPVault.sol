@@ -1270,6 +1270,13 @@ contract LPVault {
     ///      distribution between positions. This matches the ProphetCTFExchange trust model.
     ///      Crosses every initialized tick between currentTick and newTick, flipping
     ///      feeGrowthOutsideX128 and applying liquidityNet to activeLiquidity.
+    ///      The bitmap search is bounded by newTick (NFR-5IDG), so this call's cost
+    ///      tracks the price move the Operator reported and cannot be inflated by an
+    ///      LP initializing a tick far away. That bound is only as tight as newTick
+    ///      itself, which is already a trusted input per the assumption above — a
+    ///      genuinely huge single-call jump across real empty space can still be
+    ///      expensive, so the Operator is expected to chunk large moves, the same way
+    ///      MAX_TICK_CROSSINGS already forces chunking on the crossings themselves.
     /// @param newTick The new price tick to set
     function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
         // Phase check: only Active vaults accept tick updates
@@ -1285,7 +1292,7 @@ contract LPVault {
         if (movingRight) {
             // Cross every initialized tick in (oldTick, newTick]
             while (tick < newTick) {
-                (int24 next, bool found) = _nextInitializedTick(tick, true);
+                (int24 next, bool found) = _nextInitializedTick(tick, true, newTick);
                 if (!found || next > newTick) break;
 
                 crossCount++;
@@ -1296,7 +1303,7 @@ contract LPVault {
         } else {
             // Cross every initialized tick in (newTick, oldTick]
             while (tick > newTick) {
-                (int24 next, bool found) = _nextInitializedTick(tick, false);
+                (int24 next, bool found) = _nextInitializedTick(tick, false, newTick);
                 if (!found || next <= newTick) break;
 
                 crossCount++;
@@ -1609,11 +1616,44 @@ contract LPVault {
         tickBitmap[wordPos] &= ~(1 << bitPos);
     }
 
-    /// @dev Finds the next initialized tick relative to the given tick.
+    /// @dev Finds the next initialized tick relative to the given tick, without
+    ///      scanning past the bitmap word that holds `targetTick`.
     ///      searchRight=true: smallest initialized tick strictly greater than `tick`.
     ///      searchRight=false: largest initialized tick less than or equal to `tick`.
-    ///      Returns (nextTick, true) if found, or (0, false) if no initialized tick exists.
-    function _nextInitializedTick(int24 tick, bool searchRight) internal view returns (int24 next, bool found) {
+    ///      Returns (nextTick, true) if found, or (0, false) when no initialized tick
+    ///      exists within the bounded range.
+    ///
+    ///      Bounding by the caller's target (FR-5IDE) is what keeps the scan
+    ///      proportional to the price move the Operator actually reported rather than
+    ///      to wherever an LP happened to initialize a tick. An LP picks its own range,
+    ///      so it can plant an initialized tick at any aligned position in int24; an
+    ///      unbounded scan would then let that distant tick make a later, legitimate
+    ///      updateTick exceed the block gas limit (NFR-5IDG). MAX_TICK_CROSSINGS does
+    ///      not cover this: it caps how many ticks are crossed, not the cost of
+    ///      scanning the empty words between them. See ADR-5IDK.
+    ///
+    ///      The bound INCLUDES the target's own word — an initialized tick sharing
+    ///      that word must still be found, and updateTick's own range check is what
+    ///      discards it if it turns out to sit beyond newTick. Stopping one word short
+    ///      would silently skip legitimate crossings.
+    ///
+    ///      Each loop tests for its last word BEFORE stepping, so neither `wordPos++`
+    ///      nor `wordPos--` can ever run past int16 and revert with an arithmetic
+    ///      panic (FR-5IDF). Both the target bound and the addressable-range bound are
+    ///      checked on both sides: the target bound alone would suffice while every
+    ///      caller derives it from a real tick, but the extreme-word test costs one
+    ///      comparison and removes the panic as a reachable state rather than merely
+    ///      an unlikely one.
+    /// @param tick The tick to search from
+    /// @param searchRight Direction: true searches upward, false downward
+    /// @param targetTick The tick the caller is moving to; the search stops at its word
+    function _nextInitializedTick(int24 tick, bool searchRight, int24 targetTick)
+        internal
+        view
+        returns (int24 next, bool found)
+    {
+        (int16 targetWordPos,) = _tickPosition(targetTick);
+
         if (searchRight) {
             // Start from tick + 1
             int24 startTick = tick + 1;
@@ -1626,16 +1666,16 @@ contract LPVault {
                 return (startTick + int24(uint24(offset)), true);
             }
 
-            // Search subsequent words
-            wordPos++;
-            for (; wordPos <= type(int16).max; wordPos++) {
+            // Search subsequent words, up to and including the target's own word.
+            for (;;) {
+                if (wordPos >= targetWordPos || wordPos == type(int16).max) return (0, false);
+                wordPos++;
                 word = tickBitmap[wordPos];
                 if (word != 0) {
                     uint8 offset = _leastSignificantBit(word);
                     return (int24(int256(wordPos)) * 256 + int24(uint24(offset)), true);
                 }
             }
-            return (0, false);
         } else {
             // Start from tick itself (search at or below)
             (int16 wordPos, uint8 bitPos) = _tickPosition(tick);
@@ -1652,17 +1692,16 @@ contract LPVault {
                 return (int24(int256(wordPos)) * 256 + int24(uint24(offset)), true);
             }
 
-            // Search previous words
-            wordPos--;
-            for (; wordPos >= type(int16).min; wordPos--) {
+            // Search previous words, down to and including the target's own word.
+            for (;;) {
+                if (wordPos <= targetWordPos || wordPos == type(int16).min) return (0, false);
+                wordPos--;
                 word = tickBitmap[wordPos];
                 if (word != 0) {
                     uint8 offset = _mostSignificantBit(word);
                     return (int24(int256(wordPos)) * 256 + int24(uint24(offset)), true);
                 }
-                if (wordPos == type(int16).min) break;
             }
-            return (0, false);
         }
     }
 

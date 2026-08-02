@@ -2,8 +2,8 @@
 id: FEAT-TVS0
 name: Update Tick and Cross Ticks
 use_cases: [UC-TVS1]
-scenarios: [SC-TVS2, SC-TVS3, SC-TVS4, SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8]
-last_update: 2026-06-18
+scenarios: [SC-TVS2, SC-TVS3, SC-TVS4, SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8, SC-5IDH, SC-5IDI, SC-5IDJ, SC-5IDL]
+last_update: 2026-08-02
 ---
 
 # Architecture: Update Tick and Cross Ticks
@@ -75,7 +75,7 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | Business logic | `updateTick(int24)`, `_crossTick(int24, bool)`, `_nextInitializedTick(int24, bool)`, `_setTickBitmapBit(int24)`, `_clearTickBitmapBit(int24)`, `tickBitmap`, `lastOperatorActivityTimestamp` |
+| `src/LPVault.sol` | Business logic | `updateTick(int24)`, `_crossTick(int24, bool)`, `_nextInitializedTick(int24 tick, bool searchRight, int24 targetTick)`, `_setTickBitmapBit(int24)`, `_clearTickBitmapBit(int24)`, `tickBitmap`, `lastOperatorActivityTimestamp` |
 | `src/LPVault.sol` | Existing (modified) | `_initializeTick(int24)` — gains `_setTickBitmapBit` call inside `liquidityGross == 0` branch |
 | `test/features/FEAT-TVS0-update-tick-and-cross-ticks/UC-TVS1-update-current-tick.t.sol` | Test | Integration tests for all 7 scenarios |
 
@@ -112,6 +112,10 @@ erDiagram
 | SC-TVS6 | Non-operator caller | `src/LPVault.sol:updateTick()` |
 | SC-TVS7 | Same tick | `src/LPVault.sol:updateTick()` |
 | SC-TVS8 | Vault not in Active phase | `src/LPVault.sol:updateTick()` |
+| SC-5IDH | Initialized tick far above the target is never searched | `src/LPVault.sol:updateTick()`, `src/LPVault.sol:_nextInitializedTick()` |
+| SC-5IDI | Initialized tick far below the target is never searched | `src/LPVault.sol:updateTick()`, `src/LPVault.sol:_nextInitializedTick()` |
+| SC-5IDJ | Initialized tick inside the target's own word is still crossed | `src/LPVault.sol:updateTick()`, `src/LPVault.sol:_nextInitializedTick()`, `src/LPVault.sol:_crossTick()` |
+| SC-5IDL | Target at the extreme bitmap word with no initialized ticks | `src/LPVault.sol:updateTick()`, `src/LPVault.sol:_nextInitializedTick()` |
 
 ## Architecture Decisions
 
@@ -120,3 +124,6 @@ In the context of iterating from currentTick to newTick, facing the risk that a 
 
 **ADR-TVUW:** 256 max initialized-tick crossings per call
 In the context of large price moves that could cross hundreds of initialized ticks, facing the risk of gas griefing or block-limit exhaustion, we decided to cap initialized-tick crossings at 256 per updateTick call and revert with TooManyTicksCrossed if exceeded, forcing the Keeper to chunk into multiple calls, accepting the operational complexity of multi-call chunking for extreme price movements.
+
+**ADR-5IDK:** Target-bounded next-initialized-tick search
+In the context of the bitmap search that updateTick runs between currentTick and newTick, facing the risk that ADR-TVUW's crossing cap bounds only the number of ticks actually crossed and not the cost of scanning the empty words between them — so an LP could sign a mint intent at an extreme tick and force a later legitimate updateTick to scan tens of thousands of empty words and exceed the block gas limit — we decided to pass the target tick into `_nextInitializedTick` as a third parameter and stop both the upward and downward scans at the bitmap word containing that target, inclusive, and to make each loop check its word and then explicitly test for the extreme-word boundary before stepping, symmetrically in both directions. We accept that the resulting bound is only as tight as the Operator's reported newTick — already a trusted input under NFR-TVSM — which shifts control of the scan cost from any third party to the one actor the vault already trusts, and leaves large-jump chunking as operational practice rather than on-chain enforcement.

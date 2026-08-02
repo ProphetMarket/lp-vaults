@@ -3,7 +3,8 @@ pragma solidity 0.8.20;
 
 // UC-TVS1: Update Current Tick
 // Integration tests for every scenario in this use case.
-// Covers: SC-TVS2, SC-TVS3, SC-TVS4, SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8
+// Covers: SC-TVS2, SC-TVS3, SC-TVS4, SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8,
+//         SC-5IDH, SC-5IDI, SC-5IDJ, SC-5IDL
 
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -745,8 +746,7 @@ contract CrossTickWraparoundTest is CrossTickWraparoundTestBase {
     // `while (tick < newTick)` condition is satisfied the instant tick 200
     // is reached -- exercising only _crossTick's flip on tick 200, without
     // the loop needing to search for any further initialized tick above it
-    // (this vault has none, which is an unrelated, separate pre-existing
-    // issue in _nextInitializedTick's empty-scan path, out of scope here).
+    // (this vault has none above 200).
     function test_crossingSucceedsDespiteOutsideExceedingGlobal() public {
         vm.prank(operatorAddr);
         vault.updateTick(int24(200));
@@ -775,5 +775,468 @@ contract CrossTickWraparoundTest is CrossTickWraparoundTestBase {
         // crossing L-to-R removes it from activeLiquidity. Position liquidity
         // = usdcAmount(1000) * LIQUIDITY_PRECISION(1e18) / rangeWidth(200) = 5e18.
         assertEq(vault.activeLiquidity(), before_ - 5e18, "activeLiquidity should drop by the position's liquidity");
+    }
+}
+
+// ── Regression: target-bounded tick search (audit NM-0986-Prophet) ──
+//   updateTick's bitmap scan stops at the Operator's target tick, and
+//   reaching an extreme bitmap word reports "not found" rather than
+//   reverting with an arithmetic panic.
+// ────────────────────────────────────────────────────────────────────
+
+// ──────────────────────────────────────────────
+// Base fixture for the bounded-search scenarios.
+//
+// Deliberately mints nothing: each scenario below initializes exactly the
+// ticks its own case needs, because what is being pinned is which words the
+// search does and does not read. A shared fixture that pre-initialized ticks
+// near the origin would mask the very behavior under test -- the buggy scan
+// terminates as soon as it finds ANY set bit, so a stray nearby tick makes an
+// unbounded scan look cheap.
+//
+// minimumFirstLiquidity is 1 so each scenario's first mint is unconstrained,
+// and tickSpacing is 10 so the int24 extremes are reachable: 8388600 is the
+// largest multiple of 10 within int24 (max 8388607).
+// ──────────────────────────────────────────────
+contract BoundedTickSearchTestBase is Test {
+    LPVaultFactory factory;
+    LPVault vault;
+    MockERC20 mockUsdc;
+    MockConditionalTokens mockCt;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+    address exchangeAddr = makeAddr("exchange");
+
+    uint256 constant LP_PK = 0xA11CE;
+    address lp;
+
+    bytes32 constant MINT_INTENT_TYPEHASH =
+        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
+    bytes32 constant DOMAIN_TYPEHASH =
+        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
+
+    event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
+
+    /// @dev `currentTick` is storage slot 8, offset 0 -- an int24 alone in its slot,
+    ///      preceded by activeLiquidity (slot 6) and feeGrowthGlobalX128 (slot 7) and
+    ///      followed by nextPositionId, a full uint256. Writing it directly is what
+    ///      lets a scenario start the vault at an extreme tick without first calling
+    ///      updateTick, which is the function under test. `_setCurrentTick` reads the
+    ///      value back so a future storage-layout change fails here, loudly, rather
+    ///      than silently turning every assertion below into a test of the wrong tick.
+    uint256 constant CURRENT_TICK_SLOT = 8;
+
+    /// @dev The extreme ticks reachable at tickSpacing 10. int24 spans
+    ///      [-8388608, 8388607], so these are the outermost aligned ticks.
+    ///      8388600 lands in bitmap word 32767 == type(int16).max, and -8388600
+    ///      in word -32768 == type(int16).min -- the two words whose boundary
+    ///      handling FR-5IDF is about.
+    int24 constant HIGHEST_ALIGNED_TICK = 8388600;
+    int24 constant LOWEST_ALIGNED_TICK = -8388600;
+
+    /// @dev Gas ceiling for a move that crosses nothing. A target-bounded scan
+    ///      reads two or three bitmap words; an unbounded one walks up to 32768
+    ///      cold words at 2100 gas each, roughly 69,000,000. The ceiling sits far
+    ///      above the former and far below the latter, so it discriminates without
+    ///      being brittle about the exact cost of a correct call.
+    uint256 constant BOUNDED_SCAN_GAS_CEILING = 500_000;
+
+    function setUp() public virtual {
+        lp = vm.addr(LP_PK);
+
+        LPVault impl = new LPVault();
+        mockUsdc = new MockERC20();
+        mockCt = new MockConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+        );
+
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(keccak256("bounded-search"), int24(10), uint128(1)));
+
+        mockUsdc.mint(lp, 1_000_000e18);
+        vm.prank(lp);
+        mockUsdc.approve(address(vault), type(uint256).max);
+    }
+
+    function _setCurrentTick(int24 tick) internal {
+        vm.store(address(vault), bytes32(CURRENT_TICK_SLOT), bytes32(uint256(uint24(tick))));
+        assertEq(vault.currentTick(), tick, "fixture: currentTick slot write did not take -- storage layout moved?");
+    }
+
+    function _domainSeparator() internal view returns (bytes32) {
+        return
+            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
+    }
+
+    function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId) internal {
+        bytes32 structHash = keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, tickLower, tickUpper, usdcAmount, intentId));
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(LP_PK, digest);
+        bytes memory sig = abi.encodePacked(r, s, v);
+
+        // Mint consumes an escrow rather than pulling tokens (FEAT-3ZRI).
+        vm.prank(operatorAddr);
+        vault.depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        vm.prank(operatorAddr);
+        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+    }
+
+    /// @dev Runs updateTick as the Operator and reports the gas it consumed.
+    function _updateTickMeasuringGas(int24 newTick) internal returns (uint256 gasUsed) {
+        vm.prank(operatorAddr);
+        uint256 gasBefore = gasleft();
+        vault.updateTick(newTick);
+        gasUsed = gasBefore - gasleft();
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-5IDH: Initialized tick far above the target is never searched
+// What: A position sits at the very top of the tick space, initializing ticks
+//       in bitmap word 32767. The Operator then reports an ordinary move from
+//       tick 100 to 300, with nothing initialized in between. The search must
+//       stop at word 1 -- the word holding the target -- instead of hunting
+//       upward for that distant tick.
+// Why:  An LP chooses its own tick range, so an unbounded upward scan hands any
+//       LP the ability to make a later, legitimate updateTick unaffordable
+//       (NFR-5IDG). MAX_TICK_CROSSINGS does not help: nothing is crossed here,
+//       and the cost is entirely in scanning empty words.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchUpwardTest is BoundedTickSearchTestBase {
+    function setUp() public override {
+        super.setUp();
+        // Initializes ticks 8388590 and 8388600, both in bitmap word 32767,
+        // and nothing anywhere near the origin.
+        _mintPosition(HIGHEST_ALIGNED_TICK - 10, HIGHEST_ALIGNED_TICK, 10, keccak256("far-above"));
+        _setCurrentTick(int24(100));
+    }
+
+    // SC-5IDH: the move completes and currentTick advances
+    function test_currentTickAdvancesPastTheDistantTick() public {
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(300));
+
+        assertEq(vault.currentTick(), int24(300), "currentTick should advance to 300");
+    }
+
+    // SC-5IDH: nothing is crossed -- the distant tick is above the target
+    function test_emitsZeroCrossings() public {
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(int24(100), int24(300), 0);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(300));
+    }
+
+    // SC-5IDH: the scan cost tracks the reported price move, not the distance
+    // to the planted tick. This is the assertion that fails against an
+    // unbounded search: it walks ~32766 empty words before finding the tick at
+    // 8388590, then discards it for being above the target.
+    function test_scanCostIsBoundedByTheTargetNotThePlantedTick() public {
+        uint256 gasUsed = _updateTickMeasuringGas(int24(300));
+
+        assertLt(gasUsed, BOUNDED_SCAN_GAS_CEILING, "updateTick scanned far past its target tick");
+    }
+
+    // SC-5IDH: the distant tick is left completely alone -- not crossed, its
+    // accumulator not flipped, its liquidity not applied.
+    function test_distantTickStateUntouched() public {
+        (uint128 grossBefore, int128 netBefore, uint256 outsideBefore) = vault.ticks(HIGHEST_ALIGNED_TICK - 10);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(300));
+
+        (uint128 grossAfter, int128 netAfter, uint256 outsideAfter) = vault.ticks(HIGHEST_ALIGNED_TICK - 10);
+        assertEq(grossAfter, grossBefore, "distant tick liquidityGross should be untouched");
+        assertEq(netAfter, netBefore, "distant tick liquidityNet should be untouched");
+        assertEq(outsideAfter, outsideBefore, "distant tick feeGrowthOutside should not have been flipped");
+    }
+
+    // SC-5IDH: activeLiquidity is unaffected -- the distant position never
+    // enters range, so no liquidityNet is applied.
+    function test_activeLiquidityUnchanged() public {
+        uint128 before_ = vault.activeLiquidity();
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(300));
+
+        assertEq(vault.activeLiquidity(), before_, "activeLiquidity should be unchanged");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-5IDI: Initialized tick far below the target is never searched
+// What: The mirror of SC-5IDH. A position sits at the very bottom of the tick
+//       space (bitmap word -32768) while the Operator reports an ordinary
+//       downward move from 300 to 100.
+// Why:  The downward loop already guards its decrement, so it never panicked --
+//       but it was just as unbounded, and an LP planting a tick at the floor
+//       could make every subsequent downward move unaffordable.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchDownwardTest is BoundedTickSearchTestBase {
+    function setUp() public override {
+        super.setUp();
+        // Initializes ticks -8388600 and -8388590, both in bitmap word -32768.
+        _mintPosition(LOWEST_ALIGNED_TICK, LOWEST_ALIGNED_TICK + 10, 10, keccak256("far-below"));
+        _setCurrentTick(int24(300));
+    }
+
+    // SC-5IDI: the move completes and currentTick descends
+    function test_currentTickDescendsPastTheDistantTick() public {
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(100));
+
+        assertEq(vault.currentTick(), int24(100), "currentTick should descend to 100");
+    }
+
+    // SC-5IDI: nothing is crossed -- the distant tick is below the target
+    function test_emitsZeroCrossings() public {
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(int24(300), int24(100), 0);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(100));
+    }
+
+    // SC-5IDI: the downward scan is bounded by the target too
+    function test_scanCostIsBoundedByTheTargetNotThePlantedTick() public {
+        uint256 gasUsed = _updateTickMeasuringGas(int24(100));
+
+        assertLt(gasUsed, BOUNDED_SCAN_GAS_CEILING, "updateTick scanned far below its target tick");
+    }
+
+    // SC-5IDI: the distant tick is left completely alone
+    function test_distantTickStateUntouched() public {
+        (uint128 grossBefore, int128 netBefore, uint256 outsideBefore) = vault.ticks(LOWEST_ALIGNED_TICK);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(100));
+
+        (uint128 grossAfter, int128 netAfter, uint256 outsideAfter) = vault.ticks(LOWEST_ALIGNED_TICK);
+        assertEq(grossAfter, grossBefore, "distant tick liquidityGross should be untouched");
+        assertEq(netAfter, netBefore, "distant tick liquidityNet should be untouched");
+        assertEq(outsideAfter, outsideBefore, "distant tick feeGrowthOutside should not have been flipped");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-5IDJ: Initialized tick inside the target's own word is still crossed
+// What: Tick 260 and the target tick 300 share bitmap word 1. Moving from 100
+//       to 300 must still find and cross 260.
+// Why:  This is the guard on the other side of SC-5IDH. A bound that stopped
+//       one word short of the target -- an easy off-by-one -- would silently
+//       skip legitimate crossings, corrupting activeLiquidity and every
+//       position's fee accounting without reverting anything. The bound must
+//       include the target's own word.
+// ──────────────────────────────────────────────
+contract TargetWordInclusiveTest is BoundedTickSearchTestBase {
+    function setUp() public override {
+        super.setUp();
+        // Ticks 260 and 400 both live in bitmap word 1 (ticks 256..511), the
+        // same word as the target 300. Liquidity is
+        // usdcAmount(140) * LIQUIDITY_PRECISION(1e18) / rangeWidth(140) = 1e18.
+        // The upper tick sits above the target on purpose: the search will
+        // surface it, and updateTick must discard it for being out of range
+        // rather than cross it.
+        _mintPosition(int24(260), int24(400), 140, keccak256("target-word"));
+        _setCurrentTick(int24(100));
+    }
+
+    // SC-5IDJ: the tick sharing the target's word is crossed
+    function test_crossesTheTickInsideTheTargetWord() public {
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(int24(100), int24(300), 1);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(300));
+    }
+
+    // SC-5IDJ: crossing tick 260 L-to-R brings the position into range
+    function test_activeLiquidityPicksUpTheCrossedPosition() public {
+        assertEq(vault.activeLiquidity(), 0, "precondition: no liquidity in range at tick 100");
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(300));
+
+        assertEq(vault.activeLiquidity(), 1e18, "activeLiquidity should pick up the position entered at tick 260");
+    }
+
+    // SC-5IDJ: the upper tick, above the target, is not crossed
+    function test_doesNotCrossTheTickAboveTheTarget() public {
+        (,, uint256 outsideBefore) = vault.ticks(int24(400));
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(300));
+
+        (,, uint256 outsideAfter) = vault.ticks(int24(400));
+        assertEq(outsideAfter, outsideBefore, "tick 400 is above the target and must not be crossed");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-5IDL: Target at the extreme bitmap word with no initialized ticks
+// What: currentTick sits near the top of int24 with nothing initialized above
+//       it. The upward search runs out of bitmap words and must report "not
+//       found" so updateTick completes.
+// Why:  This is the arithmetic-panic case. The upward loop's `wordPos++` was
+//       unguarded, so reaching word 32767 == type(int16).max overflowed and
+//       reverted with Panic(0x11) instead of ever returning "not found" --
+//       leaving the vault's tick permanently unable to move into that region.
+//       The downward direction has always guarded its decrement; it is pinned
+//       here so the two directions are held to one symmetric contract.
+// ──────────────────────────────────────────────
+contract ExtremeWordSearchTest is BoundedTickSearchTestBase {
+    function setUp() public override {
+        super.setUp();
+        // A position near the origin, so both extreme words are empty and the
+        // vault still holds a position.
+        _mintPosition(int24(0), int24(10), 10, keccak256("origin"));
+    }
+
+    // SC-5IDL: an upward move whose target is in the highest bitmap word
+    // completes rather than panicking
+    function test_upwardMoveIntoHighestWordSucceeds() public {
+        _setCurrentTick(int24(8388000));
+
+        vm.prank(operatorAddr);
+        vault.updateTick(HIGHEST_ALIGNED_TICK);
+
+        assertEq(vault.currentTick(), HIGHEST_ALIGNED_TICK, "currentTick should reach the highest aligned tick");
+    }
+
+    // SC-5IDL: and it crosses nothing, because nothing is initialized up there
+    function test_upwardMoveIntoHighestWordCrossesNothing() public {
+        _setCurrentTick(int24(8388000));
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(int24(8388000), HIGHEST_ALIGNED_TICK, 0);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(HIGHEST_ALIGNED_TICK);
+    }
+
+    // SC-5IDL: a target landing exactly on the last addressable tick of the
+    // highest word is the tightest case for the boundary test -- one tick
+    // further would leave int24 entirely.
+    function test_upwardMoveToLastTickOfHighestWordSucceeds() public {
+        _setCurrentTick(type(int24).max - 1);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(type(int24).max);
+
+        assertEq(vault.currentTick(), type(int24).max, "currentTick should reach int24 max");
+    }
+
+    // SC-5IDL: the symmetric downward case at the bottom of int24
+    function test_downwardMoveIntoLowestWordSucceeds() public {
+        _setCurrentTick(int24(-8388000));
+
+        vm.prank(operatorAddr);
+        vault.updateTick(LOWEST_ALIGNED_TICK);
+
+        assertEq(vault.currentTick(), LOWEST_ALIGNED_TICK, "currentTick should reach the lowest aligned tick");
+    }
+
+    // SC-5IDL: and the tightest downward case, landing on int24 min itself
+    function test_downwardMoveToInt24MinSucceeds() public {
+        _setCurrentTick(type(int24).min + 1);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(type(int24).min);
+
+        assertEq(vault.currentTick(), type(int24).min, "currentTick should reach int24 min");
+    }
+}
+
+// ──────────────────────────────────────────────
+// FR-5IDE, FR-5IDF: fuzzed bounded search across the whole tick space
+// What: For an arbitrary starting tick anywhere in int24 and an arbitrary
+//       move of bounded size in either direction, updateTick completes and
+//       lands on the target, at a cost that tracks the move.
+// Why:  The scenario tests above pin specific words. These pin the property
+//       itself over the full int24 range, including both extremes, so a future
+//       change to how the target's word is derived cannot reintroduce either
+//       the panic or the unbounded scan at some coordinate nobody enumerated.
+//       Per this repo's tick-math rule, arithmetic-heavy code is fuzzed.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchFuzzTest is BoundedTickSearchTestBase {
+    /// @dev Widest move these fuzz cases make. NFR-5IDG is explicit that a
+    ///      genuinely enormous jump across real empty space may still be
+    ///      costly -- the guarantee is that cost follows the Operator's move,
+    ///      not a third party's tick placement. 2000 ticks spans up to nine
+    ///      bitmap words, enough to exercise multi-word scans and both
+    ///      boundaries without asserting something the spec does not promise.
+    int24 constant MAX_FUZZ_MOVE = 2000;
+
+    function setUp() public override {
+        super.setUp();
+        // One position near the origin, far from every tick these cases visit,
+        // so the search finds nothing and must rely on the bound to stop.
+        _mintPosition(int24(0), int24(10), 10, keccak256("origin"));
+    }
+
+    // FR-5IDE, FR-5IDF: an upward move never reverts and always lands on target
+    function testFuzz_upwardMoveAlwaysCompletes(int256 startSeed, uint256 moveSeed) public {
+        int24 start = int24(bound(startSeed, type(int24).min, type(int24).max - int256(MAX_FUZZ_MOVE)));
+        int24 move = int24(int256(bound(moveSeed, 1, uint256(int256(MAX_FUZZ_MOVE)))));
+        int24 target = start + move;
+        // Skip the region around the origin position, whose initialized ticks
+        // would be legitimately crossed -- crossing is SC-TVS2's subject, not
+        // this one. These cases are about the search terminating.
+        vm.assume(start > int24(10) || target < int24(0));
+
+        _setCurrentTick(start);
+
+        uint256 gasUsed = _updateTickMeasuringGas(target);
+
+        assertEq(vault.currentTick(), target, "currentTick should land exactly on the target");
+        assertLt(gasUsed, BOUNDED_SCAN_GAS_CEILING, "upward scan cost should track the move, not the tick space");
+    }
+
+    // FR-5IDE, FR-5IDF: a downward move never reverts and always lands on target
+    function testFuzz_downwardMoveAlwaysCompletes(int256 startSeed, uint256 moveSeed) public {
+        int24 start = int24(bound(startSeed, type(int24).min + int256(MAX_FUZZ_MOVE), type(int24).max));
+        int24 move = int24(int256(bound(moveSeed, 1, uint256(int256(MAX_FUZZ_MOVE)))));
+        int24 target = start - move;
+        vm.assume(target > int24(10) || start < int24(0));
+
+        _setCurrentTick(start);
+
+        uint256 gasUsed = _updateTickMeasuringGas(target);
+
+        assertEq(vault.currentTick(), target, "currentTick should land exactly on the target");
+        assertLt(gasUsed, BOUNDED_SCAN_GAS_CEILING, "downward scan cost should track the move, not the tick space");
+    }
+
+    // FR-5IDF: moves that end inside the highest bitmap word -- the word whose
+    // boundary the unguarded increment used to run past -- always complete.
+    function testFuzz_movesInsideHighestWordAlwaysComplete(uint256 startSeed, uint256 moveSeed) public {
+        int24 maxTick = type(int24).max;
+        int24 start = int24(int256(bound(startSeed, uint256(int256(maxTick)) - 500, uint256(int256(maxTick)) - 1)));
+        int24 move = int24(int256(bound(moveSeed, 1, uint256(int256(maxTick - start)))));
+
+        _setCurrentTick(start);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(start + move);
+
+        assertEq(vault.currentTick(), start + move, "currentTick should land on the target inside the highest word");
+    }
+
+    // FR-5IDF: the symmetric case at the bottom of int24.
+    function testFuzz_movesInsideLowestWordAlwaysComplete(uint256 startSeed, uint256 moveSeed) public {
+        int24 minTick = type(int24).min;
+        int24 start = int24(-int256(bound(startSeed, uint256(-int256(minTick)) - 500, uint256(-int256(minTick)) - 1)));
+        int24 move = int24(int256(bound(moveSeed, 1, uint256(int256(start - minTick)))));
+
+        _setCurrentTick(start);
+
+        vm.prank(operatorAddr);
+        vault.updateTick(start - move);
+
+        assertEq(vault.currentTick(), start - move, "currentTick should land on the target inside the lowest word");
     }
 }

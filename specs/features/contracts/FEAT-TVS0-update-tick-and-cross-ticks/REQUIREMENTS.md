@@ -4,7 +4,7 @@ name: Update Tick and Cross Ticks
 module: contracts
 domain: "@ticks"
 status: implemented
-version: 1
+version: 2
 refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR]
 ---
 
@@ -71,11 +71,21 @@ Linked to: UC-TVS1
 Fit Criterion: Given initialized ticks at 100 and 500 (no initialized ticks in between), updateTick from 50 to 600 crosses exactly two ticks without iterating 400 intermediate positions.
 Linked to: UC-TVS1
 
+**FR-5IDE** `When updateTick searches for the next initialized tick, the system shall bound that search to the bitmap word containing newTick, inclusive, so that ticks initialized beyond newTick are never scanned.`
+Fit Criterion: Given currentTick=100, a single initialized tick at 8388600, and no initialized ticks between 100 and 300, updateTick(300) succeeds with ticksCrossed=0 and reads only the bitmap words spanning 100 to 300. Given instead an initialized tick at 260 — inside the same word as the target 300 — updateTick(300) crosses it, confirming the bound includes the target's own word.
+Linked to: UC-TVS1
+
+**FR-5IDF** `If no initialized tick exists within the bounded search range in either direction, then the system shall report "not found" and complete the call without reverting, including when the bounded range reaches the highest or lowest addressable bitmap word.`
+Fit Criterion: Given currentTick=8388000 with no initialized ticks at or above it, updateTick(8388600) succeeds with ticksCrossed=0 rather than reverting with an arithmetic panic. The symmetric case at the int24 minimum behaves identically.
+Linked to: UC-TVS1
+
 ## Non-Functional Requirements
 
 **NFR-TVSK** Performance: `updateTick with zero initialized ticks crossed shall consume less than 50,000 gas on Polygon.`
 
 **NFR-TVSL** Security: `updateTick shall apply an inline nonReentrant guard following checks-effects-interactions ordering.`
+
+**NFR-5IDG** Security: `The gas cost of updateTick shall be bounded by the distance between currentTick and newTick, and shall be independent of where any other party has initialized ticks outside that range.` An LP can initialize a tick at an arbitrary position by signing a mint intent, so an unbounded next-initialized-tick search would let a planted extreme tick push a later, legitimate updateTick call past the block gas limit. The bound is only as strong as the Operator's reported newTick, which is already a trusted input under NFR-TVSM — this requirement removes third-party control over the search cost, it does not weaken or extend the Operator trust assumption. A genuinely large single-call price jump across a real gap of uninitialized ticks can still be expensive; the Operator is expected to chunk very large jumps across multiple calls as operational practice, the same way ADR-TVUW already requires for crossings. No on-chain enforcement of that chunking is specified.
 
 **NFR-TVSM** Security: OPERATOR TRUST ASSUMPTION — The Operator can report any tick value. LPs trust the Operator to report the CLOB mid-price accurately. A malicious or compromised Operator could report a false tick, causing incorrect fee distribution between positions. This matches the ProphetCTFExchange trust model.
 
@@ -85,3 +95,5 @@ Linked to: UC-TVS1
 - After any updateTick, activeLiquidity equals the sum of liquidity from all positions whose range contains the new currentTick
 - Multiple sequential chunked updateTick calls produce the same final state as a single hypothetical call crossing the same ticks (chunking equivalence)
 - TickBitmap correctly tracks initialization state including word-boundary edge cases
+- For any tick initialized strictly outside the range spanned by currentTick and newTick, updateTick produces the same state transition and the same gas cost as it would if that tick did not exist
+- The next-initialized-tick search terminates and reports a result for every reachable combination of start tick and target tick, including targets in the highest and lowest addressable bitmap words
