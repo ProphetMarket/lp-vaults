@@ -2,7 +2,11 @@
 src = "src"
 out = "out"
 libs = ["lib"]
-no_match_coverage = "script/"
+# Coverage measures production code only. Deploy scripts, integration tests,
+# invariant handlers, and mocks are the instruments doing the measuring — their
+# own line coverage says nothing about whether src/ is exercised, and an
+# unreached test line is already reported by the suite itself.
+no_match_coverage = "(script|test)/"
 
 # forge's own defaults (runs=256, depth=500 -> 128k calls/run) are sized for
 # large multi-contract protocols. This vault's invariant handler is a single
