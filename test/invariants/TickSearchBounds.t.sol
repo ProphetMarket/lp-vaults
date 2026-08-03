@@ -22,6 +22,7 @@ import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {Vm} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../src/LPVaultFactory.sol";
 import {LPVault} from "../../src/LPVault.sol";
+import {CTFPositionIds} from "../mocks/CTFPositionIds.sol";
 
 // ──────────────────────────────────────────────
 // Minimal ERC-20 mock — balanceOf, approve, transferFrom.
@@ -47,7 +48,7 @@ contract MockERC20 {
     }
 }
 
-contract MockConditionalTokens {
+contract MockConditionalTokens is CTFPositionIds {
     mapping(address => mapping(address => bool)) public isApprovedForAll;
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -327,6 +328,11 @@ contract TickSearchBoundsInvariantTest is StdInvariant, Test {
 
     uint256 constant LP_PK = 0xA11CE;
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public {
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
@@ -334,12 +340,17 @@ contract TickSearchBoundsInvariantTest is StdInvariant, Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         // minimumFirstLiquidity of 1 keeps the first-mint floor out of the way —
         // that floor is FEAT-REPZ's subject, and a rejected first mint would just
         // starve this suite of positions.
         vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(keccak256("tick-search-bounds"), int24(10), uint128(1)));
+        vault = LPVault(
+            factory.createVault(
+                keccak256("tick-search-bounds"), int24(10), uint128(1), conditionId, yesTokenId, noTokenId
+            )
+        );
 
         address lp = vm.addr(LP_PK);
         mockUsdc.mint(lp, type(uint128).max);

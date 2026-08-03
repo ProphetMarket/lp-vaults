@@ -9,6 +9,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
+import {CTFPositionIds} from "../../mocks/CTFPositionIds.sol";
 
 // ──────────────────────────────────────────────
 // Minimal ERC-20 mock — balanceOf, approve, transferFrom.
@@ -34,7 +35,7 @@ contract MockERC20 {
     }
 }
 
-contract MockConditionalTokens {
+contract MockConditionalTokens is CTFPositionIds {
     mapping(address => mapping(address => bool)) public isApprovedForAll;
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -79,6 +80,11 @@ contract UpdateTickTestBase is Test {
     // Declare events for vm.expectEmit matching
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public virtual {
         lp = vm.addr(LP_PK);
 
@@ -88,9 +94,11 @@ contract UpdateTickTestBase is Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault =
+            LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq, conditionId, yesTokenId, noTokenId));
 
         // Fund LP and approve vault
         mockUsdc.mint(lp, 1_000_000e18);
@@ -373,6 +381,11 @@ contract UpdateTickTooManyTicksTest is Test {
 
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public {
         lp = vm.addr(LP_PK);
 
@@ -382,10 +395,13 @@ contract UpdateTickTooManyTicksTest is Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         // Create vault with tickSpacing=1 for dense tick initialization
         vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(keccak256("many-ticks"), int24(1), uint128(1)));
+        vault = LPVault(
+            factory.createVault(keccak256("many-ticks"), int24(1), uint128(1), conditionId, yesTokenId, noTokenId)
+        );
 
         // Fund LP generously
         mockUsdc.mint(lp, 1_000_000e18);
@@ -652,6 +668,11 @@ contract CrossTickWraparoundTestBase is Test {
 
     uint256 posId;
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public virtual {
         lp = vm.addr(LP_PK);
 
@@ -661,9 +682,11 @@ contract CrossTickWraparoundTestBase is Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault =
+            LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq, conditionId, yesTokenId, noTokenId));
 
         mockUsdc.mint(lp, 1_000_000e18);
         vm.prank(lp);
@@ -843,6 +866,11 @@ contract BoundedTickSearchTestBase is Test {
     ///      being brittle about the exact cost of a correct call.
     uint256 constant BOUNDED_SCAN_GAS_CEILING = 500_000;
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public virtual {
         lp = vm.addr(LP_PK);
 
@@ -852,9 +880,12 @@ contract BoundedTickSearchTestBase is Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(keccak256("bounded-search"), int24(10), uint128(1)));
+        vault = LPVault(
+            factory.createVault(keccak256("bounded-search"), int24(10), uint128(1), conditionId, yesTokenId, noTokenId)
+        );
 
         mockUsdc.mint(lp, 1_000_000e18);
         vm.prank(lp);

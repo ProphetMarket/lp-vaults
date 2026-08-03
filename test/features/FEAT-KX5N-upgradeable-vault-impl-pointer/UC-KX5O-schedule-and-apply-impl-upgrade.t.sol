@@ -8,6 +8,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
+import {CTFPositionIds} from "../../mocks/CTFPositionIds.sol";
 
 // Minimal mocks — only the methods LPVault.initialize() calls are included.
 // This test never mints, transfers, or reads balances, so the full ERC-20
@@ -19,7 +20,7 @@ contract MockERC20 {
     }
 }
 
-contract MockConditionalTokens {
+contract MockConditionalTokens is CTFPositionIds {
     function setApprovalForAll(address, bool) external {}
 }
 
@@ -46,6 +47,11 @@ contract ImplUpgradeTestBase is Test {
     event ImplementationApplied(address indexed newImpl, uint256 version);
     event ImplementationCancelled(address indexed cancelledImpl);
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public virtual {
         implV1 = new LPVault();
         mockUsdc = new MockERC20();
@@ -53,6 +59,7 @@ contract ImplUpgradeTestBase is Test {
         factory = new LPVaultFactory(
             address(implV1), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
     }
 
     function _deployNewImpl() internal returns (address) {
@@ -202,7 +209,8 @@ contract ImplUpgradeNewVaultTest is ImplUpgradeTestBase {
     function test_newVaultHasUpdatedVersion() public {
         // Create a vault at version 1 (pre-upgrade)
         vm.prank(oracleAddr);
-        address vaultV1 = factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e18));
+        address vaultV1 =
+            factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e18), conditionId, yesTokenId, noTokenId);
 
         // Upgrade implementation to version 2
         address newImpl = _deployNewImpl();
@@ -212,7 +220,8 @@ contract ImplUpgradeNewVaultTest is ImplUpgradeTestBase {
 
         // Create a vault at version 2 (post-upgrade)
         vm.prank(oracleAddr);
-        address vaultV2 = factory.createVault(bytes32(uint256(2)), int24(10), uint128(1e18));
+        address vaultV2 =
+            factory.createVault(bytes32(uint256(2)), int24(10), uint128(1e18), conditionId, yesTokenId, noTokenId);
 
         assertEq(LPVault(vaultV2).implementationVersion(), 2, "new vault should have version 2");
         assertEq(LPVault(vaultV1).implementationVersion(), 1, "old vault should stay at version 1");
@@ -222,7 +231,8 @@ contract ImplUpgradeNewVaultTest is ImplUpgradeTestBase {
     function test_oldVaultVersionUnchanged() public {
         // Create vault before upgrade
         vm.prank(oracleAddr);
-        address vaultV1 = factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e18));
+        address vaultV1 =
+            factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e18), conditionId, yesTokenId, noTokenId);
         uint256 oldVersion = LPVault(vaultV1).implementationVersion();
 
         // Perform upgrade

@@ -8,6 +8,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
+import {CTFPositionIds} from "../../mocks/CTFPositionIds.sol";
 
 // ──────────────────────────────────────────────
 // Minimal ERC-20 mock with transfer + transferFrom + balanceOf + approve.
@@ -39,7 +40,7 @@ contract MockERC20 {
     }
 }
 
-contract MockConditionalTokens {
+contract MockConditionalTokens is CTFPositionIds {
     mapping(address => mapping(address => bool)) public isApprovedForAll;
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -85,6 +86,11 @@ contract StartWindDownTestBase is Test {
     // Position minted in setUp for exit-path tests
     uint256 positionId;
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public virtual {
         lp = vm.addr(LP_PK);
 
@@ -94,9 +100,11 @@ contract StartWindDownTestBase is Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault =
+            LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq, conditionId, yesTokenId, noTokenId));
 
         // Mint a position: range [0, 100) with 1000 USDC so there's
         // something to collect and an existing position for exit-path tests.

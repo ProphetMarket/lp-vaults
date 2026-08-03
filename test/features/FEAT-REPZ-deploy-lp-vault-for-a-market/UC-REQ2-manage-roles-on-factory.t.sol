@@ -8,6 +8,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
+import {CTFPositionIds} from "../../mocks/CTFPositionIds.sol";
 
 // ── Mocks ─────────────────────────────────────
 contract MockERC20 {
@@ -19,7 +20,7 @@ contract MockERC20 {
     }
 }
 
-contract MockConditionalTokens {
+contract MockConditionalTokens is CTFPositionIds {
     mapping(address => mapping(address => bool)) public isApprovedForAll;
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -382,6 +383,11 @@ contract OperatorRotationPropagationTest is Test {
     event NewOperator(address indexed newOperatorAddress, address indexed admin);
     event RemovedOperator(address indexed removedOperator, address indexed admin);
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
@@ -389,9 +395,12 @@ contract OperatorRotationPropagationTest is Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorA
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+        vault = LPVault(
+            factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000), conditionId, yesTokenId, noTokenId)
+        );
     }
 
     // SC-FKD4: old operator A is rejected after removal from factory
@@ -478,6 +487,11 @@ contract OracleRotationPropagationTest is Test {
 
     event MinimumFirstLiquidityUpdated(uint128 oldMin, uint128 newMin);
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
@@ -485,9 +499,12 @@ contract OracleRotationPropagationTest is Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleX, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         vm.prank(oracleX);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+        vault = LPVault(
+            factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000), conditionId, yesTokenId, noTokenId)
+        );
     }
 
     // SC-FKD5: old oracle X is rejected after rotation

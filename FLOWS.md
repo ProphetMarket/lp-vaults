@@ -47,18 +47,21 @@ sequenceDiagram
     actor LP
     participant Factory as LPVaultFactory
     participant Vault as LPVault (clone)
+    participant CTF as ConditionalTokens
 
     Note over Admin,Factory: ── STEP 1: Deploy the factory ──────────────────────────────
     Admin->>Factory: deploy(impl, usdc, exchange, ctf,<br/>admin, oracle, operator)
     Factory-->>Admin: factory address
 
     Note over Oracle,Vault: ── STEP 2: Create a vault for a market ─────────────────────
-    Oracle->>Factory: createVault(marketId, tickSpacing, minFirstLiq)
+    Oracle->>Factory: createVault(marketId, tickSpacing, minFirstLiq,<br/>conditionId, yesTokenId, noTokenId)
     Factory->>Vault: EIP-1167 clone deploy
-    Factory->>Vault: initialize(marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minFirstLiq, version)
+    Factory->>Vault: initialize(marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minFirstLiq, version,<br/>conditionId, yesTokenId, noTokenId)
+    Vault->>CTF: getCollectionId / getPositionId (index sets 1 and 2)
+    Note right of Vault: Reject unless the supplied id pair<br/>is exactly the derived pair
     Vault-->>Factory: initialized
     Factory-->>Oracle: vault address
-    Note right of Vault: Phase = Active<br/>activeLiquidity = 0
+    Note right of Vault: Phase = Active<br/>activeLiquidity = 0<br/>outcome-token identity frozen
 
     Note over Operator,Vault: ── STEP 3: LP mints a position ─────────────────────────────
     LP->>LP: sign MintIntent(lp, tickLower, tickUpper,<br/>usdcAmount, intentId) via EIP-712

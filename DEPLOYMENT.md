@@ -319,11 +319,31 @@ After the factory is deployed, the **Oracle** must call `createVault` to deploy 
 
 ```bash
 cast send <FACTORY_ADDRESS> \
-  "createVault(bytes32,int24,uint128)" \
+  "createVault(bytes32,int24,uint128,bytes32,uint256,uint256)" \
   <MARKET_ID> <TICK_SPACING> <MIN_FIRST_LIQUIDITY> \
+  <CONDITION_ID> <YES_TOKEN_ID> <NO_TOKEN_ID> \
   --rpc-url https://polygon-rpc.com \
   --account <oracle-account-name>
 ```
+
+`<CONDITION_ID>` is the prepared condition for the market; `<YES_TOKEN_ID>` and
+`<NO_TOKEN_ID>` are its two ERC-1155 position ids. Read them off the
+ConditionalTokens contract rather than typing them by hand:
+
+```bash
+cast call <CONDITIONAL_TOKENS> "getCollectionId(bytes32,bytes32,uint256)" \
+  0x0000000000000000000000000000000000000000000000000000000000000000 \
+  <CONDITION_ID> 1 --rpc-url https://polygon-rpc.com
+# then feed the returned collection id into:
+cast call <CONDITIONAL_TOKENS> "getPositionId(address,bytes32)" \
+  <USDC_ADDRESS> <COLLECTION_ID> --rpc-url https://polygon-rpc.com
+# repeat with index set 2 for the other outcome
+```
+
+The vault re-derives this pair on-chain and reverts `TokenIdMismatch()` if what
+you passed is not exactly it. Whichever id you pass first becomes the vault's
+`yesTokenId`. **A vault's outcome-token identity can never be changed after
+creation** — clones are not upgradable and there is no setter.
 
 The **Admin** should immediately:
 1. Confirm the initial operator and oracle are set correctly by calling `operators(<address>)` and `oracle()` on the factory.
@@ -343,3 +363,6 @@ The **Admin** should immediately:
 | `insufficient funds` | Deployer has no MATIC | Fund from faucet (Amoy) or bridge (mainnet) |
 | Compilation error `0.8.20` | Wrong compiler installed | Run `forge build --use solc:0.8.20` |
 | `DuplicateMarket()` on createVault | Vault for this marketId already exists | Check `vaultForMarket[marketId]` on the factory |
+| `TokenIdMismatch()` on createVault | The token id pair does not derive from `conditionId` | Re-read both ids off the ConditionalTokens contract (see step 9); check you used the right condition and USDC as collateral |
+| `ZeroConditionId()` / `ZeroTokenId()` on createVault | A zero was passed for the condition or either token id | Supply the real values; none of the three may be zero |
+| `DuplicateTokenId()` on createVault | The same id was passed for both outcomes | Pass the two distinct position ids (index sets 1 and 2) |

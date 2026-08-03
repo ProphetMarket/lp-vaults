@@ -8,6 +8,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
+import {CTFPositionIds} from "../../mocks/CTFPositionIds.sol";
 
 // ──────────────────────────────────────────────
 // Minimal mocks — stub the ERC-20 and ERC-1155 entry points that
@@ -23,7 +24,7 @@ contract MockERC20 {
     }
 }
 
-contract MockConditionalTokens {
+contract MockConditionalTokens is CTFPositionIds {
     function setApprovalForAll(address, bool) external {}
 }
 
@@ -176,6 +177,8 @@ contract CloneInitializeSuccessTest is Test {
         address ctAddr = address(new MockConditionalTokens());
         int24 spacing = int24(10);
         uint128 minLiq = uint128(1000);
+        bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+        (uint256 yesTokenId, uint256 noTokenId) = MockConditionalTokens(ctAddr).idsFor(usdcAddr, conditionId);
 
         // Deploy real factory so vault delegation works (FR-FKD0/1/2)
         LPVaultFactory realFactory = new LPVaultFactory(
@@ -183,7 +186,19 @@ contract CloneInitializeSuccessTest is Test {
         );
 
         vm.prank(address(realFactory));
-        vault.initialize(mktId, usdcAddr, exchangeAddr, ctAddr, spacing, address(realFactory), minLiq, 1);
+        vault.initialize(
+            mktId,
+            usdcAddr,
+            exchangeAddr,
+            ctAddr,
+            spacing,
+            address(realFactory),
+            minLiq,
+            1,
+            conditionId,
+            yesTokenId,
+            noTokenId
+        );
 
         assertEq(vault.factory(), address(realFactory), "factory should be the real factory");
         assertEq(vault.marketId(), mktId, "marketId should match");
@@ -193,6 +208,9 @@ contract CloneInitializeSuccessTest is Test {
         assertEq(vault.oracle(), makeAddr("oracle"), "oracle should delegate to factory");
         assertEq(vault.tickSpacing(), spacing, "tickSpacing should match");
         assertEq(vault.minimumFirstLiquidity(), minLiq, "minimumFirstLiquidity should match");
+        assertEq(vault.conditionId(), conditionId, "conditionId should match");
+        assertEq(vault.yesTokenId(), yesTokenId, "yesTokenId should match");
+        assertEq(vault.noTokenId(), noTokenId, "noTokenId should match");
     }
 
     // SC-REQ5: clone cannot be initialized twice
@@ -205,6 +223,8 @@ contract CloneInitializeSuccessTest is Test {
         address ct1 = address(new MockConditionalTokens());
         address usdc2 = address(new MockERC20());
         address ct2 = address(new MockConditionalTokens());
+        bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+        (uint256 yesTokenId, uint256 noTokenId) = MockConditionalTokens(ct1).idsFor(usdc1, conditionId);
 
         // Deploy real factory so vault delegation works
         LPVaultFactory realFactory = new LPVaultFactory(
@@ -213,13 +233,33 @@ contract CloneInitializeSuccessTest is Test {
 
         vm.prank(address(realFactory));
         vault.initialize(
-            bytes32(uint256(1)), usdc1, makeAddr("exchange"), ct1, int24(10), address(realFactory), uint128(1000), 1
+            bytes32(uint256(1)),
+            usdc1,
+            makeAddr("exchange"),
+            ct1,
+            int24(10),
+            address(realFactory),
+            uint128(1000),
+            1,
+            conditionId,
+            yesTokenId,
+            noTokenId
         );
 
         vm.prank(address(realFactory));
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
         vault.initialize(
-            bytes32(uint256(2)), usdc2, makeAddr("exchange2"), ct2, int24(20), address(realFactory), uint128(2000), 1
+            bytes32(uint256(2)),
+            usdc2,
+            makeAddr("exchange2"),
+            ct2,
+            int24(20),
+            address(realFactory),
+            uint128(2000),
+            1,
+            conditionId,
+            yesTokenId,
+            noTokenId
         );
     }
 
@@ -262,7 +302,10 @@ contract ImplementationNotInitializableTest is Test {
             int24(10),
             address(this),
             uint128(1000),
-            1
+            1,
+            keccak256("PROPHET-MARKET-CONDITION"),
+            uint256(1),
+            uint256(2)
         );
     }
 }
@@ -360,6 +403,8 @@ contract VaultModifierTest is Test {
         );
 
         // Initialize the clone from the real factory's address
+        bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+        (uint256 yesTokenId, uint256 noTokenId) = MockConditionalTokens(ctAddr).idsFor(usdcAddr, conditionId);
         vm.prank(address(realFactory));
         LPVault(clone)
             .initialize(
@@ -370,7 +415,10 @@ contract VaultModifierTest is Test {
                 int24(10),
                 address(realFactory),
                 uint128(1000),
-                1
+                1,
+                conditionId,
+                yesTokenId,
+                noTokenId
             );
         factoryAddr = address(realFactory);
     }

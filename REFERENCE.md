@@ -66,7 +66,10 @@ sequenceDiagram
 function createVault(
     bytes32 marketId_,
     int24   tickSpacing_,
-    uint128 minimumFirstLiquidity_
+    uint128 minimumFirstLiquidity_,
+    bytes32 conditionId_,
+    uint256 yesTokenId_,
+    uint256 noTokenId_
 ) external onlyOracle returns (address vault)
 ```
 
@@ -79,6 +82,11 @@ Deploys an EIP-1167 minimal-proxy clone of the current implementation, calls `in
 | `marketId_` | `bytes32` | Unique identifier for the market — must not already have a vault |
 | `tickSpacing_` | `int24` | Minimum tick increment; all position bounds must be multiples of this value |
 | `minimumFirstLiquidity_` | `uint128` | Floor on the liquidity value of the first mint (prevents inflation attacks); must be > 0 |
+| `conditionId_` | `bytes32` | Prepared condition the market resolves against — the input `splitPosition` requires; must be non-zero |
+| `yesTokenId_` | `uint256` | ERC-1155 position id the vault treats as YES; must be non-zero and derive from `conditionId_` |
+| `noTokenId_` | `uint256` | ERC-1155 position id the vault treats as NO; must be non-zero, distinct from `yesTokenId_`, and derive from `conditionId_` |
+
+The two token ids are verified on-chain against `conditionId_` at `initialize()` time: the vault derives the pair via the ConditionalTokens contract's `getCollectionId` / `getPositionId` and rejects any pair that is not exactly that set. The pair is compared as a set, so the order the Oracle passes them in is what names which id is YES. A clone's identity cannot be changed afterwards.
 
 ```mermaid
 sequenceDiagram
@@ -86,11 +94,12 @@ sequenceDiagram
     participant Factory as LPVaultFactory
     participant Vault as LPVault (new clone)
 
-    Oracle->>Factory: createVault(marketId, tickSpacing, minFirstLiq)
+    Oracle->>Factory: createVault(marketId, tickSpacing, minFirstLiq,<br/>conditionId, yesTokenId, noTokenId)
     Note right of Factory: Checks:<br/>minFirstLiq > 0<br/>vaultForMarket[marketId] == 0
     Factory->>Vault: EIP-1167 deploy (clone of implementation)
     Factory->>Factory: vaultForMarket[marketId] = vault
-    Factory->>Vault: initialize(marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minFirstLiq, implementationVersion)
+    Factory->>Vault: initialize(marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minFirstLiq, implementationVersion,<br/>conditionId, yesTokenId, noTokenId)
+    Vault->>CTF: getCollectionId / getPositionId (verify id pair)
     Vault-->>Factory: initialized
     Note right of Factory: VaultCreated event emitted
     Factory-->>Oracle: vault address
@@ -102,6 +111,10 @@ sequenceDiagram
 - `NotOracle()` — caller is not the oracle
 - `ZeroFloor()` — `minimumFirstLiquidity_` is 0
 - `DuplicateMarket()` — a vault already exists for `marketId_`
+- `ZeroConditionId()` — `conditionId_` is 0
+- `ZeroTokenId()` — `yesTokenId_` or `noTokenId_` is 0
+- `DuplicateTokenId()` — `yesTokenId_` equals `noTokenId_`
+- `TokenIdMismatch()` — the id pair does not derive from `conditionId_`
 - `CloneDeployFailed()` — EIP-1167 `create` returned address(0)
 
 ---
@@ -117,7 +130,10 @@ function initialize(
     int24   tickSpacing_,
     address factory_,
     uint128 minimumFirstLiquidity_,
-    uint256 version_
+    uint256 version_,
+    bytes32 conditionId_,
+    uint256 yesTokenId_,
+    uint256 noTokenId_
 ) external initializer
 ```
 
@@ -135,6 +151,9 @@ Called once by the factory immediately after cloning. Stores all per-vault confi
 | `factory_` | `address` | Factory that deployed this clone — must equal `msg.sender` |
 | `minimumFirstLiquidity_` | `uint128` | Floor for the first mint while `activeLiquidity == 0` |
 | `version_` | `uint256` | Factory's `implementationVersion` at deploy time; stored for off-chain identification |
+| `conditionId_` | `bytes32` | Prepared condition the market resolves against; must be non-zero |
+| `yesTokenId_` | `uint256` | ERC-1155 position id treated as YES; must be non-zero and derive from `conditionId_` |
+| `noTokenId_` | `uint256` | ERC-1155 position id treated as NO; must be non-zero, distinct, and derive from `conditionId_` |
 
 ```mermaid
 sequenceDiagram
@@ -145,7 +164,9 @@ sequenceDiagram
 
     Factory->>Vault: initialize(...)
     Note right of Vault: Checks:<br/>not already initialized<br/>msg.sender == factory_
-    Note right of Vault: Store: marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minimumFirstLiquidity,<br/>implementationVersion = version_
+    Vault->>CT: getCollectionId / getPositionId (index sets 1 and 2)
+    Note right of Vault: Reject unless {yesTokenId_, noTokenId_}<br/>is exactly the derived pair
+    Note right of Vault: Store: marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minimumFirstLiquidity,<br/>implementationVersion = version_,<br/>conditionId, yesTokenId, noTokenId
     Note right of Vault: phase = 1 (Active)<br/>reentrancyGuard = 1<br/>lastOperatorActivityTimestamp = now
     Note right of Vault: Cache EIP-712 domain separator
     Vault->>USDC: approve(exchange, type(uint256).max)

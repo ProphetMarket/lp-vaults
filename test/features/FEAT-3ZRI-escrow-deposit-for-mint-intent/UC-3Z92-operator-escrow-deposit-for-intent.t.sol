@@ -9,6 +9,7 @@ import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
+import {CTFPositionIds} from "../../mocks/CTFPositionIds.sol";
 
 // ──────────────────────────────────────────────
 // MockERC20 with transferFrom support for escrow tests.
@@ -36,7 +37,7 @@ contract MockERC20ForEscrow {
     }
 }
 
-contract MockConditionalTokens {
+contract MockConditionalTokens is CTFPositionIds {
     mapping(address => mapping(address => bool)) public isApprovedForAll;
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -87,6 +88,11 @@ contract EscrowDepositTestBase is Test {
 
     event DepositEscrowed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public virtual {
         lp = vm.addr(LP_PK);
 
@@ -96,9 +102,11 @@ contract EscrowDepositTestBase is Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault =
+            LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq, conditionId, yesTokenId, noTokenId));
 
         // Fund the LP and approve the vault. This is the LP's only on-chain
         // action on the deposit path — the Operator does the rest.

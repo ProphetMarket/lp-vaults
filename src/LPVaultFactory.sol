@@ -178,18 +178,27 @@ contract LPVaultFactory {
     // Vault lifecycle
     // ──────────────────────────────────────────────
 
-    // SC-REQ6, SC-REQ7, SC-REQ8, SC-RG74: create and initialize a new vault clone
+    // SC-REQ6, SC-REQ7, SC-REQ8, SC-RG74, SC-5XY4, SC-5XY5: create and initialize a new vault clone
     /// @notice Deploys an EIP-1167 minimal-proxy clone of the LPVault implementation,
     ///         initializes it for the given market, and registers it in vaultForMarket.
+    /// @dev The outcome-token identity is validated by the clone's initialize(), not here,
+    ///      so there is one place to read for what a valid identity is. A rejection there
+    ///      reverts this whole call, leaving vaultForMarket[marketId_] unwritten.
     /// @param marketId_ Unique market identifier — must not already have a vault
     /// @param tickSpacing_ Minimum tick increment for concentrated-liquidity positions
     /// @param minimumFirstLiquidity_ Floor for the first mint — must be > 0
+    /// @param conditionId_ Prepared condition the market resolves against — must be non-zero
+    /// @param yesTokenId_ ERC-1155 position id to treat as YES — must derive from conditionId_
+    /// @param noTokenId_ ERC-1155 position id to treat as NO — must derive from conditionId_
     /// @return vault Address of the newly-deployed vault clone
-    function createVault(bytes32 marketId_, int24 tickSpacing_, uint128 minimumFirstLiquidity_)
-        external
-        onlyOracle
-        returns (address vault)
-    {
+    function createVault(
+        bytes32 marketId_,
+        int24 tickSpacing_,
+        uint128 minimumFirstLiquidity_,
+        bytes32 conditionId_,
+        uint256 yesTokenId_,
+        uint256 noTokenId_
+    ) external onlyOracle returns (address vault) {
         // Enforce minimum first liquidity > 0
         if (minimumFirstLiquidity_ == 0) revert ZeroFloor();
 
@@ -212,7 +221,10 @@ contract LPVaultFactory {
                 tickSpacing_,
                 address(this),
                 minimumFirstLiquidity_,
-                implementationVersion
+                implementationVersion,
+                conditionId_,
+                yesTokenId_,
+                noTokenId_
             );
 
         emit VaultCreated(marketId_, vault, minimumFirstLiquidity_);

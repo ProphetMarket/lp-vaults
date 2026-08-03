@@ -14,6 +14,7 @@ import {Test} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {LPVaultFactory} from "../../src/LPVaultFactory.sol";
 import {LPVault} from "../../src/LPVault.sol";
+import {CTFPositionIds} from "../mocks/CTFPositionIds.sol";
 
 contract MockERC20 {
     mapping(address => uint256) public balanceOf;
@@ -42,7 +43,7 @@ contract MockERC20 {
     }
 }
 
-contract MockConditionalTokens {
+contract MockConditionalTokens is CTFPositionIds {
     mapping(address => mapping(address => bool)) public isApprovedForAll;
 
     function setApprovalForAll(address operator, bool approved) external {
@@ -177,6 +178,11 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, Test {
 
     uint256 constant Q128 = 2 ** 128;
 
+    // The market's outcome-token identity, derived from the condition the vault names.
+    bytes32 conditionId = keccak256("PROPHET-MARKET-CONDITION");
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public {
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
@@ -184,9 +190,12 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, Test {
         factory = new LPVaultFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
         );
+        (yesTokenId, noTokenId) = mockCt.idsFor(address(mockUsdc), conditionId);
 
         vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e15)));
+        vault = LPVault(
+            factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e15), conditionId, yesTokenId, noTokenId)
+        );
 
         handler = new FeeGrowthAccountingHandler(vault, mockUsdc, operatorAddr);
         targetContract(address(handler));

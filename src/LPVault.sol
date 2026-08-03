@@ -40,6 +40,16 @@ interface IERC1155 {
     function setApprovalForAll(address operator, bool approved) external;
 }
 
+/// @dev Minimal Gnosis ConditionalTokens interface — only the two position-id views
+///      initialize() needs to verify the market's outcome-token identity (FR-5XY2).
+interface IConditionalTokens {
+    function getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint256 indexSet)
+        external
+        view
+        returns (bytes32);
+    function getPositionId(address collateralToken, bytes32 collectionId) external view returns (uint256);
+}
+
 /// @dev Minimal factory interface for auth delegation (FR-FKD0, FR-FKD1, FR-FKD2).
 ///      Vault modifiers read role state from the factory at call time.
 interface ILPVaultFactory {
@@ -229,6 +239,34 @@ contract LPVault {
     mapping(int16 => uint256) public tickBitmap;
 
     // ──────────────────────────────────────────────
+    // Outcome-token identity (FR-5XY1, FR-5XY2)
+    // ──────────────────────────────────────────────
+
+    /// @dev Declared here rather than beside the other per-vault config above, which is
+    ///      where they logically belong. Inserting three slots into that block shifts
+    ///      every slot beneath it, including the position, tick, and bitmap mappings whose
+    ///      numbering several test fixtures compute by hand. Declaring them below those
+    ///      leaves that numbering intact. Safe for the same reason given at
+    ///      `pendingDeposits` above: EIP-1167 clones are never upgraded in place, so a
+    ///      layout change reaches only vaults deployed from a newly-published
+    ///      implementation. Note this is still an insertion, not a true append — the
+    ///      EIP-712 and reentrancy-guard slots declared further down do move.
+
+    /// @dev The prepared condition this vault's market resolves against — the input
+    ///      splitPosition requires to mint a complete set from USDC.
+    // would be immutable in a non-clone contract; storage because EIP-1167.
+    bytes32 public conditionId;
+
+    /// @dev The two ERC-1155 position ids this vault is allowed to hold. Verified at
+    ///      initialize() to be the pair deriving from (usdc, conditionId); which one is
+    ///      labelled YES is the order the Oracle passed them in.
+    // would be immutable in a non-clone contract; storage because EIP-1167.
+    uint256 public yesTokenId;
+
+    // would be immutable in a non-clone contract; storage because EIP-1167.
+    uint256 public noTokenId;
+
+    // ──────────────────────────────────────────────
     // EIP-712 (inlined per pattern policy in CLAUDE.md)
     // ──────────────────────────────────────────────
 
@@ -318,6 +356,11 @@ contract LPVault {
     error InsufficientPositions();
     error TradingIsPaused();
     error NotConditionalTokens();
+    error ZeroConditionId();
+    error ZeroTokenId();
+    error DuplicateTokenId();
+    error TokenIdMismatch();
+    error UnknownTokenId();
     error DepositAlreadyEscrowed();
     error DepositNotEscrowed();
     error NothingToReclaim();
@@ -466,8 +509,10 @@ contract LPVault {
     ///      Role state (operators, oracle, admins) is NOT copied from the factory.
     ///      The vault reads role state from the factory at call time via ILPVaultFactory.
     ///      Approval scope: setApprovalForAll(exchange, true) on the ConditionalTokens
-    ///      is acceptable BECAUSE the vault holds outcome tokens for exactly one market —
-    ///      token IDs for other markets cannot enter the vault (no entry point exists).
+    ///      is acceptable BECAUSE the vault holds outcome tokens for exactly one market.
+    ///      That is enforced, not assumed: the receiver hooks reject every token id
+    ///      outside {yesTokenId, noTokenId}, so no foreign id can enter the vault even
+    ///      though the approval itself is unscoped.
     /// @param marketId_ Unique market identifier from the CTF Exchange
     /// @param usdc_ USDC ERC-20 address
     /// @param exchange_ ProphetCTFExchange address
@@ -476,6 +521,9 @@ contract LPVault {
     /// @param factory_ Factory contract address — must equal msg.sender
     /// @param minimumFirstLiquidity_ Floor for the first mint when activeLiquidity == 0
     /// @param version_ Implementation version from the factory's counter
+    /// @param conditionId_ Prepared condition this market resolves against
+    /// @param yesTokenId_ ERC-1155 position id the vault treats as YES
+    /// @param noTokenId_ ERC-1155 position id the vault treats as NO
     function initialize(
         bytes32 marketId_,
         address usdc_,
@@ -484,10 +532,18 @@ contract LPVault {
         int24 tickSpacing_,
         address factory_,
         uint128 minimumFirstLiquidity_,
-        uint256 version_
+        uint256 version_,
+        bytes32 conditionId_,
+        uint256 yesTokenId_,
+        uint256 noTokenId_
     ) external initializer {
         // Factory guard: caller must be the factory that deployed this clone
         if (msg.sender != factory_) revert NotFactory();
+
+        // Reject a malformed or mismatched outcome-token identity before anything is
+        // written. A clone cannot be re-initialized and has no setter for these values,
+        // so a wrong identity here is permanent.
+        _validateOutcomeIdentity(usdc_, conditionalTokens_, conditionId_, yesTokenId_, noTokenId_);
 
         // Store factory address for auth delegation and onlyFactory checks
         factory = factory_;
@@ -497,6 +553,9 @@ contract LPVault {
         usdc = usdc_;
         exchange = exchange_;
         conditionalTokens = conditionalTokens_;
+        conditionId = conditionId_;
+        yesTokenId = yesTokenId_;
+        noTokenId = noTokenId_;
         tickSpacing = tickSpacing_;
         minimumFirstLiquidity = minimumFirstLiquidity_;
         implementationVersion = version_;
@@ -520,11 +579,53 @@ contract LPVault {
         IERC1155(conditionalTokens_).setApprovalForAll(exchange_, true);
     }
 
+    // SC-5XY4, SC-5XY5: reject a malformed or mismatched outcome-token identity
+    /// @notice Verifies that the supplied outcome-token identity is well-formed and
+    ///         actually belongs to the supplied condition.
+    /// @dev Kept out of initialize()'s own frame — with eleven parameters there, inlining
+    ///      the four derivation locals pushes the function past the EVM's reachable stack.
+    ///
+    ///      The set comparison is deliberate: the derivation cannot know which index set
+    ///      the market calls YES, so either order is accepted and the caller's order is
+    ///      what names it. Both ids are still proven to belong to this condition.
+    ///
+    ///      Assumes a binary market with parentCollectionId == 0 and USDC as collateral,
+    ///      which is the only market shape this repo supports.
+    function _validateOutcomeIdentity(
+        address usdc_,
+        address conditionalTokens_,
+        bytes32 conditionId_,
+        uint256 yesTokenId_,
+        uint256 noTokenId_
+    ) internal view {
+        if (conditionId_ == bytes32(0)) revert ZeroConditionId();
+        if (yesTokenId_ == 0 || noTokenId_ == 0) revert ZeroTokenId();
+        if (yesTokenId_ == noTokenId_) revert DuplicateTokenId();
+
+        IConditionalTokens ct = IConditionalTokens(conditionalTokens_);
+        uint256 first = ct.getPositionId(usdc_, ct.getCollectionId(bytes32(0), conditionId_, 1));
+        uint256 second = ct.getPositionId(usdc_, ct.getCollectionId(bytes32(0), conditionId_, 2));
+
+        bool matchesInOrder = yesTokenId_ == first && noTokenId_ == second;
+        bool matchesSwapped = yesTokenId_ == second && noTokenId_ == first;
+        if (!matchesInOrder && !matchesSwapped) revert TokenIdMismatch();
+    }
+
     // ──────────────────────────────────────────────
-    // ERC-1155 reception (FR-3WLI, FR-3WLJ, FR-3WLK)
+    // ERC-1155 reception (FR-3WLI, FR-3WLJ, FR-3WLK, FR-5XY3)
     // ──────────────────────────────────────────────
 
-    // SC-3WLL, SC-3WLN: acknowledge single outcome-token transfers from this vault's CTF
+    // SC-5XY6: reject any token id that does not belong to this vault's market
+    /// @notice Reverts unless `id` is one of this vault's two outcome tokens.
+    /// @dev The caller guard alone is not enough: one ConditionalTokens contract carries
+    ///      the tokens of every market on the platform, so a correct caller can still be
+    ///      delivering a token this vault has no business holding.
+    /// @param id The ERC-1155 token id being transferred in
+    function _requireOwnTokenId(uint256 id) internal view {
+        if (id != yesTokenId && id != noTokenId) revert UnknownTokenId();
+    }
+
+    // SC-3WLL, SC-3WLN, SC-5XY6: acknowledge single outcome-token transfers from this vault's CTF
     /// @notice Accepts a single ERC-1155 outcome token transfer into the vault.
     /// @dev Stateless by design. The vault's position, tick, and fee accounting is driven
     ///      by mintPositionFor, burnPosition, collect, and notifyFees — never by observing
@@ -533,26 +634,38 @@ contract LPVault {
     ///      No nonReentrant guard: the hook mutates nothing and makes no external call, and
     ///      guarding it would revert legitimate transfers that occur inside an already-
     ///      guarded vault call.
+    /// @param id The token id being transferred — must be yesTokenId or noTokenId
     /// @return The ERC-1155 single-transfer acknowledgement value.
-    function onERC1155Received(address, address, uint256, uint256, bytes calldata)
+    function onERC1155Received(address, address, uint256 id, uint256, bytes calldata)
         external
         view
         onlyConditionalTokens
         returns (bytes4)
     {
+        _requireOwnTokenId(id);
         return 0xf23a6e61;
     }
 
-    // SC-3WLM, SC-3WLN: acknowledge batch outcome-token transfers from this vault's CTF
+    // SC-3WLM, SC-3WLN, SC-5XY6: acknowledge batch outcome-token transfers from this vault's CTF
     /// @notice Accepts a batch ERC-1155 outcome token transfer into the vault.
-    /// @dev Stateless for the same reasons as onERC1155Received above.
+    /// @dev Stateless for the same reasons as onERC1155Received above. Every element is
+    ///      checked, so one foreign id rejects the whole batch — there is no partial
+    ///      acceptance to reason about, and no ordering of the batch changes the outcome.
+    ///      The loop needs no cap: its length is set by the ConditionalTokens contract and
+    ///      paid for by whoever initiated the transfer, and a batch too large to check is
+    ///      equally too large to transfer.
+    /// @param ids The token ids being transferred — every one must be yesTokenId or noTokenId
     /// @return The ERC-1155 batch-transfer acknowledgement value.
-    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata)
+    function onERC1155BatchReceived(address, address, uint256[] calldata ids, uint256[] calldata, bytes calldata)
         external
         view
         onlyConditionalTokens
         returns (bytes4)
     {
+        uint256 length = ids.length;
+        for (uint256 i = 0; i < length; ++i) {
+            _requireOwnTokenId(ids[i]);
+        }
         return 0xbc197c81;
     }
 
