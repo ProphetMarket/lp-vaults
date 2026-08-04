@@ -15,7 +15,7 @@ refs: [FEAT-REPZ, FEAT-3ZRI]
 ## Non-Goals
 
 - Does not handle fee collection -- see feature 5
-- Does not handle position burning -- see feature 6
+- Does not handle position burning -- see FEAT-7G40
 - Does not pull USDC from the LP's wallet; the intent must already be funded as per-intent escrow -- see FEAT-3ZRI
 - Does not refund an unfulfilled intent's escrow -- see FEAT-JAIJ
 - Does not handle tick crossing / updateTick -- see feature 4

@@ -12,6 +12,7 @@ pragma solidity 0.8.20;
 
 import {Test} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../src/LPVaultFactory.sol";
 import {LPVault} from "../../src/LPVault.sol";
 import {CTFPositionIds} from "../mocks/CTFPositionIds.sol";
@@ -43,11 +44,26 @@ contract MockERC20 {
     }
 }
 
+/// @dev Tracks balances and moves tokens, because burnPosition pays its outcome leg with
+///      a real ERC-1155 transfer. A setApprovalForAll-only stub would make every
+///      in-range and above-range burn revert, and the handler's try/catch would swallow
+///      it — leaving the burn action silently inert and this suite blind to exactly the
+///      accounting it is meant to police.
 contract MockConditionalTokens is CTFPositionIds {
     mapping(address => mapping(address => bool)) public isApprovedForAll;
+    mapping(uint256 => mapping(address => uint256)) public balanceOf;
 
     function setApprovalForAll(address operator, bool approved) external {
         isApprovedForAll[msg.sender][operator] = approved;
+    }
+
+    function mint(address to, uint256 id, uint256 amount) external {
+        balanceOf[id][to] += amount;
+    }
+
+    function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes calldata) external {
+        balanceOf[id][from] -= amount;
+        balanceOf[id][to] += amount;
     }
 }
 
@@ -161,7 +177,37 @@ contract FeeGrowthAccountingHandler is Test {
         } catch {}
     }
 
+    /// @dev Closes a position through the self-service path. The fee half of the payout is
+    ///      read off the PositionBurned event rather than from the USDC balance delta,
+    ///      which also carries the principal — the conservation invariant only accounts
+    ///      for fees, so mixing the principal in would make it meaningless.
+    function burn(uint256 idSeed) public {
+        if (positionIds.length == 0) return;
+        uint256 id = positionIds[idSeed % positionIds.length];
+
+        vm.recordLogs();
+        vm.prank(lp);
+        try vault.burnPosition(id) {
+            successfulBurns++;
+            Vm.Log[] memory logs = vm.getRecordedLogs();
+            for (uint256 i = 0; i < logs.length; i++) {
+                if (logs[i].topics[0] == POSITION_BURNED_TOPIC) {
+                    (,, uint256 feesAmount) = abi.decode(logs[i].data, (uint256, uint256, uint256));
+                    totalFeesPaidOut += feesAmount;
+                }
+            }
+        } catch {}
+    }
+
+    bytes32 constant POSITION_BURNED_TOPIC = keccak256("PositionBurned(uint256,address,uint256,uint256,uint256)");
+
     uint256 public totalFeesPaidOut;
+
+    /// @dev Burns that actually landed. Every handler action swallows its reverts, so a
+    ///      broken fixture (an ERC-1155 stub that cannot transfer, say) would leave the
+    ///      burn action inert and the invariants above vacuously true. This counter is
+    ///      what test_handlerBurnActionIsNotInert checks.
+    uint256 public successfulBurns;
 }
 
 contract FeeGrowthAccountingInvariantTest is StdInvariant, Test {
@@ -196,6 +242,10 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, Test {
         vault = LPVault(
             factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e15), conditionId, yesTokenId, noTokenId)
         );
+
+        // Outcome-token inventory for the burn action's complete-set leg.
+        mockCt.mint(address(vault), yesTokenId, type(uint128).max);
+        mockCt.mint(address(vault), noTokenId, type(uint128).max);
 
         handler = new FeeGrowthAccountingHandler(vault, mockUsdc, operatorAddr);
         targetContract(address(handler));
@@ -245,6 +295,114 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, Test {
             handler.totalFeesNotified() + 1e6,
             "claimable + already-paid-out fees must not exceed total fees ever notified (+ dust)"
         );
+    }
+
+    /// @dev Guards the fixture, not the vault. Every handler action swallows its own
+    ///      reverts, so if burnPosition could never succeed here — an ERC-1155 mock that
+    ///      cannot transfer, an unfunded vault — the two structural invariants below would
+    ///      still pass, having never seen a burn. This drives one deterministically.
+    function test_handlerBurnActionIsNotInert() public {
+        // Mint [0, 200) with currentTick still at 0, so the position is in range and can
+        // accrue: notifyFees reverts against zero active liquidity, and a position that
+        // never accrued would make the fee assertion below vacuous.
+        handler.mint(int256(0), uint256(20), uint256(1e18));
+        handler.notifyFees(uint256(1e12));
+        handler.burn(0);
+
+        assertGt(handler.successfulBurns(), 0, "the handler's burn action must actually burn");
+        assertGt(handler.totalFeesPaidOut(), 0, "a burn must pay out the position's accrued fees");
+    }
+
+    // CLAUDE.md's required structural invariant: activeLiquidity is the sum of the
+    // liquidity of every live position whose range contains currentTick.
+    //
+    // Burn is the first function that can break this. Mint only ever adds, and tick
+    // crossings move activeLiquidity by a liquidityNet the mint itself installed; burn
+    // has to decide, from currentTick at burn time, whether the position it is removing
+    // was contributing at all — and get the half-open interval right at both boundaries.
+    // Subtracting when it should not have (or failing to) leaves a permanent skew that no
+    // later crossing corrects, silently misdirecting every subsequent fee distribution.
+    function invariant_activeLiquidityMatchesInRangePositions() public view {
+        LivePosition[] memory live = _livePositions();
+        int24 tick = vault.currentTick();
+
+        uint256 expected;
+        for (uint256 i = 0; i < live.length; i++) {
+            if (live[i].lower <= tick && tick < live[i].upper) {
+                expected += live[i].liquidity;
+            }
+        }
+
+        assertEq(
+            uint256(vault.activeLiquidity()),
+            expected,
+            "activeLiquidity must equal the summed liquidity of live in-range positions"
+        );
+    }
+
+    // CLAUDE.md's second required structural invariant: every initialized tick's
+    // liquidityGross is the summed liquidity of the live positions referencing it, and its
+    // liquidityNet is the signed form of the same sum.
+    //
+    // This is what makes tick deinitialization safe to trust: the burn deletes a tick and
+    // clears its bitmap bit exactly when liquidityGross reaches zero, so if gross ever
+    // drifted from the true reference count, the vault would either retire a tick real
+    // positions still depend on (destroying their feeGrowthOutside snapshot) or leave a
+    // dead tick in the bitmap for updateTick to cross with nothing behind it.
+    function invariant_tickLiquidityMatchesReferencingPositions() public view {
+        LivePosition[] memory live = _livePositions();
+
+        for (uint256 i = 0; i < live.length; i++) {
+            _assertTickMatches(live[i].lower, live);
+            _assertTickMatches(live[i].upper, live);
+        }
+    }
+
+    struct LivePosition {
+        int24 lower;
+        int24 upper;
+        uint128 liquidity;
+    }
+
+    /// @dev Snapshots every position that still holds liquidity into memory, so the
+    ///      quadratic tick matching below runs on memory rather than repeating storage
+    ///      reads. Burned positions are zeroed, so they drop out here.
+    function _livePositions() internal view returns (LivePosition[] memory live) {
+        uint256 count = handler.positionCount();
+        LivePosition[] memory buf = new LivePosition[](count);
+        uint256 n;
+
+        for (uint256 i = 0; i < count; i++) {
+            (, int24 lower, int24 upper, uint128 liquidity,,) = vault.positions(handler.positionIdAt(i));
+            if (liquidity == 0) continue;
+            buf[n] = LivePosition(lower, upper, liquidity);
+            n++;
+        }
+
+        live = new LivePosition[](n);
+        for (uint256 i = 0; i < n; i++) {
+            live[i] = buf[i];
+        }
+    }
+
+    function _assertTickMatches(int24 tick, LivePosition[] memory live) internal view {
+        uint128 expectedGross;
+        int128 expectedNet;
+
+        for (uint256 i = 0; i < live.length; i++) {
+            if (live[i].lower == tick) {
+                expectedGross += live[i].liquidity;
+                expectedNet += int128(live[i].liquidity);
+            }
+            if (live[i].upper == tick) {
+                expectedGross += live[i].liquidity;
+                expectedNet -= int128(live[i].liquidity);
+            }
+        }
+
+        (uint128 gross, int128 net,) = vault.ticks(tick);
+        assertEq(gross, expectedGross, "tick liquidityGross must equal the sum over referencing positions");
+        assertEq(net, expectedNet, "tick liquidityNet must equal the signed sum over referencing positions");
     }
 
     /// @dev Mirrors LPVault._computeFeeGrowthInside() exactly (including the

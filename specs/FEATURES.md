@@ -30,6 +30,7 @@
 | FEAT-U079 | Collect Fees on a Position | LP withdraws accumulated trading fees from a position using the v3 feeGrowthInside accumulator with snapshot-based double-counting prevention | implemented |
 | FEAT-JAIJ | LP Escape Hatch | Escrow-sourced refund of an unfulfilled mint intent through a permissionless LP path plus an Operator-relayed twin for voluntary cancellation | implemented |
 | FEAT-K1M2 | Merge Positions | Operator-called housekeeping to combine same-range same-owner positions into a single record preserving liquidity and fees | implemented |
+| FEAT-7G40 | Burn LP Position | Dual-asset position closure paying USDC, outcome tokens, and accrued fees through an Operator-relayed path and an unconditional self-service path | implemented |
 
 ## @fees
 

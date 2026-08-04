@@ -14,7 +14,7 @@ refs: [FEAT-TVS0]
 
 ## Non-Goals
 
-- Does not remove the position or return the LP's original deposit -- see feature 6 (Burn LP Position)
+- Does not remove the position or return the LP's original deposit -- see FEAT-7G40 (Burn LP Position)
 - Does not handle fee notification or global accumulator updates -- see FEAT-TOGR
 - Does not handle tick crossing or feeGrowthOutside flipping -- see FEAT-TVS0
 - Does not handle vault lifecycle transitions (wind-down/emergency) -- see feature 8

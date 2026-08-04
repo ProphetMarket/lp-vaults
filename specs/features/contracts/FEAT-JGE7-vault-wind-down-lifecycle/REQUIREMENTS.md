@@ -15,7 +15,7 @@ refs: [FEAT-REPZ, FEAT-T7AF]
 ## Non-Goals
 
 - Does not handle emergency cancel (`emergencyCancelAll`) -- separate feature
-- Does not handle position burning mechanics -- see burn position feature
+- Does not handle position burning mechanics -- see FEAT-7G40
 - Does not modify fee distribution behavior during WindDown -- Operator can still call `notifyFees`, `updateTick`, `mergePositions`
 - Does not handle market resolution on the CTF Exchange -- `startWindDown` is a downstream Oracle signal, not a resolution mechanism
 

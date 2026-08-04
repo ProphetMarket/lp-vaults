@@ -55,7 +55,7 @@ erDiagram
 **Invariants:**
 - `phase` transitions only from Active(1) to WindDown(2) -- never reverses
 - Once `phase == WindDown`, `mintPositionFor` always reverts (existing `VaultNotActive` guard; `mintPosition` does not exist as a function)
-- Once `phase == WindDown`, `collect` and `reclaimDeposit` continue to succeed (`burnPosition` is a future feature, not yet implemented)
+- Once `phase == WindDown`, `collect` and `reclaimDeposit` continue to succeed (`burnPosition` is specified in FEAT-7G40, not yet implemented)
 - `startWindDown()` is callable only by the Oracle and only when `phase == Active`
 
 ## Component Inventory
@@ -123,7 +123,7 @@ stateDiagram-v2
 | SC-JGEH | Revert when non-Oracle calls | `src/LPVault.sol:startWindDown()`, `src/LPVaultFactory.sol:oracle()` |
 | SC-JGEI | mintPosition reverts in WindDown | `src/LPVault.sol:mintPositionFor()` (mintPosition does not exist; SC subsumed by SC-JGEJ) |
 | SC-JGEJ | mintPositionFor reverts in WindDown | `src/LPVault.sol:mintPositionFor()` |
-| SC-JGEK | Exit paths succeed in WindDown | `src/LPVault.sol:collect()`, `src/LPVault.sol:reclaimDeposit()` (burnPosition not yet implemented) |
+| SC-JGEK | Exit paths succeed in WindDown | `src/LPVault.sol:collect()`, `src/LPVault.sol:reclaimDeposit()` (burnPosition specified in FEAT-7G40, not yet implemented) |
 
 ## Architecture Decisions
 

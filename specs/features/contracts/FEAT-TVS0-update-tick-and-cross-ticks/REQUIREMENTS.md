@@ -15,7 +15,7 @@ refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR]
 ## Non-Goals
 
 - Does not handle fee collection by individual LPs — see feature 5
-- Does not initialize or deinitialize ticks — tick lifecycle managed by mint (FEAT-T7AF) and burn (feature 6)
+- Does not initialize or deinitialize ticks — tick lifecycle managed by mint (FEAT-T7AF) and burn (FEAT-7G40)
 - Does not implement off-chain Keeper logic (price monitoring, chunking decisions) — only the on-chain `updateTick` entry point
 - Does not move USDC or outcome tokens — only updates accounting state (feeGrowthOutside, activeLiquidity, currentTick)
 
