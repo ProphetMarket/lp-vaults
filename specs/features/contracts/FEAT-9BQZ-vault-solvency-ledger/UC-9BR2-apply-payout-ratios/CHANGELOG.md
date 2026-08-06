@@ -1,0 +1,4 @@
+TODO:
+- 20260804T181407 [dirty] command:spec plan:20260804T182906-vault-solvency-ledger — created UC-9BR2 Apply Payout Ratios with five scenarios covering a fully solvent vault paying at unity, an under-collateralized vault applying the same proportional haircut to two claimants in either call order, escrowed-but-unminted USDC counted in the usdcRatio denominator so a short vault cannot pay burners out of pending depositors' money, per-asset shortfall independence (short YES while whole on USDC and NO), and a position devalued purely by price movement still paid in full because impermanent loss is not a shortfall. No path reverts on a shortfall: a solvency assertion on a payout path would brick withdrawals during exactly the condition the ratio exists to absorb, including on burnPosition, which FEAT-7G40 guarantees is unconditional.
+
+DONE:

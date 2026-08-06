@@ -1,0 +1,4 @@
+TODO:
+- 20260804T181407 [dirty] command:spec plan:20260804T182906-vault-solvency-ledger — created UC-9BR1 Accumulate Principal Shift with four scenarios covering per-segment accumulation during updateTick: a multi-crossing move, a move crossing zero initialized ticks entirely inside one gap, a move whose newTick does not land on an initialized tick so the trailing segment carries a nonzero shift, and the ordering requirement that each segment is accumulated before its tick's liquidityNet is applied. The distinction between segments traversed and ticks crossed is the load-bearing one: today's updateTick loop accumulates nothing, and a loop-body-only accumulation would be wrong on the common case rather than on an edge case. The ordering error is silent -- nothing reverts and no event looks wrong, the totals simply drift.
+
+DONE:

@@ -20,6 +20,7 @@
 | FEAT-JXQO | Emergency Cancel All Positions | Position-holder-triggered force-close of all positions after operator-silence timelock, distributing principal + fees and entering terminal Cancelled state | implemented |
 | FEAT-K1MD | Pause Trading | Admin-callable circuit breaker that halts trading entry points while keeping LP exit paths live | implemented |
 | FEAT-KX5N | Upgradeable Vault Implementation Pointer | Admin-driven two-step timelocked upgrade of the factory's implementation pointer with per-clone version tracking | implemented |
+| FEAT-9BQZ | Vault Solvency Ledger | Token-denominated per-asset obligation totals and pooled payout ratios that make a shortfall a proportional haircut shared by all claimants instead of a race | dirty |
 
 ## @positions
 

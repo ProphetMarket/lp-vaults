@@ -3,7 +3,7 @@ id: FEAT-JGE7
 name: Vault Wind-Down Lifecycle
 use_cases: [UC-JGEE]
 scenarios: [SC-JGEF, SC-JGEG, SC-JGEH, SC-JGEI, SC-JGEJ, SC-JGEK]
-last_update: 2026-07-02
+last_update: 2026-08-04
 ---
 
 # Architecture: Vault Wind-Down Lifecycle
@@ -55,7 +55,7 @@ erDiagram
 **Invariants:**
 - `phase` transitions only from Active(1) to WindDown(2) -- never reverses
 - Once `phase == WindDown`, `mintPositionFor` always reverts (existing `VaultNotActive` guard; `mintPosition` does not exist as a function)
-- Once `phase == WindDown`, `collect` and `reclaimDeposit` continue to succeed (`burnPosition` is specified in FEAT-7G40, not yet implemented)
+- Once `phase == WindDown`, `collect`, `reclaimDeposit`, `burnPosition`, and `burnPositionFor` continue to succeed (burn implemented under FEAT-7G40)
 - `startWindDown()` is callable only by the Oracle and only when `phase == Active`
 
 ## Component Inventory
@@ -123,7 +123,7 @@ stateDiagram-v2
 | SC-JGEH | Revert when non-Oracle calls | `src/LPVault.sol:startWindDown()`, `src/LPVaultFactory.sol:oracle()` |
 | SC-JGEI | mintPosition reverts in WindDown | `src/LPVault.sol:mintPositionFor()` (mintPosition does not exist; SC subsumed by SC-JGEJ) |
 | SC-JGEJ | mintPositionFor reverts in WindDown | `src/LPVault.sol:mintPositionFor()` |
-| SC-JGEK | Exit paths succeed in WindDown | `src/LPVault.sol:collect()`, `src/LPVault.sol:reclaimDeposit()` (burnPosition specified in FEAT-7G40, not yet implemented) |
+| SC-JGEK | Exit paths succeed in WindDown | `src/LPVault.sol:collect()`, `src/LPVault.sol:reclaimDeposit()`, `src/LPVault.sol:burnPosition()`, `src/LPVault.sol:burnPositionFor()` (burn implemented under FEAT-7G40) |
 
 ## Architecture Decisions
 

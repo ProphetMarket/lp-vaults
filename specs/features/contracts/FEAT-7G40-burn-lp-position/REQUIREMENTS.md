@@ -14,7 +14,7 @@ refs: [FEAT-T7AF, FEAT-U079, FEAT-TVS0, FEAT-JGE7]
 
 ## Non-Goals
 
-- Does not specify the shortfall ratio or haircut applied at payout, nor the vault-wide owed-amount ledger those ratios read -- the dual-asset withdrawal rewrite owns that machinery and will revise this feature when it lands
+- Does not specify the shortfall ratio or haircut applied at payout, nor the vault-wide owed-amount ledger those ratios read -- FEAT-9BQZ (Vault Solvency Ledger) owns that machinery and will revise this feature when it lands
 - Does not auto-convert outcome tokens to USDC, and does not place, match, or settle any order on the CTF Exchange on the LP's behalf
 - Does not withdraw fees without closing the position -- see FEAT-U079
 - Does not create positions or initialize ticks -- see FEAT-T7AF
