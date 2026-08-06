@@ -367,6 +367,59 @@ contract LPVault {
     mapping(bytes32 => bool) public usedBurnAuthorizations;
 
     // ──────────────────────────────────────────────
+    // Solvency ledger (FEAT-9BQZ, UC-9BR0)
+    // ──────────────────────────────────────────────
+
+    /// @dev What the vault owes, per asset, as running totals maintained incrementally
+    ///      by every operation that creates, discharges, or transforms an obligation
+    ///      (FR-9BR3). Never reconstructed by iterating positions: iteration would make
+    ///      the cost grow with position count and put the exit paths at the mercy of a
+    ///      gas limit — the failure this ledger exists to prevent.
+    ///
+    ///      Every total is a COUNT OF TOKENS, never a dollar value, and no read or write
+    ///      here consults a price (FR-9BR4). Dollar-denominating would recreate the bug
+    ///      this ledger exists to fix: record "owed $60" against 100 YES at $0.60, watch
+    ///      the price halve, and the vault owes $60 backed by $30. Owe 100 YES, hold
+    ///      100 YES, and the vault is square at any price.
+    ///
+    ///      `public` is load-bearing, not convenience: the generated getters are the
+    ///      entire monitoring surface (FR-9BR6). Because no path reverts on a shortfall
+    ///      (FR-9BRS), reading these off-chain is the only way one becomes visible.
+    ///
+    ///      Appended at the end of storage; safe for the reason given at
+    ///      usedBurnAuthorizations above.
+
+    /// @dev Principal owed, per asset. Raised on mint by a position's starting split and
+    ///      lowered on burn by its split at burn time (T-002). NOT touched by fee
+    ///      collection: a collect changes neither liquidity nor the tick range, so the
+    ///      position's principal claim is unchanged (FR-9BR7).
+    ///
+    ///      YES and NO are separate, non-negative, and NEVER collapsed into one signed
+    ///      net (FR-9BR5). Under a signed net, a position tilted toward YES and one
+    ///      tilted toward NO cancel — so a vault holding neither token would report
+    ///      itself solvent while unable to pay either side. The vault holds two distinct
+    ///      ERC-1155 balances; this mirrors that.
+    uint256 public totalUsdcOwed;
+    uint256 public totalYesOwed;
+    uint256 public totalNoOwed;
+
+    /// @dev Fee entitlement owed, per asset. Raised by notifyFees and lowered by collect
+    ///      and burn, each by what it actually paid out (T-003). Three totals rather than
+    ///      one because which asset a fee arrives in is a property of the fill the
+    ///      exchange executed, not a choice the vault makes.
+    uint256 public totalFeesUsdcOwed;
+    uint256 public totalFeesYesOwed;
+    uint256 public totalFeesNoOwed;
+
+    /// @dev USDC held against intents that have been funded but not yet minted.
+    ///
+    ///      Belongs in the usdcRatio denominator (FR-9BRM) because depositForIntent pulls
+    ///      real USDC that already sits in that ratio's numerator. Omitting it would
+    ///      overstate solvency by exactly the pending-escrow balance and let a burner be
+    ///      paid in full out of money owed to a depositor who never got their position.
+    uint256 public totalEscrowed;
+
+    // ──────────────────────────────────────────────
     // Errors
     // ──────────────────────────────────────────────
 
@@ -852,6 +905,32 @@ contract LPVault {
         activeLiquidity = 0;
         phase = 3;
 
+        // Every live position was just paid out and zeroed, so no principal or fee
+        // obligation survives (FR-9BRG). Cleared outright rather than debited per position
+        // because the loop above discharges ALL of them: leaving a residue would report a
+        // fully-drained vault as still owing, and every ratio would then read as a total
+        // shortfall against an empty balance.
+        //
+        // Clearing is also the only reading that survives this path's payout composition.
+        // The loop reconstructs principal across the FULL range width and pays it entirely
+        // in USDC, regardless of currentTick — unlike _owedAmounts, which splits by where
+        // the price sits. Debiting leg by leg would therefore strand the YES and NO totals
+        // at whatever an in-range position was carrying, permanently, against a vault
+        // holding nothing. (That composition mismatch is FEAT-JXQO's to resolve; the ledger
+        // only has to avoid being corrupted by it.)
+        //
+        // totalEscrowed is deliberately NOT cleared. This function never touches
+        // pendingDeposits, so it pays no escrow refund — and reclaimDeposit reverts once
+        // phase == 3, leaving an unminted deposit with no path out. That obligation is
+        // genuinely still outstanding, and the ledger's job is to keep reporting it rather
+        // than forgive what the vault cannot settle.
+        totalUsdcOwed = 0;
+        totalYesOwed = 0;
+        totalNoOwed = 0;
+        totalFeesUsdcOwed = 0;
+        totalFeesYesOwed = 0;
+        totalFeesNoOwed = 0;
+
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
         for (uint256 i = 0; i < count; i++) {
@@ -942,6 +1021,11 @@ contract LPVault {
         // `lp` field, because a valid signature over an intentId does not prove
         // ownership of it — see the mapping's declaration.
         pendingDeposits[intentId] = PendingDeposit({lp: lp, amount: _toUint96(usdcAmount)});
+
+        // The obligation enters the ledger in the same call that pulls the USDC backing
+        // it (FR-9BRD), so the two never disagree — and before the transfer, per the
+        // effects-then-interactions ordering NFR-9BRY requires of every ledger write.
+        totalEscrowed += usdcAmount;
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
@@ -1041,6 +1125,17 @@ contract LPVault {
         // can draw on an escrow that no longer exists.
         delete pendingDeposits[intentId];
 
+        // The pending-refund obligation is discharged, but nothing is forgiven: it
+        // changes form into a live position claim, which T-002 records on the principal
+        // totals in this same call (FR-9BRE). Safe against underflow (NFR-9BRT) because
+        // depositForIntent added exactly this amount and the equality check above proves
+        // `usdcAmount` is that amount.
+        totalEscrowed -= usdcAmount;
+        // ...and re-enters it as a position claim below, once the position record exists
+        // and its starting split can be computed (FR-9BR8). Both legs land in this one
+        // call, so the obligation is never double-counted across its two forms nor
+        // dropped between them.
+
         // Compute liquidity weight from USDC and range width
         // casting to uint256 is safe because tickUpper > tickLower is validated above
         // forge-lint: disable-next-line(unsafe-typecast)
@@ -1080,6 +1175,30 @@ contract LPVault {
         // Update active liquidity if the position is in-range
         if (tickLower <= currentTick && currentTick < tickUpper) {
             activeLiquidity += liquidity;
+        }
+
+        // Record the new obligation using the SAME split model the burn discharges it
+        // with (FR-9BR8), so credit and debit cannot disagree. Reading _owedAmounts here
+        // rather than crediting the raw `usdcAmount` is load-bearing on two counts:
+        //
+        //   1. A position minted while currentTick already sits inside its range is
+        //      split from its very first block — it owes outcome tokens immediately,
+        //      with no price movement at all. Crediting all-USDC would understate the
+        //      YES and NO obligations permanently, because updateTick only accumulates
+        //      shifts for segments it TRAVERSES and never revisits a range that was
+        //      already straddled at mint. That is a gap no later task closes.
+        //
+        //   2. `liquidity` above truncates, so the reconstructed principal can be
+        //      marginally below `usdcAmount`. Crediting the deposit would strand that
+        //      remainder as a phantom obligation surviving the position's own burn.
+        //
+        // Both make the ledger claim what the vault cannot pay, which is the exact
+        // failure FR-9BR5 and the conservation invariant (NFR-9BRX) exist to catch.
+        // Scoped so the two locals release their stack slots before the emit below —
+        // mintPositionFor is already close to the EVM's stack-depth limit.
+        {
+            (uint256 startingUsdc, uint256 startingOutcome) = _owedAmounts(positions[positionId]);
+            _creditPrincipal(startingUsdc, startingOutcome, startingOutcome);
         }
 
         // No interactions: the USDC backing this position was pulled at escrow time
@@ -1131,6 +1250,13 @@ contract LPVault {
 
         // Snapshot update: future collects start from here
         p.feeGrowthInsideLastX128 = feeGrowthInsideX128;
+
+        // Discharge the fee entitlement by what this call actually pays (FR-9BRB) —
+        // the transferred amount, not the pre-haircut figure T-006's ratio will scale
+        // from, so a haircut never erases an obligation the vault has not settled.
+        // Deliberately touches no principal total: a collect leaves the position's
+        // liquidity and range untouched, so its principal claim is unchanged (FR-9BR7).
+        totalFeesUsdcOwed = _saturatingSub(totalFeesUsdcOwed, owed);
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
@@ -1315,6 +1441,102 @@ contract LPVault {
         return uint256(int256(hi - lo));
     }
 
+    // ──────────────────────────────────────────────
+    // Solvency ledger — principal side (FEAT-9BQZ, UC-9BR0)
+    // ──────────────────────────────────────────────
+
+    /// @dev Records a new obligation on the principal side of the ledger (FR-9BR8).
+    ///
+    ///      The YES and NO legs are NOT always zero. A position minted while currentTick
+    ///      already sits inside its range is split from its first block, so mint records
+    ///      an outcome obligation with no price movement involved — see the call site in
+    ///      mintPositionFor for why that must come from the split model rather than from
+    ///      the deposit amount. Callers pass whatever split the model computes; this
+    ///      function fixes only that all three assets are tracked separately (FR-9BR5).
+    /// @param usdcAmt USDC principal the new obligation carries
+    /// @param yesAmt YES principal the new obligation carries
+    /// @param noAmt NO principal the new obligation carries
+    function _creditPrincipal(uint256 usdcAmt, uint256 yesAmt, uint256 noAmt) internal {
+        if (usdcAmt > 0) totalUsdcOwed += usdcAmt;
+        if (yesAmt > 0) totalYesOwed += yesAmt;
+        if (noAmt > 0) totalNoOwed += noAmt;
+    }
+
+    /// @dev Discharges an obligation from the principal side by what a payout actually
+    ///      paid out (FR-9BR9).
+    ///
+    ///      Saturates at zero rather than reverting on underflow, and that choice is
+    ///      load-bearing rather than defensive. NFR-9BRU forbids any ledger write from
+    ///      introducing a revert into an exit path, and burnPosition in particular is the
+    ///      unconditional escape hatch FEAT-7G40 guarantees. A checked subtraction here
+    ///      would turn any ledger drift into a bricked withdrawal — converting an
+    ///      accounting error into trapped LP capital, the single outcome this feature
+    ///      exists to prevent. An obligation cannot be negative, so clamping is also the
+    ///      arithmetically correct floor. Drift is caught by the conservation invariants
+    ///      (NFR-9BRX), where finding it costs nobody their exit.
+    /// @param usdcAmt USDC principal being discharged
+    /// @param yesAmt YES principal being discharged
+    /// @param noAmt NO principal being discharged
+    function _debitPrincipal(uint256 usdcAmt, uint256 yesAmt, uint256 noAmt) internal {
+        totalUsdcOwed = _saturatingSub(totalUsdcOwed, usdcAmt);
+        totalYesOwed = _saturatingSub(totalYesOwed, yesAmt);
+        totalNoOwed = _saturatingSub(totalNoOwed, noAmt);
+    }
+
+    /// @dev Subtraction with a floor at zero, for the ledger decrements that must never
+    ///      revert an exit path (NFR-9BRU). See _debitPrincipal for the full reasoning.
+    function _saturatingSub(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a > b ? a - b : 0;
+    }
+
+    // ──────────────────────────────────────────────
+    // Solvency ledger — price movement (FEAT-9BQZ, UC-9BR1)
+    // ──────────────────────────────────────────────
+
+    /// @dev Moves the principal one traversed tick span converted from one asset side to
+    ///      the other (FR-9BRL). Every position spanning the segment converts the same
+    ///      per-tick amount, so the vault-wide shift is the identical interpolation
+    ///      _owedAmounts performs per position — `liquidity * span / LIQUIDITY_PRECISION`
+    ///      — evaluated against `activeLiquidity`. Sharing the formula is what keeps the
+    ///      totals equal to the summed splits a later burn will discharge them by.
+    ///
+    ///      The span is passed as an ordered pair with the direction separate, because
+    ///      updateTick's two branches walk their segments from opposite ends.
+    ///
+    ///      The clamp does more than keep the decrement safe (NFR-9BRT): a saturating
+    ///      debit paired with an unconditional credit would manufacture principal on the
+    ///      destination side, breaking the conservation FR-9BRL requires. Bounding the
+    ///      shift by what the origin actually holds keeps both legs equal in every state.
+    /// @param segLower Lower tick of the traversed span
+    /// @param segUpper Upper tick of the traversed span
+    /// @param toOutcome True when the price rose across the span, so USDC principal
+    ///        converts to outcome inventory; false when it fell and the conversion reverses
+    function _shiftPrincipal(int24 segLower, int24 segUpper, bool toOutcome) internal {
+        uint128 liquidity = activeLiquidity;
+
+        // An empty span is an ordinary tail case rather than an anomaly: a move landing
+        // exactly on the tick it last crossed leaves nothing behind it to accumulate.
+        if (liquidity == 0 || segUpper <= segLower) return;
+
+        uint256 shift = uint256(liquidity) * _tickSpan(segLower, segUpper) / LIQUIDITY_PRECISION;
+
+        if (toOutcome) {
+            if (shift > totalUsdcOwed) shift = totalUsdcOwed;
+            totalUsdcOwed -= shift;
+            // The outcome leg is a complete set, so both ids take the same credit.
+            totalYesOwed += shift;
+            totalNoOwed += shift;
+        } else {
+            // ...and on the way back the pair is the binding constraint, so the clamp
+            // reads whichever leg holds less.
+            uint256 available = totalYesOwed < totalNoOwed ? totalYesOwed : totalNoOwed;
+            if (shift > available) shift = available;
+            totalYesOwed -= shift;
+            totalNoOwed -= shift;
+            totalUsdcOwed += shift;
+        }
+    }
+
     /// @dev The one burn body both entry points run (FR-7G4L). Assumes the caller has
     ///      already run `_requireBurnable` and applied its own authorization check.
     ///
@@ -1357,6 +1579,17 @@ contract LPVault {
         // the id is retired rather than recycled (FR-7G4T) — reuse would let a stale
         // off-chain reference resolve to a different LP's position.
         delete positions[positionId];
+
+        // Discharge the principal this burn is about to pay (FR-9BR9), using the split at
+        // burn time rather than the split recorded at mint — price movement has been
+        // redistributing it ever since. The outcome leg is a complete set, the same
+        // amount of each id, so it discharges YES and NO equally. Still in the effects
+        // phase, before any transfer, per NFR-9BRY.
+        _debitPrincipal(usdcOwed, outcomeOwed, outcomeOwed);
+
+        // A burn settles the fee entitlement in the same call as the principal (FR-9BRC),
+        // which is why no separate collect is needed to retire it.
+        totalFeesUsdcOwed = _saturatingSub(totalFeesUsdcOwed, feesOwed);
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
@@ -1506,6 +1739,12 @@ contract LPVault {
         uint256 refund = deposit.amount;
         delete pendingDeposits[intentId];
 
+        // Discharge the obligation by what is actually being refunded (FR-9BRF). This
+        // sits in Phase 2 deliberately: Phase 1 above records a timestamp and returns
+        // without moving money, so decrementing there would understate what the vault
+        // owes for the whole 24-hour timelock while the USDC is still in the vault.
+        totalEscrowed -= refund;
+
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
         _safeTransfer(usdc, lp, refund);
@@ -1607,6 +1846,10 @@ contract LPVault {
         uint256 refund = deposit.amount;
         delete pendingDeposits[intentId];
 
+        // Same Phase-2-only placement and the same reasoning as reclaimDeposit above
+        // (FR-9BRF): both paths pay the same refund, so both discharge the obligation.
+        totalEscrowed -= refund;
+
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
         // Funds go to the recorded depositor, never to msg.sender.
@@ -1643,6 +1886,17 @@ contract LPVault {
         // precision, truncating downward. The dust is economically negligible
         // (< 1/2^128 USDC per unit of liquidity per call).
         feeGrowthGlobalX128 += _mulDiv(amount, Q128, uint256(activeL));
+
+        // Record the fee entitlement this notification creates (FR-9BRA). Only the USDC
+        // total moves: notifyFees carries a single amount and collect pays USDC, so which
+        // asset a fee arrived in is not expressible until FEAT-TOGR changes this signature.
+        //
+        // The full `amount` is credited even though the Q128 division above truncates, so
+        // LPs can collectively claim marginally less. That is self-consistent rather than
+        // an overstatement: the Operator deposited the whole amount, so the vault's balance
+        // keeps the dust and this total keeps the same dust. The payout ratio computed from
+        // the two (FR-9BRM) therefore stays accurate, and the residue errs conservative.
+        totalFeesUsdcOwed += amount;
 
         emit FeesNotified(amount, feeGrowthGlobalX128);
     }
@@ -1688,6 +1942,20 @@ contract LPVault {
     ///      genuinely huge single-call jump across real empty space can still be
     ///      expensive, so the Operator is expected to chunk large moves, the same way
     ///      MAX_TICK_CROSSINGS already forces chunking on the crossings themselves.
+    ///
+    ///      MEV analysis: this call now touches the solvency ledger, moving principal
+    ///      between the USDC and outcome totals for every span it traverses (FR-9BRL).
+    ///      It moves no asset and creates no claim, so there is nothing to sandwich for
+    ///      profit; what an observer gains is foreknowledge of the payout ratios, since
+    ///      the totals it rewrites are their denominators. That is not exploitable here:
+    ///      the shift conserves principal in token terms, so a traversal cannot push a
+    ///      covered asset into shortfall, and a claimant racing ahead of one still takes
+    ///      the same pooled per-asset haircut as everyone behind them (ADR-9BSH).
+    ///      Chunking a move across several calls does NOT currently reach the same totals
+    ///      as one call: each segment's shift truncates independently, so the Operator's
+    ///      choice of chunk boundaries perturbs the ratio denominators by dust. The
+    ///      pending scaled-total representation removes that degree of freedom; until it
+    ///      lands, treat the chunking as Operator-influenceable at dust scale.
     /// @param newTick The new price tick to set
     function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
         // Phase check: only Active vaults accept tick updates
@@ -1700,6 +1968,12 @@ contract LPVault {
         uint256 crossCount = 0;
         int24 tick = oldTick;
 
+        // End of the last span accumulated into the ledger. It tracks the price, not the
+        // bitmap cursor: the left-moving branch steps `tick` one past the tick it just
+        // crossed so the search cannot re-find it, and taking a span boundary from that
+        // cursor would silently drop one tick of conversion per crossing.
+        int24 segmentStart = oldTick;
+
         if (movingRight) {
             // Cross every initialized tick in (oldTick, newTick]
             while (tick < newTick) {
@@ -1708,7 +1982,12 @@ contract LPVault {
 
                 crossCount++;
                 if (crossCount > MAX_TICK_CROSSINGS) revert TooManyTicksCrossed();
+                // Accumulated BEFORE the crossing, per FR-9BRI: this span was traversed
+                // under the liquidity active up to `next`, not under the liquidity that
+                // `next` is about to add or remove.
+                _shiftPrincipal(segmentStart, next, true);
                 _crossTick(next, true);
+                segmentStart = next;
                 tick = next;
             }
         } else {
@@ -1719,9 +1998,21 @@ contract LPVault {
 
                 crossCount++;
                 if (crossCount > MAX_TICK_CROSSINGS) revert TooManyTicksCrossed();
+                _shiftPrincipal(next, segmentStart, false);
                 _crossTick(next, false);
+                segmentStart = next;
                 tick = next - 1;
             }
+        }
+
+        // The span from the last crossing to newTick (FR-9BRJ). Most moves do not land on
+        // an initialized tick, so this is the common case rather than an edge case — and
+        // when the loop crossed nothing it is the whole move, which is the only
+        // accumulation an update inside a single gap performs (FR-9BRK).
+        if (movingRight) {
+            _shiftPrincipal(segmentStart, newTick, true);
+        } else {
+            _shiftPrincipal(newTick, segmentStart, false);
         }
 
         currentTick = newTick;
@@ -1744,6 +2035,22 @@ contract LPVault {
     ///      No USDC moves during merge — uncollected fees from consumed positions are
     ///      rolled into the survivor's tokensOwed. Tick state (liquidityGross,
     ///      liquidityNet) is unchanged since total liquidity on the range stays the same.
+    ///
+    ///      SOLVENCY LEDGER: this function deliberately writes no ledger total (FR-9BRH).
+    ///      No assets move, the range is unchanged, and fees are rolled up rather than
+    ///      paid, so the vault's obligations are the same before and after.
+    ///
+    ///      It is nonetheless the one path where the totals and the positions behind them
+    ///      legitimately disagree. A position's principal is never stored — `_owedAmounts`
+    ///      reconstructs it from the truncated `liquidity` — so combining N positions'
+    ///      liquidity into one record collapses N downward truncations into one, and the
+    ///      survivor can claim up to one base unit per asset leg more than each position
+    ///      it consumed contributed. The totals are NOT adjusted to compensate: doing so
+    ///      would make merge a ledger writer, which is exactly what FR-9BRH refuses.
+    ///      The drift understates obligations, so the payout ratios read marginally more
+    ///      solvent than the vault is; it is bounded by the count of positions ever merged
+    ///      away and carried as an explicit tolerance in NFR-9BRX's conservation
+    ///      invariant. Reasoning and the rejected alternative are in ADR-9Q3Y.
     /// @param positionIds Array of position IDs to merge — must have >= 2 elements,
     ///        all sharing the same owner, tickLower, and tickUpper
     function mergePositions(uint256[] calldata positionIds)
