@@ -92,6 +92,7 @@ contract LPVaultFactory {
     error NotPendingAdmin();
     error ZeroAddress();
     error AlreadyAdmin();
+    error CannotRemoveLastAdmin();
     error NoPendingSchedule();
     error ScheduleAlreadyPending();
     error TimelockNotElapsed();
@@ -341,15 +342,62 @@ contract LPVaultFactory {
         emit AdminTransferProposed(msg.sender, newAdmin);
     }
 
-    // SC-REQG: second step — proposed admin claims the role
+    // SC-REQG, SC-5UJR: second step — proposed admin claims the role
     /// @notice Completes the two-step admin transfer. Only callable by the pending admin.
     function acceptAdmin() external {
         if (msg.sender != pendingAdmin) revert NotPendingAdmin();
+        // addAdmin can grant the role after transferAdmin proposed it. Accepting
+        // again would count the same admin twice in adminCount.
+        if (admins[msg.sender] == 1) revert AlreadyAdmin();
 
         admins[msg.sender] = 1;
         adminCount += 1;
         pendingAdmin = address(0);
 
         emit NewAdmin(msg.sender, msg.sender);
+    }
+
+    // SC-5UJF, SC-5UJG, SC-5UJH: one-step admin grant
+    /// @notice Grants the admin role to an address. Only callable by an admin.
+    /// @dev A repeated add changes no state but still emits NewAdmin, so that
+    ///      adminCount never counts one address twice.
+    /// @param admin_ Address to grant the admin role — must not be zero
+    function addAdmin(address admin_) external onlyAdmin {
+        if (admin_ == address(0)) revert ZeroAddress();
+        if (admins[admin_] != 1) {
+            admins[admin_] = 1;
+            adminCount++;
+        }
+        emit NewAdmin(admin_, msg.sender);
+    }
+
+    // SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJO, SC-5UJP: revoke another admin
+    /// @notice Revokes the admin role of an address. Only callable by an admin.
+    /// @dev Vaults read admins() from this factory at call time, so the removed
+    ///      address loses admin rights on every vault in the same block.
+    ///      Removing an address that holds no role changes no role state but still emits RemovedAdmin.
+    ///      A pending admin proposal to the address is withdrawn in both cases (ADR-5UJS).
+    /// @param admin Address whose admin role is revoked
+    function removeAdmin(address admin) external onlyAdmin {
+        if (admins[admin] == 1) {
+            if (adminCount <= 1) revert CannotRemoveLastAdmin();
+            admins[admin] = 0;
+            adminCount--;
+        }
+        // A removed address must not complete an earlier transferAdmin proposal.
+        if (pendingAdmin == admin) pendingAdmin = address(0);
+        emit RemovedAdmin(admin, msg.sender);
+    }
+
+    // SC-5UJM, SC-5UJN, SC-5UJQ: caller gives up its own admin role
+    /// @notice Revokes the caller's admin role. Reverts if the caller is the last admin.
+    /// @dev A pending admin proposal to the caller is withdrawn (ADR-5UJS).
+    function renounceAdminRole() external onlyAdmin {
+        if (adminCount <= 1) revert CannotRemoveLastAdmin();
+        admins[msg.sender] = 0;
+        adminCount--;
+        // A renounced address must not complete an earlier transferAdmin proposal.
+        if (pendingAdmin == msg.sender) pendingAdmin = address(0);
+        emit RemovedAdmin(msg.sender, msg.sender);
     }
 }
