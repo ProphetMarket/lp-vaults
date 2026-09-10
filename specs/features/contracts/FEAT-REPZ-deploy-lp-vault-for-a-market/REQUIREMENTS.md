@@ -4,7 +4,7 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 3
+version: 4
 refs: []
 ---
 
@@ -26,7 +26,7 @@ refs: []
 |-------|------|-------|
 | Factory Owner | Deploys LPVaultFactory with implementation address and initial role assignments | One-time deployment; after deployment, role management passes to Admin |
 | Oracle | Calls `createVault(marketId, tickSpacing)` to deploy per-market vaults | Single wallet (`address public oracle`); MUST be separate from Operator |
-| Admin | Manages role registry on factory: add/remove operators, set oracle, two-step admin transfer, pause | Registry-only; cannot call user-facing vault functions |
+| Admin | Manages role registry on factory: add/remove operators, set oracle, two-step admin transfer, add/remove/renounce admins, pause | Registry-only; cannot call user-facing vault functions |
 | Operator | Registered in role registry for transactional use by later features | Not invoked in this feature; gated by `onlyOperator` modifier |
 
 ## Functional Requirements
@@ -157,8 +157,36 @@ Linked to: UC-REQ2
 Fit Criterion: Given the pending admin calls `acceptAdmin()`, `admins[caller] == 1`, `adminCount` incremented, and `pendingAdmin == address(0)`.
 Linked to: UC-REQ2
 
-**FR-REQZ** `If a non-Admin address calls addOperator, removeOperator, setOracle, or transferAdmin, then the system shall revert.`
+**FR-REQZ** `If a non-Admin address calls addOperator, removeOperator, setOracle, transferAdmin, addAdmin, removeAdmin, or renounceAdminRole, then the system shall revert.`
 Fit Criterion: Given a non-Admin caller, the call reverts with a NotAdmin error.
+Linked to: UC-REQ2
+
+**FR-5UJ8** `When an Admin calls addAdmin with a non-zero address that does not hold the admin role, the system shall grant that address the admin role and increment adminCount.`
+Fit Criterion: Given Y does not hold the admin role, after an Admin calls `addAdmin(Y)`, `admins[Y] == 1`, `adminCount` has increased by 1, and `NewAdmin(Y, caller)` is emitted. Given X already holds the admin role, `addAdmin(X)` leaves `adminCount` unchanged and still emits `NewAdmin(X, caller)`.
+Linked to: UC-REQ2
+
+**FR-5UJ9** `If an Admin calls addAdmin with the zero address, then the system shall revert.`
+Fit Criterion: Given an Admin calls `addAdmin(address(0))`, the call reverts with `ZeroAddress` and `adminCount` is unchanged.
+Linked to: UC-REQ2
+
+**FR-5UJA** `When an Admin calls removeAdmin with an address that holds the admin role, the system shall revoke that role and decrement adminCount.`
+Fit Criterion: Given admins A and X with `adminCount == 2`, after A calls `removeAdmin(X)`, `admins[X] == 0`, `adminCount == 1`, and `RemovedAdmin(X, A)` is emitted. In the next call, X is rejected by `onlyAdmin` on the factory and on every vault that the factory deployed. Given Y does not hold the admin role, `removeAdmin(Y)` does not revert, leaves `adminCount` unchanged, and still emits `RemovedAdmin(Y, caller)`.
+Linked to: UC-REQ2
+
+**FR-5UJB** `When an Admin calls renounceAdminRole, the system shall revoke the caller's admin role and decrement adminCount.`
+Fit Criterion: Given admins A and X with `adminCount == 2`, after X calls `renounceAdminRole()`, `admins[X] == 0`, `adminCount == 1`, and `RemovedAdmin(X, X)` is emitted.
+Linked to: UC-REQ2
+
+**FR-5UJC** `If removeAdmin or renounceAdminRole would revoke the role of the only remaining admin, then the system shall revert.`
+Fit Criterion: Given `adminCount == 1`, `removeAdmin(onlyAdmin)` and `renounceAdminRole()` both revert with `CannotRemoveLastAdmin`. `adminCount >= 1` in every reachable state.
+Linked to: UC-REQ2
+
+**FR-5UJD** `When an Admin calls removeAdmin or renounceAdminRole for an address that is the pending admin, the system shall clear pendingAdmin.`
+Fit Criterion: Given `pendingAdmin == X`, after `removeAdmin(X)` or after X calls `renounceAdminRole()`, `pendingAdmin == address(0)` and `acceptAdmin()` from X reverts with `NotPendingAdmin`. The rule applies whether or not X holds the admin role.
+Linked to: UC-REQ2
+
+**FR-5UJE** `If the pending admin calls acceptAdmin while it already holds the admin role, then the system shall revert.`
+Fit Criterion: Given `pendingAdmin == X` and `admins[X] == 1`, `acceptAdmin()` from X reverts with `AlreadyAdmin`, `adminCount` is unchanged, and `pendingAdmin` stays X.
 Linked to: UC-REQ2
 
 ## Non-Functional Requirements
@@ -184,6 +212,6 @@ Linked to: UC-REQ2
 - The vault accepts inbound ERC-1155 transfers from its own ConditionalTokens contract and rejects receiver-hook calls from every other address
 - Forge fmt passes; no console.log in production code
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
-- Factory role rotation (addOperator, removeOperator, setOracle, transferAdmin/acceptAdmin) propagates immediately to all existing vaults deployed by that factory
+- Factory role rotation (addOperator, removeOperator, setOracle, transferAdmin/acceptAdmin, addAdmin, removeAdmin, renounceAdminRole) propagates immediately to all existing vaults deployed by that factory
 - Vault clones contain no local role state (operators, oracle, admins, pendingAdmin, adminCount) -- all authorization delegated to factory
 - FEATURES.md status is `implemented`

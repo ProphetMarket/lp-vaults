@@ -2,8 +2,8 @@
 id: FEAT-REPZ
 name: Deploy LP Vault for a Market
 use_cases: [UC-REQ0, UC-REQ1, UC-REQ2]
-scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5]
-last_update: 2026-08-01
+scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5, SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN, SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR]
+last_update: 2026-09-10
 ---
 
 # Architecture: Deploy LP Vault for a Market
@@ -122,6 +122,8 @@ erDiagram
 - `minimumFirstLiquidity > 0` always -- enforced at `initialize()` and on every `setMinimumFirstLiquidity()` call; the floor cannot be disabled
 - Every successful ERC-1155 receiver-hook invocation on a vault has `msg.sender == conditionalTokens` -- the vault never acknowledges tokens from any other ERC-1155 contract
 - The receiver hooks are pure with respect to vault state -- no position, tick, or fee-accumulator storage is written by an inbound transfer
+- `adminCount` equals the number of addresses with `admins[x] == 1` on the factory
+- A removed or renounced address cannot regain the admin role without a new `transferAdmin` or `addAdmin` call by a current Admin
 
 ## Component Inventory
 
@@ -133,6 +135,7 @@ erDiagram
 | `src/LPVault.sol` | Per-market vault implementation (clone target) | `initialize()`, position/tick/fee state, vault-level Auth |
 | `test/LPVaultFactory.t.sol` | Unit + integration tests for factory | Factory deployment, vault creation, role management scenarios |
 | `test/LPVault.t.sol` | Unit tests for vault initialization | Initialization guards, approval setup, ghost position |
+| `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ2-manage-roles-on-factory.t.sol` | Integration tests for Manage Roles on Factory | Operator, oracle, and admin role management scenarios, and role propagation to vaults |
 
 ## Event Topology
 
@@ -142,8 +145,8 @@ erDiagram
 |-------|-----------|---------|-----------|-----------|
 | `VaultCreated(bytes32 indexed marketId, address vault, uint128 minimumFirstLiquidity)` | LPVaultFactory | `marketId, vaultAddress, minimumFirstLiquidity` | On successful `createVault()` | Off-chain Event Listener |
 | `MinimumFirstLiquidityUpdated(uint128 oldMin, uint128 newMin)` | LPVault | `oldMin, newMin` | On successful `setMinimumFirstLiquidity()` | Off-chain monitoring |
-| `NewAdmin(address indexed admin, address indexed caller)` | LPVaultFactory / LPVault | `admin, caller` | On `addAdmin()` or `acceptAdmin()` | Off-chain monitoring |
-| `RemovedAdmin(address indexed admin, address indexed caller)` | LPVaultFactory / LPVault | `admin, caller` | On `removeAdmin()` or `renounceAdminRole()` | Off-chain monitoring |
+| `NewAdmin(address indexed admin, address indexed caller)` | LPVaultFactory | `admin, caller` | On `addAdmin()` or `acceptAdmin()` | Off-chain monitoring |
+| `RemovedAdmin(address indexed admin, address indexed caller)` | LPVaultFactory | `admin, caller` | On `removeAdmin()` or `renounceAdminRole()` | Off-chain monitoring |
 | `NewOperator(address indexed operator, address indexed caller)` | LPVaultFactory / LPVault | `operator, caller` | On `addOperator()` | Off-chain monitoring |
 | `RemovedOperator(address indexed operator, address indexed caller)` | LPVaultFactory / LPVault | `operator, caller` | On `removeOperator()` | Off-chain monitoring |
 | `AdminTransferProposed(address indexed currentAdmin, address indexed proposedAdmin)` | LPVaultFactory / LPVault | `currentAdmin, proposedAdmin` | On `transferAdmin()` | Off-chain monitoring |
@@ -166,6 +169,9 @@ erDiagram
 | call | `LPVaultFactory.setOracle(address)` | `setOracle` | onlyAdmin | `newOracle` | void | NotAdmin, RoleSeparation |
 | call | `LPVaultFactory.transferAdmin(address)` | `transferAdmin` | onlyAdmin | `newAdmin` | void | NotAdmin, ZeroAddress, AlreadyAdmin |
 | call | `LPVaultFactory.acceptAdmin()` | `acceptAdmin` | pendingAdmin only | none | void | NotPendingAdmin, AlreadyAdmin |
+| call | `LPVaultFactory.addAdmin(address)` | `addAdmin` | onlyAdmin | `admin_` | void | NotAdmin, ZeroAddress |
+| call | `LPVaultFactory.removeAdmin(address)` | `removeAdmin` | onlyAdmin | `admin` | void | NotAdmin, CannotRemoveLastAdmin |
+| call | `LPVaultFactory.renounceAdminRole()` | `renounceAdminRole` | onlyAdmin | none | void | NotAdmin, CannotRemoveLastAdmin |
 | call | `LPVault.initialize(...)` | `initialize` | onlyFactory | `marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity` | void | AlreadyInitialized, NotFactory, ZeroFloor |
 | call | `LPVault.onERC1155Received(address,address,uint256,uint256,bytes)` | `onERC1155Received` | onlyConditionalTokens | `operator, from, id, value, data` | `bytes4` (`0xf23a6e61`) | NotConditionalTokens |
 | call | `LPVault.onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)` | `onERC1155BatchReceived` | onlyConditionalTokens | `operator, from, ids, values, data` | `bytes4` (`0xbc197c81`) | NotConditionalTokens |
@@ -221,16 +227,29 @@ stateDiagram-v2
 | SC-3WLM | Vault accepts batch ERC-1155 transfer | `src/LPVault.sol:onERC1155BatchReceived()` |
 | SC-3WLN | Receiver hook from non-ConditionalTokens reverts | `src/LPVault.sol:onERC1155Received()`, `src/LPVault.sol:onERC1155BatchReceived()`, `src/LPVault.sol:onlyConditionalTokens` |
 | SC-3WLO | Vault reports IERC1155Receiver support | `src/LPVault.sol:supportsInterface()` |
-| UC-REQ2 | Manage Roles on Factory | `src/LPVaultFactory.sol:addOperator()`, `src/LPVaultFactory.sol:removeOperator()`, `src/LPVaultFactory.sol:setOracle()`, `src/LPVaultFactory.sol:transferAdmin()`, `src/LPVaultFactory.sol:acceptAdmin()` |
+| UC-REQ2 | Manage Roles on Factory | `src/LPVaultFactory.sol:addOperator()`, `src/LPVaultFactory.sol:removeOperator()`, `src/LPVaultFactory.sol:setOracle()`, `src/LPVaultFactory.sol:transferAdmin()`, `src/LPVaultFactory.sol:acceptAdmin()`, `src/LPVaultFactory.sol:addAdmin()`, `src/LPVaultFactory.sol:removeAdmin()`, `src/LPVaultFactory.sol:renounceAdminRole()` |
 | SC-REQB | Add operator successfully | `src/LPVaultFactory.sol:addOperator()` |
 | SC-REQC | Add operator revert (oracle) | `src/LPVaultFactory.sol:addOperator()` |
 | SC-REQD | Remove operator | `src/LPVaultFactory.sol:removeOperator()` |
 | SC-REQE | Set oracle successfully | `src/LPVaultFactory.sol:setOracle()` |
 | SC-REQF | Set oracle revert (operator) | `src/LPVaultFactory.sol:setOracle()` |
 | SC-REQG | Two-step admin transfer | `src/LPVaultFactory.sol:transferAdmin()`, `src/LPVaultFactory.sol:acceptAdmin()` |
-| SC-REQH | Non-admin revert | `src/LPVaultFactory.sol:addOperator()`, `src/LPVaultFactory.sol:removeOperator()`, `src/LPVaultFactory.sol:setOracle()`, `src/LPVaultFactory.sol:transferAdmin()` |
+| SC-REQH | Non-admin revert | `src/LPVaultFactory.sol:addOperator()`, `src/LPVaultFactory.sol:removeOperator()`, `src/LPVaultFactory.sol:setOracle()`, `src/LPVaultFactory.sol:transferAdmin()`, `src/LPVaultFactory.sol:addAdmin()`, `src/LPVaultFactory.sol:removeAdmin()`, `src/LPVaultFactory.sol:renounceAdminRole()` |
 | SC-FKD4 | Operator rotation propagates to existing vaults | `src/LPVaultFactory.sol:removeOperator()`, `src/LPVaultFactory.sol:addOperator()`, `src/LPVault.sol:onlyOperator` |
 | SC-FKD5 | Oracle rotation propagates to existing vaults | `src/LPVaultFactory.sol:setOracle()`, `src/LPVault.sol:onlyOracle` |
+| SC-5UJF | Add admin successfully | `src/LPVaultFactory.sol:addAdmin()` |
+| SC-5UJG | Add admin zero-address revert | `src/LPVaultFactory.sol:addAdmin()` |
+| SC-5UJH | Add admin for an existing admin | `src/LPVaultFactory.sol:addAdmin()` |
+| SC-5UJI | Remove admin successfully | `src/LPVaultFactory.sol:removeAdmin()` |
+| SC-5UJJ | Remove admin last-admin revert | `src/LPVaultFactory.sol:removeAdmin()` |
+| SC-5UJK | Remove admin on a non-admin address | `src/LPVaultFactory.sol:removeAdmin()` |
+| SC-5UJL | Admin removal propagates to existing vaults | `src/LPVaultFactory.sol:removeAdmin()`, `src/LPVault.sol:onlyAdmin` |
+| SC-5UJM | Renounce admin role successfully | `src/LPVaultFactory.sol:renounceAdminRole()` |
+| SC-5UJN | Renounce admin role last-admin revert | `src/LPVaultFactory.sol:renounceAdminRole()` |
+| SC-5UJO | Removing an admin withdraws its pending proposal | `src/LPVaultFactory.sol:removeAdmin()`, `src/LPVaultFactory.sol:acceptAdmin()` |
+| SC-5UJP | Removing a proposed-only address withdraws its proposal | `src/LPVaultFactory.sol:removeAdmin()`, `src/LPVaultFactory.sol:acceptAdmin()` |
+| SC-5UJQ | Renouncing withdraws the caller's pending proposal | `src/LPVaultFactory.sol:renounceAdminRole()`, `src/LPVaultFactory.sol:acceptAdmin()` |
+| SC-5UJR | Accept admin already-admin revert | `src/LPVaultFactory.sol:acceptAdmin()` |
 
 ## Architecture Decisions
 
@@ -251,6 +270,11 @@ In the context of the vault holding ERC-1155 outcome tokens acquired through exc
 **Rejected alternative -- ghost position:** We initially considered minting a permanently-locked full-range "ghost" position funded by the Oracle (~1000 USDC per vault) to keep `activeLiquidity > 0` from block one. Rejected because Prophet currently runs hundreds of markets, most of which will never see a second LP; locking ~1000 USDC into each vault is not insurance, it's a tax on every market's existence. Operator gating gives equivalent attack resistance with zero locked capital.
 
 **Rejected alternative -- LP allowlist (separate `lps` role):** We considered adding a fourth role to the Auth registry so only allowlisted LPs could mint. Rejected because the Operator already vets every position credit under the operator-executes-all model -- adding an `lps` mapping duplicates that gate without adding security.
+
+**ADR-5UJS:** Removal withdraws a pending admin proposal
+In the context of porting `addAdmin`, `removeAdmin`, and `renounceAdminRole` from ctf-exchange `Auth.sol`, facing a path where `transferAdmin(X)`, then `addAdmin(X)`, then `removeAdmin(X)` leaves `pendingAdmin == X` so that X can call `acceptAdmin()` and regain the role, we decided that `removeAdmin` and `renounceAdminRole` clear `pendingAdmin` when it equals the removed address. This keeps removal final, which is the purpose of audit issue 6.8 ("Admin transfer does not remove the old admin"). We accept one departure from the audited reference: one extra line in each of the two functions, and one extra storage read per call.
+
+**Rejected alternative -- clear `pendingAdmin` in `addAdmin`:** This also closes the reinstatement path. Rejected because a proposed-only address would still be able to accept the role after an Admin calls `removeAdmin` on it.
 
 ## Testing Decisions
 
