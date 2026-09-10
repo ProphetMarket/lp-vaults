@@ -329,6 +329,7 @@ The **Admin** should immediately:
 1. Confirm the initial operator and oracle are set correctly by calling `operators(<address>)` and `oracle()` on the factory.
 2. Review the `adminCount` — it should be `1`.
 3. Transfer admin if needed via the two-step `transferAdmin` / `acceptAdmin` flow.
+4. After a transfer, call `removeAdmin(<old admin address>)` from the new admin. `acceptAdmin` adds the new admin but does not remove the old one, so the old key keeps full admin rights on the factory and on every vault until it is removed.
 
 ---
 

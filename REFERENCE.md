@@ -782,7 +782,7 @@ sequenceDiagram
     participant Factory as LPVaultFactory
 
     NewAdmin->>Factory: acceptAdmin()
-    Note right of Factory: Checks: msg.sender == pendingAdmin
+    Note right of Factory: Checks:<br/>msg.sender == pendingAdmin<br/>admins[msg.sender] != 1
     Note right of Factory: admins[msg.sender] = 1<br/>adminCount += 1<br/>pendingAdmin = 0
     Note right of Factory: NewAdmin event emitted
 ```
@@ -791,6 +791,110 @@ sequenceDiagram
 
 **Reverts:**
 - `NotPendingAdmin()` — caller is not the current `pendingAdmin`
+- `AlreadyAdmin()` — caller already holds the admin role, because `addAdmin` granted it after `transferAdmin` proposed it
+
+A transfer adds the new admin. It does not remove the old admin. To finish a key rotation, the new admin calls `removeAdmin` on the old address.
+
+---
+
+### `LPVaultFactory.addAdmin`
+
+```solidity
+function addAdmin(address admin_) external onlyAdmin
+```
+
+**Actor:** Admin
+
+Grants the admin role to `admin_` in one step. If `admin_` already holds the role, the call changes no state but still emits `NewAdmin`. For a key that has not yet proven it can sign, use the two-step `transferAdmin` / `acceptAdmin` flow instead.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `admin_` | `address` | Wallet to grant the admin role; must not be address(0) |
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Factory as LPVaultFactory
+
+    Admin->>Factory: addAdmin(admin_)
+    Note right of Factory: Checks:<br/>admins[msg.sender] == 1<br/>admin_ != address(0)
+    Note right of Factory: If admins[admin_] != 1:<br/>admins[admin_] = 1<br/>adminCount += 1
+    Note right of Factory: NewAdmin event emitted
+```
+
+**Events:** `NewAdmin(address indexed newAdminAddress, address indexed admin)`
+
+**Reverts:**
+- `NotAdmin()` — caller is not a registered admin
+- `ZeroAddress()` — `admin_` is address(0)
+
+---
+
+### `LPVaultFactory.removeAdmin`
+
+```solidity
+function removeAdmin(address admin) external onlyAdmin
+```
+
+**Actor:** Admin
+
+Revokes the admin role of `admin`. Vaults read the factory's admin registry at call time, so the address loses admin rights on every vault in the same block. If `admin` is the pending admin, the proposal is withdrawn, so the address cannot complete an earlier `transferAdmin`. If `admin` holds no role, the call changes no role state but still emits `RemovedAdmin`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `admin` | `address` | Wallet whose admin role is revoked |
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Factory as LPVaultFactory
+
+    Admin->>Factory: removeAdmin(admin)
+    Note right of Factory: Checks: admins[msg.sender] == 1
+    Note right of Factory: If admins[admin] == 1:<br/>adminCount must be at least 2<br/>admins[admin] = 0<br/>adminCount -= 1
+    Note right of Factory: If pendingAdmin == admin:<br/>pendingAdmin = 0
+    Note right of Factory: RemovedAdmin event emitted
+```
+
+**Events:** `RemovedAdmin(address indexed removedAdmin, address indexed admin)`
+
+**Reverts:**
+- `NotAdmin()` — caller is not a registered admin
+- `CannotRemoveLastAdmin()` — `admin` holds the role and is the only remaining admin
+
+---
+
+### `LPVaultFactory.renounceAdminRole`
+
+```solidity
+function renounceAdminRole() external onlyAdmin
+```
+
+**Actor:** Admin (self)
+
+Revokes the caller's own admin role. If the caller is the pending admin, the proposal is withdrawn. The last remaining admin cannot renounce.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| — | — | No parameters |
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Factory as LPVaultFactory
+
+    Admin->>Factory: renounceAdminRole()
+    Note right of Factory: Checks:<br/>admins[msg.sender] == 1<br/>adminCount must be at least 2
+    Note right of Factory: admins[msg.sender] = 0<br/>adminCount -= 1
+    Note right of Factory: If pendingAdmin == msg.sender:<br/>pendingAdmin = 0
+    Note right of Factory: RemovedAdmin event emitted
+```
+
+**Events:** `RemovedAdmin(address indexed removedAdmin, address indexed admin)`
+
+**Reverts:**
+- `NotAdmin()` — caller is not a registered admin
+- `CannotRemoveLastAdmin()` — caller is the only remaining admin
 
 ---
 

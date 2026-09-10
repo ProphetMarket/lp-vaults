@@ -369,9 +369,16 @@ sequenceDiagram
     Note over NewAdmin,Factory: Two-step admin transfer (step 2, different tx from newAdminAddr)
     NewAdmin->>Factory: acceptAdmin()
     Note right of Factory: admins[newAdminAddr] = 1<br/>adminCount += 1<br/>pendingAdmin = 0
+
+    Note over NewAdmin,Factory: Finish the rotation: remove the old admin
+    NewAdmin->>Factory: removeAdmin(adminAddr)
+    Note right of Factory: admins[adminAddr] = 0<br/>adminCount -= 1<br/>RemovedAdmin event emitted
+    Note right of Factory: All existing vaults immediately<br/>reject adminAddr as Admin
 ```
 
 **Key constraint:** `oracle` and every `operator` address must be distinct wallets. `setOracle` reverts if the new oracle is an existing operator, and `addOperator` reverts if the new operator is the current oracle.
+
+**Admin rotation:** `acceptAdmin` adds the new admin but does not remove the old one. The old key keeps full admin rights until an admin calls `removeAdmin` on it. `removeAdmin` and `renounceAdminRole` never remove the last admin, and they withdraw any pending proposal to the removed address.
 
 ---
 
@@ -428,6 +435,7 @@ sequenceDiagram
 | `addOperator` / `removeOperator` | Admin | — | On factory |
 | `setOracle` | Admin | — | On factory |
 | `transferAdmin` / `acceptAdmin` | Admin / pending | — | On factory |
+| `addAdmin` / `removeAdmin` / `renounceAdminRole` | Admin | — | On factory; never removes the last admin |
 | `scheduleImplementation` | Admin | — | On factory |
 | `applyImplementation` | Admin | — | On factory; after 7-day timelock |
 | `cancelScheduledImplementation` | Admin | — | On factory |

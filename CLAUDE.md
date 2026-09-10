@@ -61,6 +61,7 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 | `createVault(marketId, tickSpacing)` | Oracle | `LPVaultFactory` |
 | `setOracle`, `addOperator`, `removeOperator`, `pauseTrading` | Admin | both |
 | `transferAdmin`, `acceptAdmin` | Admin | both |
+| `addAdmin`, `removeAdmin`, `renounceAdminRole` | Admin | `LPVaultFactory` |
 | `initialize(...)` | factory-only (`onlyFactory`) | `LPVault` |
 | `mintPosition(tickLower, tickUpper, usdcAmount)` | any wallet | `LPVault` |
 | `mintPositionFor(lp, ..., intentId)` | Operator | `LPVault` |
