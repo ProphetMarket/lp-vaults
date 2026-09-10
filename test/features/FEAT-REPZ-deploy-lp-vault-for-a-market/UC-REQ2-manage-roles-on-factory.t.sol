@@ -3,7 +3,9 @@ pragma solidity 0.8.20;
 
 // UC-REQ2: Manage Roles on Factory
 // Integration tests for every scenario in this use case.
-// Covers: SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5
+// Covers: SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5,
+//         SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN,
+//         SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR
 
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -38,6 +40,7 @@ contract RoleManagementBase is Test {
     event RemovedOperator(address indexed removedOperator, address indexed admin);
     event AdminTransferProposed(address indexed currentAdmin, address indexed proposedAdmin);
     event NewAdmin(address indexed newAdminAddress, address indexed admin);
+    event RemovedAdmin(address indexed removedAdmin, address indexed admin);
     LPVaultFactory factory;
 
     address admin = makeAddr("admin");
@@ -291,6 +294,27 @@ contract NonAdminRevertsTest is RoleManagementBase {
         vm.expectRevert(LPVaultFactory.NotAdmin.selector);
         factory.transferAdmin(makeAddr("x"));
     }
+
+    // SC-REQH: addAdmin reverts for non-admin
+    function test_addAdminRevertsForNonAdmin() public {
+        vm.prank(nobody);
+        vm.expectRevert(LPVaultFactory.NotAdmin.selector);
+        factory.addAdmin(nobody);
+    }
+
+    // SC-REQH: removeAdmin reverts for non-admin
+    function test_removeAdminRevertsForNonAdmin() public {
+        vm.prank(nobody);
+        vm.expectRevert(LPVaultFactory.NotAdmin.selector);
+        factory.removeAdmin(admin);
+    }
+
+    // SC-REQH: renounceAdminRole reverts for non-admin
+    function test_renounceAdminRoleRevertsForNonAdmin() public {
+        vm.prank(nobody);
+        vm.expectRevert(LPVaultFactory.NotAdmin.selector);
+        factory.renounceAdminRole();
+    }
 }
 
 // FR-REQX: transferAdmin reverts when proposed address is zero
@@ -353,6 +377,489 @@ contract AcceptAdminNotPendingAdminTest is RoleManagementBase {
 
         // A different address tries to claim — must be rejected
         vm.prank(nobody);
+        vm.expectRevert(LPVaultFactory.NotPendingAdmin.selector);
+        factory.acceptAdmin();
+    }
+}
+
+// SC-5UJR: Accept admin reverts when the caller already holds the admin role
+// What: acceptAdmin rejects a pending admin that already holds the role,
+//       because addAdmin granted it after transferAdmin proposed it.
+// Why:  Without the check, adminCount counts one address twice. Later removals
+//       can then reach adminCount == 1 with no admin left, and every onlyAdmin
+//       function reverts forever.
+// Example: transferAdmin(X), addAdmin(X) → acceptAdmin() from X
+//          → revert AlreadyAdmin, adminCount stays 2, pendingAdmin stays X.
+contract AcceptAdminAlreadyAdminTest is RoleManagementBase {
+    address proposedAdmin = makeAddr("proposedAdmin");
+
+    function setUp() public override {
+        super.setUp();
+        // Propose first, then add directly, so X is both admin and pendingAdmin
+        vm.startPrank(admin);
+        factory.transferAdmin(proposedAdmin);
+        factory.addAdmin(proposedAdmin);
+        vm.stopPrank();
+    }
+
+    // SC-5UJR: reverts with AlreadyAdmin
+    function test_revertsWhenPendingAdminAlreadyHoldsRole() public {
+        vm.prank(proposedAdmin);
+        vm.expectRevert(LPVaultFactory.AlreadyAdmin.selector);
+        factory.acceptAdmin();
+    }
+
+    // SC-5UJR: adminCount unchanged
+    function test_adminCountUnchangedWhenExistingAdminAccepts() public {
+        vm.prank(proposedAdmin);
+        vm.expectRevert(LPVaultFactory.AlreadyAdmin.selector);
+        factory.acceptAdmin();
+
+        assertEq(factory.adminCount(), 2, "adminCount should not count the same admin twice");
+    }
+
+    // SC-5UJR: pendingAdmin kept
+    function test_pendingAdminKeptWhenExistingAdminAccepts() public {
+        vm.prank(proposedAdmin);
+        vm.expectRevert(LPVaultFactory.AlreadyAdmin.selector);
+        factory.acceptAdmin();
+
+        assertEq(factory.pendingAdmin(), proposedAdmin, "a rejected accept should not clear pendingAdmin");
+    }
+}
+
+// SC-5UJF: Add admin successfully
+// What: Admin grants the admin role to a new address in one call via
+//       addAdmin, and adminCount grows by one.
+// Why:  The two-step transfer is the only other way to add an admin. A team
+//       that already controls the new key needs a one-step add, as the
+//       ctf-exchange Auth.sol reference provides.
+// Example: addAdmin(0xNEW) → admins[0xNEW] == 1, adminCount == 2,
+//          NewAdmin(0xNEW, admin) emitted.
+contract AddAdminSuccessTest is RoleManagementBase {
+    address newAdmin = makeAddr("newAdmin");
+
+    // SC-5UJF: admins mapping updated
+    function test_addAdminGrantsRole() public {
+        vm.prank(admin);
+        factory.addAdmin(newAdmin);
+
+        assertEq(factory.admins(newAdmin), 1, "new admin should hold the admin role");
+    }
+
+    // SC-5UJF: adminCount incremented
+    function test_addAdminIncrementsAdminCount() public {
+        vm.prank(admin);
+        factory.addAdmin(newAdmin);
+
+        // adminCount starts at 1 from the constructor
+        assertEq(factory.adminCount(), 2, "adminCount should grow from 1 to 2");
+    }
+
+    // SC-5UJF: NewAdmin event emitted
+    function test_addAdminEmitsEvent() public {
+        vm.expectEmit(true, true, false, true);
+        emit NewAdmin(newAdmin, admin);
+
+        vm.prank(admin);
+        factory.addAdmin(newAdmin);
+    }
+
+    // SC-5UJF: no pendingAdmin change
+    function test_addAdminLeavesPendingAdminUnchanged() public {
+        vm.prank(admin);
+        factory.addAdmin(newAdmin);
+
+        assertEq(factory.pendingAdmin(), address(0), "addAdmin should not touch pendingAdmin");
+    }
+}
+
+// SC-5UJG: Add admin reverts on the zero address
+// What: addAdmin rejects address(0), which can never sign a transaction.
+// Why:  An admin that can never act would still count in adminCount, so a
+//       later removal could leave the registry with no admin that can act.
+// Example: addAdmin(address(0)) → revert ZeroAddress.
+contract AddAdminZeroAddressTest is RoleManagementBase {
+    // SC-5UJG: reverts with ZeroAddress
+    function test_revertsWhenAddingZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(LPVaultFactory.ZeroAddress.selector);
+        factory.addAdmin(address(0));
+    }
+}
+
+// SC-5UJH: Add admin for an existing admin changes no role state
+// What: addAdmin on an address that already holds the role leaves adminCount
+//       unchanged, but still emits NewAdmin, as the Auth.sol reference does.
+// Why:  adminCount must equal the number of admins. Counting one address twice
+//       lets later removals reach adminCount == 1 with no admin left.
+// Example: addAdmin(existingAdmin) → adminCount stays 1,
+//          NewAdmin(existingAdmin, admin) emitted.
+contract AddAdminExistingAdminTest is RoleManagementBase {
+    // SC-5UJH: adminCount unchanged
+    function test_addAdminForExistingAdminKeepsCount() public {
+        vm.prank(admin);
+        factory.addAdmin(admin);
+
+        assertEq(factory.adminCount(), 1, "adminCount should not count an existing admin twice");
+    }
+
+    // SC-5UJH: NewAdmin still emitted
+    function test_addAdminForExistingAdminStillEmitsEvent() public {
+        vm.expectEmit(true, true, false, true);
+        emit NewAdmin(admin, admin);
+
+        vm.prank(admin);
+        factory.addAdmin(admin);
+    }
+}
+
+// SC-5UJI: Remove admin successfully
+// What: Admin revokes another admin's role via removeAdmin, and adminCount
+//       drops by one.
+// Why:  Audit issue 6.8. Without removeAdmin, a compromised admin key keeps
+//       full admin rights on the factory and on every vault forever.
+// Example: admins {admin, secondAdmin} → removeAdmin(secondAdmin)
+//          → admins[secondAdmin] == 0, adminCount == 1,
+//          RemovedAdmin(secondAdmin, admin) emitted.
+contract RemoveAdminSuccessTest is RoleManagementBase {
+    address secondAdmin = makeAddr("secondAdmin");
+
+    function setUp() public override {
+        super.setUp();
+        // Two admins, so the removal does not hit the last-admin guard
+        vm.prank(admin);
+        factory.addAdmin(secondAdmin);
+    }
+
+    // SC-5UJI: admins mapping cleared
+    function test_removeAdminRevokesRole() public {
+        vm.prank(admin);
+        factory.removeAdmin(secondAdmin);
+
+        assertEq(factory.admins(secondAdmin), 0, "removed admin should no longer hold the role");
+    }
+
+    // SC-5UJI: adminCount decremented
+    function test_removeAdminDecrementsAdminCount() public {
+        vm.prank(admin);
+        factory.removeAdmin(secondAdmin);
+
+        assertEq(factory.adminCount(), 1, "adminCount should drop from 2 to 1");
+    }
+
+    // SC-5UJI: RemovedAdmin event emitted
+    function test_removeAdminEmitsEvent() public {
+        vm.expectEmit(true, true, false, true);
+        emit RemovedAdmin(secondAdmin, admin);
+
+        vm.prank(admin);
+        factory.removeAdmin(secondAdmin);
+    }
+
+    // SC-5UJI: removed admin is rejected by onlyAdmin on the factory
+    function test_removedAdminCannotCallAdminFunctions() public {
+        vm.prank(admin);
+        factory.removeAdmin(secondAdmin);
+
+        vm.prank(secondAdmin);
+        vm.expectRevert(LPVaultFactory.NotAdmin.selector);
+        factory.addOperator(makeAddr("x"));
+    }
+}
+
+// SC-5UJJ: Remove admin reverts when it would remove the last admin
+// What: removeAdmin refuses to revoke the only remaining admin.
+// Why:  With zero admins every onlyAdmin function on the factory and on every
+//       vault reverts forever, and no upgrade path exists to recover.
+// Example: adminCount == 1 → removeAdmin(admin) → revert CannotRemoveLastAdmin.
+contract RemoveAdminLastAdminTest is RoleManagementBase {
+    // SC-5UJJ: reverts with CannotRemoveLastAdmin
+    function test_revertsWhenRemovingLastAdmin() public {
+        vm.prank(admin);
+        vm.expectRevert(LPVaultFactory.CannotRemoveLastAdmin.selector);
+        factory.removeAdmin(admin);
+    }
+}
+
+// SC-5UJK: Remove admin on an address that is not an admin changes no role state
+// What: removeAdmin on a non-admin does not revert, even with one admin,
+//       leaves adminCount unchanged, and still emits RemovedAdmin, as the
+//       Auth.sol reference does.
+// Why:  The last-admin guard applies only when a real admin loses the role.
+// Example: adminCount == 1 → removeAdmin(nobody) → adminCount stays 1,
+//          RemovedAdmin(nobody, admin) emitted.
+contract RemoveAdminNonAdminTest is RoleManagementBase {
+    // SC-5UJK: adminCount unchanged
+    function test_removeAdminOnNonAdminKeepsCount() public {
+        vm.prank(admin);
+        factory.removeAdmin(nobody);
+
+        assertEq(factory.adminCount(), 1, "removing a non-admin should not change adminCount");
+    }
+
+    // SC-5UJK: RemovedAdmin still emitted
+    function test_removeAdminOnNonAdminStillEmitsEvent() public {
+        vm.expectEmit(true, true, false, true);
+        emit RemovedAdmin(nobody, admin);
+
+        vm.prank(admin);
+        factory.removeAdmin(nobody);
+    }
+}
+
+// SC-5UJL: Admin removal propagates to existing vaults
+// What: After removeAdmin on the factory, an existing vault rejects the
+//       removed admin and still accepts the remaining admin.
+// Why:  Vaults read factory.admins() at call time. One factory call must
+//       revoke a compromised key on every vault, with no vault transaction.
+// Example: vault V exists, admins {admin, secondAdmin} → removeAdmin(secondAdmin)
+//          → secondAdmin calling pauseTrading on V reverts NotAdmin,
+//          admin calling pauseTrading on V succeeds.
+contract AdminRemovalPropagationTest is Test {
+    LPVaultFactory factory;
+    LPVault vault;
+
+    address admin = makeAddr("admin");
+    address secondAdmin = makeAddr("secondAdmin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    event RemovedAdmin(address indexed removedAdmin, address indexed admin);
+    event TradingPaused(address indexed caller);
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        MockConditionalTokens mockCt = new MockConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+        );
+
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+
+        // secondAdmin holds the role while the vault already exists
+        vm.prank(admin);
+        factory.addAdmin(secondAdmin);
+    }
+
+    // SC-5UJL: removed admin is rejected by the vault
+    function test_removedAdminRejectedByVault() public {
+        vm.prank(admin);
+        factory.removeAdmin(secondAdmin);
+
+        vm.prank(secondAdmin);
+        vm.expectRevert(LPVault.NotAdmin.selector);
+        vault.pauseTrading();
+    }
+
+    // SC-5UJL: remaining admin still pauses the vault
+    function test_remainingAdminPausesVault() public {
+        vm.prank(admin);
+        factory.removeAdmin(secondAdmin);
+
+        vm.prank(admin);
+        vault.pauseTrading();
+
+        assertTrue(vault.paused(), "vault should be paused by the remaining admin");
+    }
+
+    // SC-5UJL: vault emits TradingPaused for the remaining admin
+    function test_remainingAdminPauseEmitsVaultEvent() public {
+        vm.prank(admin);
+        factory.removeAdmin(secondAdmin);
+
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit TradingPaused(admin);
+
+        vm.prank(admin);
+        vault.pauseTrading();
+    }
+
+    // SC-5UJL: factory emits RemovedAdmin
+    function test_removalEmitsFactoryEvent() public {
+        vm.expectEmit(true, true, false, true, address(factory));
+        emit RemovedAdmin(secondAdmin, admin);
+
+        vm.prank(admin);
+        factory.removeAdmin(secondAdmin);
+    }
+}
+
+// SC-5UJM: Renounce admin role successfully
+// What: An admin gives up its own role via renounceAdminRole, and adminCount
+//       drops by one.
+// Why:  A departing team member or a retired key must be able to leave the
+//       registry without a second admin's transaction.
+// Example: admins {admin, secondAdmin} → secondAdmin calls renounceAdminRole()
+//          → admins[secondAdmin] == 0, adminCount == 1,
+//          RemovedAdmin(secondAdmin, secondAdmin) emitted.
+contract RenounceAdminRoleSuccessTest is RoleManagementBase {
+    address secondAdmin = makeAddr("secondAdmin");
+
+    function setUp() public override {
+        super.setUp();
+        // Two admins, so the renounce does not hit the last-admin guard
+        vm.prank(admin);
+        factory.addAdmin(secondAdmin);
+    }
+
+    // SC-5UJM: caller's admins entry cleared
+    function test_renounceAdminRoleRevokesCallerRole() public {
+        vm.prank(secondAdmin);
+        factory.renounceAdminRole();
+
+        assertEq(factory.admins(secondAdmin), 0, "renouncing admin should no longer hold the role");
+    }
+
+    // SC-5UJM: adminCount decremented
+    function test_renounceAdminRoleDecrementsAdminCount() public {
+        vm.prank(secondAdmin);
+        factory.renounceAdminRole();
+
+        assertEq(factory.adminCount(), 1, "adminCount should drop from 2 to 1");
+    }
+
+    // SC-5UJM: RemovedAdmin event emitted with the caller in both fields
+    function test_renounceAdminRoleEmitsEvent() public {
+        vm.expectEmit(true, true, false, true);
+        emit RemovedAdmin(secondAdmin, secondAdmin);
+
+        vm.prank(secondAdmin);
+        factory.renounceAdminRole();
+    }
+}
+
+// SC-5UJN: Renounce admin role reverts for the last admin
+// What: renounceAdminRole refuses when the caller is the only admin.
+// Why:  Same guard as SC-5UJJ. The registry must never reach zero admins.
+// Example: adminCount == 1 → admin calls renounceAdminRole()
+//          → revert CannotRemoveLastAdmin.
+contract RenounceAdminRoleLastAdminTest is RoleManagementBase {
+    // SC-5UJN: reverts with CannotRemoveLastAdmin
+    function test_revertsWhenLastAdminRenounces() public {
+        vm.prank(admin);
+        vm.expectRevert(LPVaultFactory.CannotRemoveLastAdmin.selector);
+        factory.renounceAdminRole();
+    }
+}
+
+// SC-5UJO: Removing an admin withdraws its pending proposal
+// What: When removeAdmin revokes an address that is also pendingAdmin, the
+//       proposal is cleared, so the removed key cannot call acceptAdmin.
+// Why:  Without the clear, transferAdmin(X) → addAdmin(X) → removeAdmin(X)
+//       leaves pendingAdmin == X, and X regains the role through acceptAdmin.
+//       Removal must be final.
+// Example: transferAdmin(X), addAdmin(X) → removeAdmin(X)
+//          → pendingAdmin == address(0), acceptAdmin() from X → revert NotPendingAdmin.
+contract RemoveAdminClearsPendingProposalTest is RoleManagementBase {
+    address proposedAdmin = makeAddr("proposedAdmin");
+
+    function setUp() public override {
+        super.setUp();
+        // Propose first, then add directly, so X is both admin and pendingAdmin
+        vm.startPrank(admin);
+        factory.transferAdmin(proposedAdmin);
+        factory.addAdmin(proposedAdmin);
+        vm.stopPrank();
+    }
+
+    // SC-5UJO: pendingAdmin cleared by removeAdmin
+    function test_removeAdminClearsPendingAdmin() public {
+        vm.prank(admin);
+        factory.removeAdmin(proposedAdmin);
+
+        assertEq(factory.pendingAdmin(), address(0), "removeAdmin should withdraw the proposal to the removed address");
+    }
+
+    // SC-5UJO: removed admin cannot accept the old proposal
+    function test_removedAdminCannotAcceptOldProposal() public {
+        vm.prank(admin);
+        factory.removeAdmin(proposedAdmin);
+
+        vm.prank(proposedAdmin);
+        vm.expectRevert(LPVaultFactory.NotPendingAdmin.selector);
+        factory.acceptAdmin();
+    }
+}
+
+// SC-5UJP: Removing a proposed-only address withdraws its proposal
+// What: removeAdmin on an address that holds no role but is pendingAdmin
+//       clears the proposal, and adminCount does not change.
+// Why:  A team that calls removeAdmin on a suspect proposed key expects that key
+//       to lose every path to the role.
+// Example: transferAdmin(Y) → removeAdmin(Y) → pendingAdmin == address(0),
+//          acceptAdmin() from Y → revert NotPendingAdmin, adminCount stays 1.
+contract RemoveProposedOnlyAddressClearsProposalTest is RoleManagementBase {
+    address proposedAdmin = makeAddr("proposedAdmin");
+
+    function setUp() public override {
+        super.setUp();
+        vm.prank(admin);
+        factory.transferAdmin(proposedAdmin);
+    }
+
+    // SC-5UJP: pendingAdmin cleared
+    function test_removeAdminOnProposedOnlyAddressClearsPendingAdmin() public {
+        vm.prank(admin);
+        factory.removeAdmin(proposedAdmin);
+
+        assertEq(factory.pendingAdmin(), address(0), "removeAdmin should withdraw the proposal");
+    }
+
+    // SC-5UJP: proposed-only address cannot accept after removal
+    function test_proposedOnlyAddressCannotAcceptAfterRemoval() public {
+        vm.prank(admin);
+        factory.removeAdmin(proposedAdmin);
+
+        vm.prank(proposedAdmin);
+        vm.expectRevert(LPVaultFactory.NotPendingAdmin.selector);
+        factory.acceptAdmin();
+    }
+
+    // SC-5UJP: adminCount unchanged
+    function test_removeAdminOnProposedOnlyAddressKeepsCount() public {
+        vm.prank(admin);
+        factory.removeAdmin(proposedAdmin);
+
+        assertEq(factory.adminCount(), 1, "withdrawing a proposal should not change adminCount");
+    }
+}
+
+// SC-5UJQ: Renouncing withdraws the caller's pending proposal
+// What: When an admin that is also pendingAdmin calls renounceAdminRole, the
+//       proposal is cleared, so it cannot accept the role back.
+// Why:  A team can ask a suspect key to renounce. An attacker who holds that
+//       key must not regain the role through an old proposal.
+// Example: transferAdmin(X), addAdmin(X) → X calls renounceAdminRole()
+//          → pendingAdmin == address(0), acceptAdmin() from X → revert NotPendingAdmin.
+contract RenounceClearsPendingProposalTest is RoleManagementBase {
+    address proposedAdmin = makeAddr("proposedAdmin");
+
+    function setUp() public override {
+        super.setUp();
+        // Propose first, then add directly, so X is both admin and pendingAdmin
+        vm.startPrank(admin);
+        factory.transferAdmin(proposedAdmin);
+        factory.addAdmin(proposedAdmin);
+        vm.stopPrank();
+    }
+
+    // SC-5UJQ: pendingAdmin cleared by renounceAdminRole
+    function test_renounceAdminRoleClearsPendingAdmin() public {
+        vm.prank(proposedAdmin);
+        factory.renounceAdminRole();
+
+        assertEq(factory.pendingAdmin(), address(0), "renounceAdminRole should withdraw the proposal to the caller");
+    }
+
+    // SC-5UJQ: renounced admin cannot accept the old proposal
+    function test_renouncedAdminCannotAcceptOldProposal() public {
+        vm.prank(proposedAdmin);
+        factory.renounceAdminRole();
+
+        vm.prank(proposedAdmin);
         vm.expectRevert(LPVaultFactory.NotPendingAdmin.selector);
         factory.acceptAdmin();
     }
