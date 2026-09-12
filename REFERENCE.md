@@ -23,13 +23,15 @@ constructor(
     address conditionalTokens_,
     address admin_,
     address oracle_,
-    address operator_
+    address operator_,
+    address safeFactory_,
+    bytes32 safeProxyBytecodeHash_
 )
 ```
 
 **Actor:** Factory Owner (deployment-time only)
 
-Deploys the factory, stores all external contract addresses, initialises the role registry with one admin, one oracle, and one operator, and sets `implementationVersion = 1`.
+Deploys the factory, stores all external contract addresses and the two Safe derivation inputs, initialises the role registry with one admin, one oracle, and one operator, and sets `implementationVersion = 1`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -40,15 +42,17 @@ Deploys the factory, stores all external contract addresses, initialises the rol
 | `admin_` | `address` | Initial Admin wallet |
 | `oracle_` | `address` | Initial Oracle wallet — must differ from `operator_` |
 | `operator_` | `address` | Initial Operator wallet — must differ from `oracle_` |
+| `safeFactory_` | `address` | The Poly Safe factory on this chain — the CREATE2 deployer of every user's Safe; immutable |
+| `safeProxyBytecodeHash_` | `bytes32` | `keccak256(getContractBytecode())` of that factory, the init code hash of the Safe derivation; immutable. The deploy script reads it from the chain. See [Safe derivation](#safe-derivation) |
 
 ```mermaid
 sequenceDiagram
     actor Owner
     participant Factory as LPVaultFactory
 
-    Owner->>Factory: deploy(impl, usdc, exchange, ctf, admin, oracle, operator)
-    Note right of Factory: Checks: oracle_ != operator_
-    Note right of Factory: implementation = impl<br/>usdc / exchange / conditionalTokens stored<br/>implementationVersion = 1
+    Owner->>Factory: deploy(impl, usdc, exchange, ctf, admin, oracle, operator, safeFactory, hash)
+    Note right of Factory: Checks: oracle_ != operator_<br/>safeFactory_ != 0, hash != 0
+    Note right of Factory: implementation = impl<br/>usdc / exchange / conditionalTokens stored<br/>safeFactory / safeProxyBytecodeHash stored (immutable)<br/>implementationVersion = 1
     Note right of Factory: admins[admin_] = 1, adminCount = 1<br/>oracle = oracle_<br/>operators[operator_] = 1
     Factory-->>Owner: factory address
 ```
@@ -57,6 +61,23 @@ sequenceDiagram
 
 **Reverts:**
 - `RoleSeparation()` — `oracle_` equals `operator_`
+- `ZeroAddress()` — `safeFactory_` is zero
+- `ZeroBytecodeHash()` — `safeProxyBytecodeHash_` is zero
+
+---
+
+### Safe derivation
+
+Every LP is a Gnosis Safe that Prophet deploys through the Poly Safe factory with `CREATE2`, so the Safe's address is a pure function of its owner key. A Safe has no private key, so `ecrecover` can never return a Safe address. The Safe's owner key signs every LP message, and the vault requires that the Safe derived from the recovered signer equals the Safe the message names:
+
+```text
+salt = keccak256(abi.encode(ownerKey))
+safe = address(uint160(uint256(keccak256(0xff ++ safeFactory ++ salt ++ safeProxyBytecodeHash))))
+```
+
+Both inputs are `immutable` on the factory, and every vault reads them from the factory at call time (`_deriveSafe`), so no Admin can change them. One internal `_verifySafeOwnerSignature(safe, structHash, signature)` runs the check for `depositForIntent`, `reclaimDepositFor`, and the later relayed burn and collect. Every LP-signed type carries a `deadline`, checked inclusively against `block.timestamp`.
+
+Known property: a Safe owner who swaps the owner key leaves the old key able to derive the same Safe, so the old key keeps the relayed paths until the vault holds nothing for that Safe. The exchange has the same property for orders. A valid signature never proves ownership of an `intentId`: the recorded Safe in `pendingDeposits` does, and every path that spends an escrow checks it.
 
 ---
 
@@ -220,7 +241,7 @@ function startWindDown() external onlyOracle
 
 **Actor:** Oracle
 
-Transitions the vault from Active (phase 1) to WindDown (phase 2). One-way — there is no mechanism to revert to Active. After this call, `mintPositionFor` reverts; `collect`, `reclaimDeposit`, and `emergencyCancelAll` remain open.
+Transitions the vault from Active (phase 1) to WindDown (phase 2). One-way — there is no mechanism to revert to Active. After this call, `depositForIntent` and `mintPositionFor` revert; `collect`, `reclaimDeposit`, `reclaimDepositFor`, and `emergencyCancelAll` remain open.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -280,6 +301,68 @@ sequenceDiagram
 
 ## 2. Transactional Methods
 
+### `LPVault.depositForIntent`
+
+```solidity
+function depositForIntent(
+    address  lp,
+    int24    tickLower,
+    int24    tickUpper,
+    uint256  usdcAmount,
+    bytes32  intentId,
+    uint256  deadline,
+    bytes calldata signature
+) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat
+```
+
+**Actor:** Operator
+
+Escrows an LP's USDC against a signed mint intent. Pulls `usdcAmount` USDC from the LP's Safe (which approved the vault through a relayed Safe transaction), and records the Safe, the amount, and the intent's struct hash under `intentId`. This is the only way USDC enters a position: a plain USDC transfer to the vault is never a deposit.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `lp` | `address` | The LP's Safe — the recorded depositor and the USDC source |
+| `tickLower` | `int24` | Lower bound of the price range; must be < `tickUpper` and aligned to `tickSpacing` |
+| `tickUpper` | `int24` | Upper bound of the price range; must be > `tickLower` and aligned to `tickSpacing` |
+| `usdcAmount` | `uint256` | USDC to pull from the Safe; must be > 0 |
+| `intentId` | `bytes32` | Unique identifier for replay protection, shared with `mintPositionFor` and both reclaims |
+| `deadline` | `uint256` | Last `block.timestamp` at which the deposit is accepted (inclusive) |
+| `signature` | `bytes` | 65-byte EIP-712 signature from the Safe's owner key over the `MintIntent` struct |
+
+```mermaid
+sequenceDiagram
+    actor Operator
+    participant Vault as LPVault
+    participant Factory as LPVaultFactory
+    participant USDC
+
+    Operator->>Vault: depositForIntent(lp, tL, tU, amount, intentId, deadline, sig)
+    Note right of Vault: Checks:<br/>phase == Active, not paused<br/>usdcAmount > 0<br/>block.timestamp <= deadline<br/>tickLower < tickUpper, both aligned<br/>signer recovered from sig
+    Vault->>Factory: safeFactory(), safeProxyBytecodeHash()
+    Note right of Vault: derived Safe == lp<br/>intentId not used, not escrowed
+    Note right of Vault: pendingDeposits[intentId] = (lp, amount, structHash)<br/>totalEscrowed += amount
+    Vault->>USDC: transferFrom(lp, vault, usdcAmount)
+    Note right of Vault: DepositEscrowed event emitted
+```
+
+**Events:** `DepositEscrowed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)`
+
+**Reverts:**
+- `NotOperator()` — caller is not an operator
+- `TradingIsPaused()` — vault is paused
+- `VaultNotActive()` — vault is not in Active phase
+- `ZeroAmount()` — `usdcAmount` is 0
+- `IntentExpired()` — `block.timestamp > deadline`
+- `InvalidRange()` — `tickLower >= tickUpper`
+- `TickNotAligned()` — either tick is not a multiple of `tickSpacing`
+- `InvalidSignature()` — signature is malformed, malleable, or from a key whose derived Safe is not `lp`
+- `IntentAlreadyUsed()` — `intentId` was consumed by a mint or a reclaim
+- `DepositAlreadyEscrowed()` — `intentId` already holds an escrow
+- `SafeCastOverflow()` — `usdcAmount` exceeds `uint96`
+- `TransferFailed()` — the USDC pull failed (short allowance or balance)
+
+---
+
 ### `LPVault.mintPositionFor`
 
 ```solidity
@@ -289,39 +372,37 @@ function mintPositionFor(
     int24    tickUpper,
     uint256  usdcAmount,
     bytes32  intentId,
-    bytes calldata signature
+    uint256  deadline
 ) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat returns (uint256 positionId)
 ```
 
 **Actor:** Operator
 
-Creates a concentrated-liquidity position for `lp` using an EIP-712 signed intent. Pulls USDC from the LP's wallet into the vault, initialises tick state, and records the position.
+Creates the concentrated-liquidity position that an escrowed intent authorizes. Verifies no signature and moves no USDC: the escrow (`depositForIntent`) did both. Requires that the escrow names `lp` and that the struct hash recomputed from the six arguments equals the recorded hash, then consumes the escrow, initialises tick state, and records the position owned by the Safe. Reads no clock: `deadline` is an argument only because the hash needs it, so a deposit made near its deadline can still mint.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `lp` | `address` | LP wallet address — must match the EIP-712 signer |
+| `lp` | `address` | The LP's Safe — must be the escrow's recorded depositor |
 | `tickLower` | `int24` | Lower bound of the price range; must be < `tickUpper` and aligned to `tickSpacing` |
 | `tickUpper` | `int24` | Upper bound of the price range; must be > `tickLower` and aligned to `tickSpacing` |
-| `usdcAmount` | `uint256` | USDC to pull from the LP's wallet; must be > 0 |
+| `usdcAmount` | `uint256` | USDC amount of the intent; must be > 0 and equal the escrowed amount |
 | `intentId` | `bytes32` | Unique identifier for replay protection; each `intentId` can only be used once |
-| `signature` | `bytes` | 65-byte EIP-712 signature from `lp` over a `MintIntent` struct |
+| `deadline` | `uint256` | The deadline the owner key signed — part of the recorded hash |
 
 ```mermaid
 sequenceDiagram
     actor Operator
     participant Vault as LPVault
-    participant USDC
 
-    Operator->>Vault: mintPositionFor(lp, tL, tU, amount, intentId, sig)
-    Note right of Vault: Checks:<br/>phase == Active, not paused<br/>usdcAmount > 0<br/>tickLower < tickUpper<br/>both ticks aligned to tickSpacing<br/>sig valid EIP-712 from lp<br/>intentId not used before<br/>liquidity >= minFirstLiq (if activeLiquidity==0)
-    Note right of Vault: Mark intentId as used
+    Operator->>Vault: mintPositionFor(lp, tL, tU, amount, intentId, deadline)
+    Note right of Vault: Checks:<br/>phase == Active, not paused<br/>usdcAmount > 0<br/>tickLower < tickUpper<br/>both ticks aligned to tickSpacing<br/>intentId not used before<br/>escrow exists, names lp, hash matches<br/>liquidity >= minFirstLiq (if activeLiquidity==0)
+    Note right of Vault: Mark intentId as used<br/>delete pendingDeposits[intentId]<br/>totalEscrowed -= amount
     Note right of Vault: Compute liquidity = usdcAmount * PRECISION / rangeWidth
     Note right of Vault: Init ticks if new; update liquidityGross / liquidityNet
     Note right of Vault: Snapshot feeGrowthInsideLastX128 at mint time
-    Note right of Vault: Create positions[positionId]
+    Note right of Vault: Create positions[positionId] with owner = lp
     Note right of Vault: Increment activeLiquidity if position is in-range
-    Vault->>USDC: transferFrom(lp, vault, usdcAmount)
-    Note right of Vault: PositionMinted event emitted
+    Note right of Vault: PositionMinted event emitted (no USDC moves)
     Vault-->>Operator: positionId
 ```
 
@@ -334,10 +415,11 @@ sequenceDiagram
 - `ZeroAmount()` — `usdcAmount` is 0
 - `InvalidRange()` — `tickLower >= tickUpper`
 - `TickNotAligned()` — either tick is not a multiple of `tickSpacing`
-- `InvalidSignature()` — signature is invalid, malformed, or not from `lp`
-- `IntentAlreadyUsed()` — `intentId` was already used
+- `IntentAlreadyUsed()` — `intentId` was already used by a mint or a reclaim
+- `DepositNotEscrowed()` — no escrow exists for `intentId`
+- `NotIntentOwner()` — the escrow's recorded Safe is not `lp`
+- `IntentMismatch()` — the recomputed struct hash differs from the recorded one (range, amount, or deadline changed)
 - `BelowMinimumFirstLiquidity()` — first mint liquidity below floor
-- `TransferFailed()` — USDC transfer failed
 
 ---
 
@@ -541,62 +623,85 @@ sequenceDiagram
 ### `LPVault.reclaimDeposit`
 
 ```solidity
-function reclaimDeposit(
-    address  lp,
-    int24    tickLower,
-    int24    tickUpper,
-    uint256  usdcAmount,
-    bytes32  intentId,
-    bytes calldata lpSignature,
-    bytes calldata operatorSignature
-) external nonReentrant
+function reclaimDeposit(bytes32 intentId) external nonReentrant
 ```
 
-**Actor:** LP
+**Actor:** LP's Safe (through a Safe transaction the owner key signs)
 
-Two-phase escape hatch for recovering USDC from an unfulfilled mint intent. **Phase 1** (first call): records `intentTimestamps[intentId]` and emits `ReclaimSubmitted`. **Phase 2** (same call arguments, after 24 hours): marks the intent as used and transfers `usdcAmount` back to `lp`.
+One-call escape hatch: refunds the USDC escrowed against `intentId` to the Safe that paid it. The escrow record proves the deposit, so the call needs no signature, no Operator co-signature, no timelock, no phase check, and no pause check. It works with every Operator removed and in every phase, including Cancelled.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `lp` | `address` | LP wallet address — must equal `msg.sender` |
-| `tickLower` | `int24` | Lower tick from the original `MintIntent` |
-| `tickUpper` | `int24` | Upper tick from the original `MintIntent` |
-| `usdcAmount` | `uint256` | USDC amount from the original `MintIntent` |
-| `intentId` | `bytes32` | Unique identifier from the original `MintIntent` |
-| `lpSignature` | `bytes` | EIP-712 signature from `lp` over the `MintIntent` struct |
-| `operatorSignature` | `bytes` | EIP-712 signature from a registered Operator over the same `MintIntent` struct (deposit acknowledgement) |
+| `intentId` | `bytes32` | The escrowed intent to refund; `msg.sender` must be its recorded Safe |
 
 ```mermaid
 sequenceDiagram
-    actor LP
+    actor Safe as LP's Safe
     participant Vault as LPVault
     participant USDC
 
-    Note over LP,Vault: Phase 1 (first call)
-    LP->>Vault: reclaimDeposit(lp, tL, tU, amount, intentId, lpSig, opSig)
-    Note right of Vault: Checks:<br/>phase != Cancelled<br/>msg.sender == lp<br/>lpSig valid EIP-712 from lp<br/>opSig from a registered Operator<br/>intentId not already used
-    Note right of Vault: intentTimestamps[intentId] = block.timestamp
-    Note right of Vault: ReclaimSubmitted event emitted
-    Vault-->>LP: (returns — wait 24 hours)
-
-    Note over LP,Vault: Phase 2 (same args, after 24h)
-    LP->>Vault: reclaimDeposit(lp, tL, tU, amount, intentId, lpSig, opSig)
-    Note right of Vault: Checks:<br/>block.timestamp - intentTimestamps[intentId] >= 24h
-    Note right of Vault: usedIntents[intentId] = true
-    Vault->>USDC: transfer(lp, usdcAmount)
+    Safe->>Vault: reclaimDeposit(intentId)
+    Note right of Vault: Checks:<br/>intentId not already used<br/>escrow exists<br/>recorded Safe == msg.sender
+    Note right of Vault: usedIntents[intentId] = true<br/>delete pendingDeposits[intentId]<br/>totalEscrowed -= amount
+    Vault->>USDC: transfer(recorded Safe, recorded amount)
     Note right of Vault: DepositReclaimed event emitted
 ```
 
-**Events:**
-- Phase 1: `ReclaimSubmitted(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)`
-- Phase 2: `DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)`
+**Events:** `DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)` — the recorded Safe and the recorded amount
 
 **Reverts:**
-- `VaultCancelled()` — vault is in terminal Cancelled phase
-- `NotIntentOwner()` — `msg.sender != lp`
-- `InvalidSignature()` — either signature is invalid or operator signature is not from a registered operator
 - `IntentAlreadyUsed()` — `intentId` was already consumed by `mintPositionFor` or a prior reclaim
-- `TimelockNotElapsed()` — Phase 2 called before 24 hours have passed
+- `DepositNotEscrowed()` — no escrow exists for `intentId`
+- `NotIntentOwner()` — `msg.sender` is not the escrow's recorded Safe
+- `TransferFailed()` — USDC transfer failed
+
+---
+
+### `LPVault.reclaimDepositFor`
+
+```solidity
+function reclaimDepositFor(
+    address  lp,
+    bytes32  intentId,
+    uint256  deadline,
+    bytes calldata signature
+) external onlyOperator nonReentrant touchesHeartbeat
+```
+
+**Actor:** Operator
+
+Relays the owner key's signed `ReclaimIntent` to refund that Safe's escrow — the same refund as `reclaimDeposit`, with the Operator paying the gas. The USDC goes to the recorded Safe, never to the caller. The `ReclaimIntent` type is distinct from `MintIntent`, so a mint authorization never doubles as a cancellation. No phase check and no pause check.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `lp` | `address` | The LP's Safe — must be the escrow's recorded depositor |
+| `intentId` | `bytes32` | The escrowed intent to refund |
+| `deadline` | `uint256` | Last `block.timestamp` at which the relayed reclaim is accepted (inclusive) |
+| `signature` | `bytes` | 65-byte EIP-712 signature from the Safe's owner key over `ReclaimIntent(address lp,bytes32 intentId,uint256 deadline)` |
+
+```mermaid
+sequenceDiagram
+    actor Operator
+    participant Vault as LPVault
+    participant USDC
+
+    Operator->>Vault: reclaimDepositFor(lp, intentId, deadline, sig)
+    Note right of Vault: Checks:<br/>block.timestamp <= deadline<br/>derived Safe of the signer == lp<br/>intentId not already used<br/>escrow exists<br/>recorded Safe == lp
+    Note right of Vault: usedIntents[intentId] = true<br/>delete pendingDeposits[intentId]<br/>totalEscrowed -= amount
+    Vault->>USDC: transfer(lp, recorded amount)
+    Note right of Vault: DepositReclaimed event emitted
+```
+
+**Events:** `DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)`
+
+**Reverts:**
+- `NotOperator()` — caller is not an operator
+- `IntentExpired()` — `block.timestamp > deadline`
+- `InvalidSignature()` — signature is malformed, malleable, produced over a `MintIntent`, or from a key whose derived Safe is not `lp`
+- `IntentAlreadyUsed()` — `intentId` was already consumed
+- `DepositNotEscrowed()` — no escrow exists for `intentId`
+- `NotIntentOwner()` — the escrow's recorded Safe is not `lp`
+- `TransferFailed()` — USDC transfer failed
 
 ---
 
@@ -610,7 +715,7 @@ function emergencyCancelAll() external nonReentrant
 
 **Actor:** Any position holder (after operator-silence timelock)
 
-Force-closes all open positions, computes each owner's payout (principal + fees), zeroes all position state, transitions the vault to terminal Cancelled phase, and transfers USDC to each owner. Callable after 7 days without any successful Operator call (`mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`).
+Force-closes all open positions, computes each owner's payout (principal + fees), zeroes all position state, transitions the vault to terminal Cancelled phase, and transfers USDC to each owner. Callable after 7 days without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -657,7 +762,7 @@ function pauseTrading() external onlyAdmin
 
 **Actor:** Admin
 
-Sets `paused = true`, immediately blocking `mintPositionFor`, `notifyFees`, `updateTick`, and `mergePositions`. LP exit paths (`collect`, `reclaimDeposit`, `emergencyCancelAll`) are unaffected. Does not change the vault's phase.
+Sets `paused = true`, immediately blocking `depositForIntent`, `mintPositionFor`, `notifyFees`, `updateTick`, and `mergePositions`. LP exit paths (`collect`, `reclaimDeposit`, `reclaimDepositFor`, `emergencyCancelAll`) are unaffected. Does not change the vault's phase.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

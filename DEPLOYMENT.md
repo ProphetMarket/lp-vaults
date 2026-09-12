@@ -88,7 +88,7 @@ forge build --use solc:0.8.20
 
 ## 4. Environment Variables
 
-The deploy script reads six required address variables. **None of them is a private key** — signing is handled by Foundry's keystore (see §5).
+The deploy script reads seven required address variables. **None of them is a private key** — signing is handled by Foundry's keystore (see §5).
 
 Create a `.env` file in the repository root:
 
@@ -112,6 +112,12 @@ EXCHANGE_ADDRESS=0x...
 # Gnosis ConditionalTokens (ERC-1155) contract on the target chain
 CTF_ADDRESS=0x...
 
+# Poly Safe factory on the target chain — the CREATE2 deployer of every user's Safe.
+# Use the value the deployed exchange returns from getSafeFactory(), so LPs sign
+# for the same Safe on the vault and on the exchange. The script reads the proxy
+# bytecode from this contract and hashes it (see "Known contract addresses").
+SAFE_FACTORY_ADDRESS=0x...
+
 # ── Role wallet addresses (NOT private keys) ─────────────────────────────────
 
 # Initial Admin — registry-only authority (add/remove operators, set oracle)
@@ -121,7 +127,8 @@ ADMIN_ADDRESS=0x...
 # Must be a DIFFERENT wallet from OPERATOR_ADDRESS
 ORACLE_ADDRESS=0x...
 
-# Initial Operator — transactional authority (mintPositionFor, notifyFees, etc.)
+# Initial Operator — transactional authority (depositForIntent, mintPositionFor,
+# reclaimDepositFor, notifyFees, etc.)
 # Must be a DIFFERENT wallet from ORACLE_ADDRESS
 OPERATOR_ADDRESS=0x...
 
@@ -145,8 +152,33 @@ source .env
 
 | Network | USDC | CTF Exchange | ConditionalTokens |
 |---------|------|--------------|-------------------|
-| Polygon mainnet | `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174` | (Prophet address) | `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045` |
-| Polygon Amoy | varies — check Prophet testnet docs | (Prophet testnet address) | (testnet address) |
+| Polygon mainnet | `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174` | `0x127aD3A6e55EbBDaecC0eaeb12615879611e1839` | `0x4D97DCd97eC945f40cF65F87097ACe5EA0476045` |
+| Polygon Amoy | varies — check Prophet testnet docs | `0xe97fe5338f70c4e82a5292b274ad16d87799c476` | (testnet address) |
+
+### Safe derivation inputs
+
+The factory holds two immutable values that every vault reads to check an LP's owner-key signature: the Poly Safe factory address and the hash of that factory's proxy bytecode (`keccak256(getContractBytecode())`, which is the proxy creation code concatenated with the ABI-encoded master copy). The deploy script reads the bytecode from the live factory and prints the hash. Compare the printed hash with this table before you broadcast.
+
+| Chain | Safe factory (`SAFE_FACTORY_ADDRESS`) | Master copy | Expected proxy bytecode hash |
+|-------|--------------------------------------|-------------|------------------------------|
+| Polygon (137) | `0xD0d6655B69d5589402593a854836bbe5305ab09B` | `0x0b71A0e839474D7eCF2ED1546fBB1D0603D19760` | `0x4b856c0ca50349cc4a9add5f9bfa9cb369b54f8b87f90023a3fb45b49eadec50` |
+| Amoy (80002) | `0x0F95cE955dE28995F41f0A89B61aEa1c5e8F4c7a` | `0xA2AfB5D91dE9Dfddb2B202770B2CE2178afdC039` | `0x182112daed9969029a2a0edb10305e67a23eb3aa54543a1b8c7c08e9c8977c48` |
+
+Provenance, read on 2026-09-12: each Safe factory address is the value the deployed exchange on that chain returns from `getSafeFactory()`, and matches the Poly Safe deploy broadcast (`all-contracts/contracts-poly-safe/broadcast/DeployPolySafeFactory.s.sol/<chain>/`). Each master copy is the factory's `masterCopy()`. Each hash is `keccak256` of the factory's `getContractBytecode()`. The proxy creation code alone hashes to `0x8a72557f8d679f61f25b538fe487e8cdcdc3b9cb3f77163e11be999f2beed2df` on both chains, which matches the constant in the exchange's `PolySafeLib.sol` and in the server's `safe.go`.
+
+Check the hash yourself:
+
+```bash
+cast call $SAFE_FACTORY_ADDRESS "getContractBytecode()(bytes)" --rpc-url $RPC_URL | cast keccak
+```
+
+Check the derivation against the live factory for any owner key (the test key `0xA11CE`, owner `0xe05fcC23807536bEe418f142D19fa0d21BB0cfF7`, derives `0x511894A9736bdE6F848364A33e81F67cC183655E` on Polygon and `0x40953b353BFFa880AD4EF3A38f994625fD92aEf3` on Amoy):
+
+```bash
+cast call $SAFE_FACTORY_ADDRESS "computeProxyAddress(address)(address)" <OWNER_KEY> --rpc-url $RPC_URL
+```
+
+A factory deployed with a wrong hash rejects every relayed LP signature on every vault it creates, and neither value can change after deployment. A new Safe factory needs a new LP vault factory.
 
 Fill these in before sourcing your `.env`.
 
@@ -202,11 +234,15 @@ forge script script/Deploy.s.sol \
   --account <account-name>
 ```
 
-Look for both contract addresses printed at the end:
+Look for the Safe derivation inputs and both contract addresses printed at the end. Compare the hash with the table in §4 before you broadcast:
 
 ```
-LPVault implementation: 0x...
-LPVaultFactory:         0x...
+Safe factory:             0x...
+Safe master copy:         0x...
+Safe proxy bytecode hash:
+0x...
+LPVault implementation:   0x...
+LPVaultFactory:           0x...
 ```
 
 ### 6.4 Broadcast the deployment
@@ -301,8 +337,9 @@ forge verify-contract \
   --etherscan-api-key $ETHERSCAN_API_KEY \
   --verifier-url "https://api.etherscan.io/v2/api?chainid=137" \
   --chain-id 137 \
-  --constructor-args $(cast abi-encode "constructor(address,address,address,address,address,address,address)" \
-    <IMPL_ADDRESS> $USDC_ADDRESS $EXCHANGE_ADDRESS $CTF_ADDRESS $ADMIN_ADDRESS $ORACLE_ADDRESS $OPERATOR_ADDRESS)
+  --constructor-args $(cast abi-encode "constructor(address,address,address,address,address,address,address,address,bytes32)" \
+    <IMPL_ADDRESS> $USDC_ADDRESS $EXCHANGE_ADDRESS $CTF_ADDRESS $ADMIN_ADDRESS $ORACLE_ADDRESS $OPERATOR_ADDRESS \
+    $SAFE_FACTORY_ADDRESS <SAFE_PROXY_BYTECODE_HASH>)
 
 # Verify LPVault implementation (no constructor args needed — it uses _disableInitializers)
 forge verify-contract \
@@ -331,8 +368,10 @@ cast send <FACTORY_ADDRESS> \
 
 `<CONDITION_ID>` is the market's condition ID on the ConditionalTokens contract. `<YES_TOKEN_ID>` is the index set 1 position ID and `<NO_TOKEN_ID>` is the index set 2 position ID of that condition, with USDC as collateral. Read both from the ConditionalTokens contract with `getPositionId(<USDC>, getCollectionId(0x0000000000000000000000000000000000000000000000000000000000000000, <CONDITION_ID>, 1))` for YES and the same call with index set `2` for NO. The factory checks all three values and reverts before it deploys a vault if any value is wrong, because a vault can never correct its identity later.
 
+Before the first deposit into a vault, the app relays `USDC.approve(<VAULT_ADDRESS>, <amount>)` from the LP's Safe, as it relays every Safe transaction today. Prophet adds that call and `USDC.approve(<VAULT_ADDRESS>, 0)` to the relay allow list, so an LP can also revoke. The Operator then calls `depositForIntent` with the owner key's signed `MintIntent`, and `mintPositionFor` with the same six fields. The self-service `reclaimDeposit(bytes32)` is a Safe transaction the owner key signs; Prophet either adds it to the relay allow list, or the LP submits it through another relayer or the Safe app when the Operator does not cooperate.
+
 The **Admin** should immediately:
-1. Confirm the initial operator and oracle are set correctly by calling `operators(<address>)` and `oracle()` on the factory.
+1. Confirm the initial operator and oracle are set correctly by calling `operators(<address>)` and `oracle()` on the factory, and the Safe derivation inputs by calling `safeFactory()` and `safeProxyBytecodeHash()`.
 2. Review the `adminCount` — it should be `1`.
 3. Transfer admin if needed via the two-step `transferAdmin` / `acceptAdmin` flow.
 4. After a transfer, call `removeAdmin(<old admin address>)` from the new admin. `acceptAdmin` adds the new admin but does not remove the old one, so the old key keeps full admin rights on the factory and on every vault until it is removed.

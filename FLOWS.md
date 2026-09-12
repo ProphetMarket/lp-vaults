@@ -62,9 +62,11 @@ sequenceDiagram
     Note right of Vault: Phase = Active<br/>activeLiquidity = 0
 
     Note over Operator,Vault: ── STEP 3: LP mints a position ─────────────────────────────
-    LP->>LP: sign MintIntent(lp, tickLower, tickUpper,<br/>usdcAmount, intentId) via EIP-712
-    Operator->>Vault: mintPositionFor(lp, tL, tU, amount,<br/>intentId, lpSig)
-    Vault->>LP: pull USDC via transferFrom
+    LP->>LP: owner key signs MintIntent(lp = Safe, tickLower,<br/>tickUpper, usdcAmount, intentId, deadline) via EIP-712
+    Operator->>Vault: depositForIntent(lp, tL, tU, amount,<br/>intentId, deadline, sig)
+    Vault->>LP: pull USDC from the Safe via transferFrom
+    Note right of Vault: pendingDeposits[intentId] = (Safe, amount, hash)
+    Operator->>Vault: mintPositionFor(lp, tL, tU, amount,<br/>intentId, deadline)
     Vault-->>Operator: positionId = 0
     Note right of Vault: activeLiquidity > 0<br/>position[0] created
 
@@ -81,7 +83,7 @@ sequenceDiagram
 
     Note over Oracle,Vault: ── STEP 6: Market resolves — Oracle triggers wind-down ──
     Oracle->>Vault: startWindDown()
-    Note right of Vault: Phase = WindDown<br/>mintPositionFor now reverts
+    Note right of Vault: Phase = WindDown<br/>depositForIntent and mintPositionFor now revert
 
     Note over LP,Vault: ── STEP 7: LP exits during wind-down ──────────────────────
     LP->>Vault: collect(positionId)
@@ -92,7 +94,7 @@ sequenceDiagram
 **Key invariants during the lifecycle:**
 - `activeLiquidity == 0` until the first mint. The `minFirstLiq` floor prevents inflation attacks on this first mint.
 - `notifyFees` reverts if `activeLiquidity == 0` — fees cannot be distributed into the void.
-- After `startWindDown()`, only exit paths remain open: `collect`, `reclaimDeposit`, and `emergencyCancelAll`.
+- After `startWindDown()`, only exit paths remain open: `collect`, `reclaimDeposit`, `reclaimDepositFor`, and `emergencyCancelAll`.
 - `Oracle` and `Operator` **must** be different wallets — the constructor enforces this.
 
 ---
@@ -101,31 +103,38 @@ sequenceDiagram
 
 These are the day-to-day operations that happen repeatedly during the Active (and WindDown) phases.
 
-### 2.1 Mint a Position (`mintPositionFor`)
+### 2.1 Escrow and Mint a Position (`depositForIntent`, `mintPositionFor`)
 
-The Operator credits an LP's signed intent to create a concentrated-liquidity position. The LP signs off-chain; the Operator submits on-chain.
+The Operator escrows an LP's USDC from the LP's Safe against a signed intent, then mints the position from that escrow. The LP's owner key signs off-chain; the Operator submits both calls on-chain. The mint verifies no signature and moves no USDC.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor LP
+    actor OwnerKey as Owner key
+    participant Safe as LP's Safe
     actor Operator
     participant Vault as LPVault
 
-    LP->>LP: Construct MintIntent{<br/>  lp, tickLower, tickUpper,<br/>  usdcAmount, intentId<br/>}
-    LP->>LP: EIP-712 sign → lpSig
-    LP->>Operator: (off-chain) share intent + signature
-    LP->>Vault: approve(vault, usdcAmount) [USDC]
+    OwnerKey->>Operator: signed Safe transaction USDC.approve(vault, amount)
+    Operator->>Safe: execTransaction (relay)
+    Safe->>Safe: USDC.approve(vault, amount)
 
-    Operator->>Vault: mintPositionFor(lp, tL, tU,<br/>usdcAmount, intentId, lpSig)
-    Note right of Vault: Checks:<br/>• phase == Active<br/>• usdcAmount > 0<br/>• tickLower < tickUpper<br/>• both ticks aligned to tickSpacing<br/>• lpSig valid EIP-712<br/>• intentId not used before<br/>• liquidity ≥ minFirstLiq (if activeLiquidity==0)
+    OwnerKey->>OwnerKey: Construct MintIntent{<br/>  lp = Safe, tickLower, tickUpper,<br/>  usdcAmount, intentId, deadline<br/>}
+    OwnerKey->>OwnerKey: EIP-712 sign → sig
+    OwnerKey->>Operator: (off-chain) share intent + signature
 
-    Vault->>LP: transferFrom USDC → Vault
+    Operator->>Vault: depositForIntent(lp, tL, tU,<br/>usdcAmount, intentId, deadline, sig)
+    Note right of Vault: Checks:<br/>• phase == Active, not paused<br/>• usdcAmount > 0<br/>• block.timestamp ≤ deadline<br/>• tickLower < tickUpper, both aligned<br/>• Safe derived from the signer == lp<br/>• intentId not used, not escrowed
+    Vault->>Safe: transferFrom USDC → Vault
+    Note right of Vault: pendingDeposits[intentId] = (Safe, amount, hash)<br/>totalEscrowed += amount<br/>DepositEscrowed emitted
+
+    Operator->>Vault: mintPositionFor(lp, tL, tU,<br/>usdcAmount, intentId, deadline)
+    Note right of Vault: Checks:<br/>• phase == Active, not paused<br/>• intentId not used<br/>• escrow names lp, hash matches<br/>• liquidity ≥ minFirstLiq (if activeLiquidity==0)
     Vault-->>Operator: positionId
-    Note right of Vault: position[positionId] created<br/>tick state updated<br/>activeLiquidity adjusted (if in-range)
+    Note right of Vault: escrow deleted, totalEscrowed -= amount<br/>position[positionId] created, owner = Safe<br/>tick state updated<br/>activeLiquidity adjusted (if in-range)
 ```
 
-**When to call:** After the LP has deposited USDC off-chain and signed their intent. The Operator submits on-chain to credit the position.
+**When to call:** After the LP's owner key has signed the intent and the Safe has approved the vault. The Operator escrows first, then mints. Between the two calls the Safe can reclaim the escrow at any moment (2.6), so the Operator mints promptly.
 
 ---
 
@@ -236,39 +245,35 @@ sequenceDiagram
 
 ---
 
-### 2.6 Reclaim Deposit (`reclaimDeposit`)
+### 2.6 Reclaim Deposit (`reclaimDeposit`, `reclaimDepositFor`)
 
-Two-phase escape hatch for an LP whose `mintPositionFor` was never fulfilled by the Operator. The LP can reclaim their USDC after a 24-hour timelock.
+One-call escape hatch for an LP whose escrowed intent the Operator never minted. The escrow record proves the deposit, so there is no timelock, no Operator co-signature, no phase check, and no pause check. Two entry points: the Safe calls `reclaimDeposit(intentId)` itself, or the owner key signs a `ReclaimIntent` and the Operator relays it through `reclaimDepositFor`.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor LP
+    actor OwnerKey as Owner key
+    participant Safe as LP's Safe
     actor Operator
     participant Vault as LPVault
 
-    Note over LP,Operator: LP deposited USDC off-chain; Operator hasn't called mintPositionFor
+    Note over Safe,Vault: The Operator escrowed the Safe's USDC (2.1) and has not minted it
 
-    Note over LP: LP signs MintIntent (lpSig)
-    Note over Operator: Operator signs same MintIntent (operatorSig) as deposit acknowledgement
-
-    Note over LP,Vault: Phase 1: Submit reclaim
-    LP->>Vault: reclaimDeposit(lp, tL, tU, amount, intentId, lpSig, operatorSig)
-    Note right of Vault: Checks:<br/>phase != Cancelled<br/>msg.sender == lp<br/>lpSig valid EIP-712<br/>operatorSig from a registered Operator<br/>intentId not already used
-    Note right of Vault: intentTimestamps[intentId] = block.timestamp
-    Note right of Vault: ReclaimSubmitted event emitted
-
-    Note over LP,Vault: Wait 24 hours
-
-    Note over LP,Vault: Phase 2: Execute reclaim (after 24h)
-    LP->>Vault: reclaimDeposit(lp, tL, tU, amount, intentId, lpSig, operatorSig)
-    Note right of Vault: Checks:<br/>block.timestamp - intentTimestamps >= 24h
-    Note right of Vault: usedIntents[intentId] = true
-    Vault->>LP: transfer usdcAmount USDC
+    alt Self-service (no Operator)
+        OwnerKey->>Safe: signed Safe transaction reclaimDeposit(intentId)
+        Safe->>Vault: reclaimDeposit(intentId)
+        Note right of Vault: Checks:<br/>intentId not used<br/>escrow exists<br/>recorded Safe == msg.sender
+    else Relayed
+        OwnerKey->>Operator: signed ReclaimIntent(lp = Safe, intentId, deadline)
+        Operator->>Vault: reclaimDepositFor(lp, intentId, deadline, sig)
+        Note right of Vault: Checks:<br/>block.timestamp ≤ deadline<br/>Safe derived from the signer == lp<br/>intentId not used<br/>escrow exists<br/>recorded Safe == lp
+    end
+    Note right of Vault: usedIntents[intentId] = true<br/>escrow deleted, totalEscrowed -= amount
+    Vault->>Safe: transfer recorded amount
     Note right of Vault: DepositReclaimed event emitted
 ```
 
-**When to call:** When an LP's deposit has gone unserviced by the Operator for too long. Phase 1 starts the timelock; Phase 2 (same function, same arguments) executes after 24 hours.
+**When to call:** Whenever the LP wants the escrow back before the Operator mints it. The refund comes from the record, in every phase, paused or not, and with every Operator removed.
 
 ---
 
@@ -300,7 +305,7 @@ sequenceDiagram
     Note right of Vault: EmergencyCancelExecuted event emitted
 ```
 
-**When to call:** After 7 days without any successful Operator call (`mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`). The triggering LP does not need to be the admin — any active position holder can call it.
+**When to call:** After 7 days without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`). The triggering LP does not need to be the admin — any active position holder can call it.
 
 **Why CEI (checks-effects-interactions):** All position state is zeroed and the phase flipped to Cancelled **before** the USDC transfer loop. This prevents reentrancy even if USDC were a malicious token.
 
@@ -322,6 +327,7 @@ sequenceDiagram
     Admin->>Vault: pauseTrading()
     Note right of Vault: paused = true<br/>TradingPaused event emitted
 
+    Operator->>Vault: depositForIntent(...) ← REVERTS TradingIsPaused
     Operator->>Vault: mintPositionFor(...) ← REVERTS TradingIsPaused
     Operator->>Vault: notifyFees(...)      ← REVERTS TradingIsPaused
     Operator->>Vault: updateTick(...)      ← REVERTS TradingIsPaused
@@ -329,7 +335,8 @@ sequenceDiagram
     Operator->>Vault: heartbeat()          ✓ SUCCEEDS (liveness signal, not gated by pause)
 
     LP->>Vault: collect(positionId)        ✓ SUCCEEDS (exit path always open)
-    LP->>Vault: reclaimDeposit(...)        ✓ SUCCEEDS (exit path always open)
+    LP->>Vault: reclaimDeposit(intentId)   ✓ SUCCEEDS (exit path always open)
+    Operator->>Vault: reclaimDepositFor(...) ✓ SUCCEEDS (exit path always open)
 
     Note over Admin,Vault: ── Unpause ──────────────────────────────────────────────
     Admin->>Vault: unpauseTrading()
@@ -430,13 +437,15 @@ sequenceDiagram
 |----------|-------|-------|-------|
 | `createVault` | Oracle | — | On factory |
 | `startWindDown` | Oracle | Active | One-way; enables exit-only |
-| `mintPositionFor` | Operator | Active | Not paused |
+| `depositForIntent` | Operator | Active | Not paused; owner-key signature checked against the derived Safe |
+| `mintPositionFor` | Operator | Active | Not paused; escrow required, no signature, no USDC |
 | `notifyFees` | Operator | Active / WindDown | Not paused; activeLiquidity > 0 |
 | `updateTick` | Operator | Active | Not paused; max 256 ticks |
 | `mergePositions` | Operator | Active / WindDown | Not paused |
 | `heartbeat` | Operator | Active / WindDown | Works while paused; refreshes the silence timer only |
 | `collect` | LP (owner) | Active / WindDown | Always open; works while paused |
-| `reclaimDeposit` | LP (owner) | Active / WindDown | Always open; works while paused |
+| `reclaimDeposit` | LP's Safe | Every phase | Always open; works while paused; no timelock |
+| `reclaimDepositFor` | Operator | Every phase | Works while paused; owner-key ReclaimIntent with a deadline |
 | `emergencyCancelAll` | Any position holder | Active / WindDown | After 7-day silence |
 | `pauseTrading` | Admin | Any | On vault |
 | `unpauseTrading` | Admin | Any | On vault |

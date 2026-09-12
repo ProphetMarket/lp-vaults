@@ -21,12 +21,13 @@ The contracts are the on-chain foundation only. The off-chain keeper, event list
 | Emergency Cancel All Positions | implemented | Position-holder force-close after operator-silence timelock |
 | Pause Trading | implemented | Admin-callable circuit breaker on trading entry points |
 | Upgradeable Vault Implementation Pointer | implemented | Admin two-step 7-day timelocked upgrade of the factory's implementation pointer |
-| Mint LP Position | implemented | Operator-gated EIP-712 signed intent flow |
+| Escrow Deposit for Mint Intent | implemented | Operator escrows an LP's USDC from the LP's Safe against a signed mint intent |
+| Mint LP Position | implemented | Operator-gated mint that consumes a per-intent escrow |
 | Collect Fees on a Position | implemented | LP fee withdrawal via v3 feeGrowthInside snapshot |
 | Merge Positions | implemented | Operator housekeeping to combine same-range same-owner positions |
 | Notify and Distribute Fees | implemented | Operator-driven Q128 accumulator update |
 | Update Tick and Cross Ticks | implemented | Operator tick sync with per-tick accumulator flip |
-| LP Escape Hatch | pending | LP-initiated USDC recovery for unfulfilled mint intents |
+| LP Escape Hatch | implemented | One-call reclaim of an escrow the Operator did not mint, by the Safe or relayed |
 
 Full specs are under `specs/features/`. Feature index: [specs/FEATURES.md](specs/FEATURES.md).
 
@@ -35,9 +36,9 @@ Full specs are under `specs/features/`. Feature index: [specs/FEATURES.md](specs
 | Role | Authority | Notes |
 |------|-----------|-------|
 | **Admin** | Registry-only: add/remove operators, set oracle, pause trading, schedule/apply/cancel implementation upgrades, two-step admin transfer | Cannot call user-facing vault functions |
-| **Operator** | Transactional: `mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat` | Multiple addresses allowed; must be separate from Oracle |
+| **Operator** | Transactional: `depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat` | Multiple addresses allowed; must be separate from Oracle |
 | **Oracle** | Lifecycle: `createVault` (factory), `startWindDown` (vault) | Single wallet; must be separate from Operator |
-| **LP** | Any wallet: `mintPosition`, `collect`, `burnPosition`, `reclaimDeposit` on their own positions | |
+| **LP** | A Safe wallet; the owner key signs intents, and the Safe calls `reclaimDeposit`, `collect`, `burnPosition` on its own escrows and positions | The vault accepts an owner key only when the Safe it derives equals the named Safe |
 | **Keeper** | Off-chain bot holding an Operator key — no on-chain role | Not a contract concept |
 
 See `specs/ACTORS.md` for full role details and `CLAUDE.md` for the security checklist enforced on every PR.
