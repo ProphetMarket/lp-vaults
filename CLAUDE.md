@@ -29,7 +29,7 @@ Rationale: smaller audit surface, no transitive dependency risk, no version-pinn
 Auditors examine these categories first. Every PR must satisfy every applicable item.
 
 1. **Reentrancy.** Apply an inline `nonReentrant` modifier to every external state-changing function that performs an external call or token transfer. Follow checks-effects-interactions strictly — state mutations before external calls, always.
-2. **Access control.** Use modifiers only: `onlyAdmin`, `onlyOperator`, `onlyOracle`, `onlyFactory`. NEVER inline `require(msg.sender == ...)` in a function body — modifiers compose better and are easier to grep. Role registry follows the `ctf-exchange/lib/ctf-exchange/src/exchange/mixins/Auth.sol` pattern verbatim: `mapping(address => uint256) admins` + `adminCount` + two-step `transferAdmin` / `acceptAdmin`; `mapping(address => uint256) operators`; `address oracle` set via `setOracle`.
+2. **Access control.** Use modifiers only: `onlyAdmin`, `onlyOperator`, `onlyOracle`, `onlyFactory`. NEVER inline `require(msg.sender == ...)` in a function body — modifiers compose better and are easier to grep. Role registry follows the `ctf-exchange/lib/ctf-exchange/src/exchange/mixins/Auth.sol` pattern verbatim: `mapping(address => uint256) admins` + `adminCount` + two-step `transferAdmin` / `acceptAdmin`; `mapping(address => uint256) operators`; `address oracle` set via `setOracle`. One recorded departure: `removeAdmin` and `renounceAdminRole` also clear `pendingAdmin` when it names the removed address (ADR-5UJS).
 3. **Integer math.** Every Q128 product uses inline `mulDiv` (overflow-safe). Every `int24` / `int128` / `uint128` conversion uses inline `SafeCast`. No `unchecked` blocks unless overflow is provably impossible AND a comment on the block explains why.
 4. **Replay protection.** Every operator-issued or LP-signed action carries a unique `intentId` / `nonce` recorded in a `mapping(bytes32 => bool) used`. Check-then-set inside the same function before any external work.
 5. **Signature handling.** EIP-712 with a domain separator cached at `initialize()`; recompute on `block.chainid` mismatch (cf. OpenZeppelin's EIP712 pattern, inlined). ECDSA recovery enforces `s` malleability bounds and rejects `v` values outside `{27, 28}`.
@@ -48,7 +48,7 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 
 | Role | On-chain? | Authority | Storage |
 |------|-----------|-----------|---------|
-| Admin | yes | Set/remove operators, set oracle, pause, two-step admin transfer | `mapping(address => uint256) admins` + `uint256 adminCount` |
+| Admin | yes | Set/remove operators, set oracle, pause, two-step admin transfer, add/remove/renounce admins | `mapping(address => uint256) admins` + `uint256 adminCount` |
 | Operator | yes | Transactional: `mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`. Multiple addresses allowed. | `mapping(address => uint256) operators` |
 | Oracle | yes (single) | Lifecycle: `createVault` (factory), `startWindDown` (vault). Matches the oracle on `ProphetCTFExchange` + `Resolution`. | `address public oracle` |
 | LP | yes (any wallet) | `mintPosition`, `collect`, `burnPosition`, `reclaimDeposit` (on positions they own) | n/a — checked via `position.owner == msg.sender` |
@@ -60,7 +60,7 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 |---|---|---|
 | `createVault(marketId, tickSpacing)` | Oracle | `LPVaultFactory` |
 | `setOracle`, `addOperator`, `removeOperator`, `pauseTrading` | Admin | both |
-| `transferAdmin`, `acceptAdmin` | Admin | both |
+| `transferAdmin`, `acceptAdmin` | Admin | `LPVaultFactory` |
 | `addAdmin`, `removeAdmin`, `renounceAdminRole` | Admin | `LPVaultFactory` |
 | `initialize(...)` | factory-only (`onlyFactory`) | `LPVault` |
 | `mintPosition(tickLower, tickUpper, usdcAmount)` | any wallet | `LPVault` |

@@ -3,7 +3,7 @@ id: FEAT-REPZ
 name: Deploy LP Vault for a Market
 use_cases: [UC-REQ0, UC-REQ1, UC-REQ2]
 scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5, SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN, SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR]
-last_update: 2026-09-10
+last_update: 2026-09-12
 ---
 
 # Architecture: Deploy LP Vault for a Market
@@ -133,8 +133,8 @@ erDiagram
 |------|------|-------------|
 | `src/LPVaultFactory.sol` | Clone deployer + market registry + factory-level Auth | `createVault()`, `vaultForMarket`, admin/operator/oracle management |
 | `src/LPVault.sol` | Per-market vault implementation (clone target) | `initialize()`, position/tick/fee state, vault-level Auth |
-| `test/LPVaultFactory.t.sol` | Unit + integration tests for factory | Factory deployment, vault creation, role management scenarios |
-| `test/LPVault.t.sol` | Unit tests for vault initialization | Initialization guards, approval setup, ghost position |
+| `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ0-deploy-factory.t.sol` | Integration tests for Deploy Factory | Factory deployment, role-separation revert, implementation-not-initializable and clone-initializable scenarios, factory and vault modifier checks |
+| `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ1-create-vault-for-market.t.sol` | Integration tests for Create Vault for Market | Vault creation, duplicate-market and non-oracle reverts, initialization guards, minimum-first-liquidity floor, ERC-1155 receiver hooks |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ2-manage-roles-on-factory.t.sol` | Integration tests for Manage Roles on Factory | Operator, oracle, and admin role management scenarios, and role propagation to vaults |
 
 ## Event Topology
