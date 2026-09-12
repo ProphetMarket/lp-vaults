@@ -54,7 +54,7 @@ contract MockConditionalTokens {
 
 // ──────────────────────────────────────────────
 // Handler: bounded, valid-only action surface the invariant fuzzer drives.
-// Every action is wrapped in try/catch so an expected revert (e.g. SameTick,
+// Every action is wrapped in try/catch so an expected revert (e.g. TooManyTicksCrossed,
 // NoActiveLiquidity) doesn't abort the run -- only unexpected reverts inside
 // the vault's own arithmetic would surface as an invariant failure.
 // ──────────────────────────────────────────────

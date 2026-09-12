@@ -5,7 +5,7 @@ pragma solidity 0.8.20;
 // Integration tests for every scenario in this use case.
 // Covers: SC-TVS2, SC-TVS3, SC-TVS4, SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 
@@ -492,19 +492,72 @@ contract UpdateTickNonOperatorTest is UpdateTickTestBase {
 }
 
 // ──────────────────────────────────────────────
-// SC-TVS7: Same tick
-// What: Operator calls updateTick(currentTick). The call is a no-op and
-//       wastes gas, so the contract reverts with SameTick.
-// Why:  Fail-fast prevents the Keeper from burning gas on redundant calls.
+// SC-TVS7: Same tick refreshes only the heartbeat
+// What: Operator calls updateTick(currentTick). The call succeeds, refreshes
+//       lastOperatorActivityTimestamp, and does nothing else: no crossing, no
+//       event, no change to the tick, the liquidity, or the fee accumulator.
+// Why:  The keeper reports every 60 seconds and after fills, and most markets
+//       keep the same price, so the unchanged report is the normal case. A
+//       revert would cost gas and refresh nothing (ADR-9J43).
+// Example: currentTick=100 with ticks at 0 and 200 around it; updateTick(100)
+//          succeeds, emits nothing, and moves only the heartbeat.
 // ──────────────────────────────────────────────
 contract UpdateTickSameTickTest is UpdateTickTestBase {
-    // SC-TVS7: reverts with SameTick
-    function test_revertsWithSameTick() public {
-        int24 current = vault.currentTick();
+    function setUp() public override {
+        super.setUp();
+        // Put an initialized tick on each side of the current one: 0 below, 200 above.
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(100));
+        vm.warp(block.timestamp + 60);
+    }
+
+    // SC-TVS7: the unchanged report succeeds and refreshes the heartbeat
+    function test_whenTickIsUnchangedThenHeartbeatRefreshes() public {
+        uint256 before = vault.lastOperatorActivityTimestamp();
+        assertLt(before, block.timestamp, "precondition: the heartbeat is stale");
 
         vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.SameTick.selector);
-        vault.updateTick(current);
+        vault.updateTick(int24(100));
+
+        assertEq(
+            vault.lastOperatorActivityTimestamp(), block.timestamp, "the unchanged report must refresh the heartbeat"
+        );
+    }
+
+    // SC-TVS7: no TickUpdated event, because the tick did not move
+    function test_whenTickIsUnchangedThenNoEventIsEmitted() public {
+        vm.recordLogs();
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(100));
+
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(logs.length, 0, "an unchanged report must emit nothing");
+    }
+
+    // SC-TVS7: nothing else moves — tick, liquidity, fee accumulator, tick records
+    function test_whenTickIsUnchangedThenNoOtherStateChanges() public {
+        int24 tickBefore = vault.currentTick();
+        uint128 liquidityBefore = vault.activeLiquidity();
+        uint256 feeGrowthBefore = vault.feeGrowthGlobalX128();
+        bytes32 tickRecordsBefore = _tickRecordsHash();
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(100));
+
+        assertEq(vault.currentTick(), tickBefore, "currentTick must not move");
+        assertEq(vault.activeLiquidity(), liquidityBefore, "activeLiquidity must not move");
+        assertEq(vault.feeGrowthGlobalX128(), feeGrowthBefore, "feeGrowthGlobalX128 must not move");
+        assertEq(_tickRecordsHash(), tickRecordsBefore, "the tick records at 0, 100, and 200 must not move");
+    }
+
+    /// @dev One hash over the three initialized tick records (liquidityGross,
+    ///      liquidityNet, feeGrowthOutsideX128 at ticks 0, 100, and 200).
+    function _tickRecordsHash() internal view returns (bytes32) {
+        (uint128 g0, int128 n0, uint256 o0) = vault.ticks(int24(0));
+        (uint128 g100, int128 n100, uint256 o100) = vault.ticks(int24(100));
+        (uint128 g200, int128 n200, uint256 o200) = vault.ticks(int24(200));
+        return keccak256(abi.encode(g0, n0, o0, g100, n100, o100, g200, n200, o200));
     }
 }
 

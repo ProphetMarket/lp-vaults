@@ -504,16 +504,17 @@ contract OperatorActivityResetsTimelockTest is EmergencyCancelTestBase {
 
 // ──────────────────────────────────────────────
 // SC-3XTZ: Heartbeat defers emergency cancel on a quiet market
-// What: On a market where the tick has not moved and no fee revenue arrived —
-//       so updateTick reverts SameTick and notifyFees reverts ZeroAmount —
-//       heartbeat() still refreshes the silence timer and pushes the
-//       emergencyCancelAll deadline back.
-// Why:  This is the whole point of the change. Before it, a healthy Operator
-//       running a quiet, stable market had no way to prove liveness, because
-//       the only two functions that touched the timer both legitimately
-//       revert when there is nothing to do.
+// What: On an Active market where the tick has not moved and no fee revenue
+//       arrived, two Operator calls refresh the silence timer and neither
+//       reverts: heartbeat(), and updateTick with the unchanged tick (the
+//       keeper's normal 60-second report, SC-TVS7). notifyFees(0) still
+//       reverts ZeroAmount.
+// Why:  A healthy Operator on a quiet market must be distinguishable from a
+//       silent one, and the keeper's normal report must count as proof of
+//       life without a second transaction.
 // Example: timelock has elapsed; operator calls heartbeat(); an immediate
-//          emergencyCancelAll() reverts with TimelockNotElapsed.
+//          emergencyCancelAll() reverts with TimelockNotElapsed. Same again
+//          with updateTick(currentTick).
 // ──────────────────────────────────────────────
 contract HeartbeatOnQuietMarketTest is EmergencyCancelTestBase {
     function setUp() public override {
@@ -521,21 +522,26 @@ contract HeartbeatOnQuietMarketTest is EmergencyCancelTestBase {
         _warpPastTimelock();
     }
 
-    // SC-3XTZ: on a quiet market the two pre-existing liveness paths both revert,
-    // which is exactly the condition that made a live Operator look silent
-    function test_quietMarketLeavesOperatorNoOtherWayToProveLiveness() public {
+    // SC-3XTZ: on a quiet Active market both refresh paths succeed, and only
+    // the zero-income report still reverts
+    function test_quietMarketHasTwoRefreshPaths() public {
         // Read the tick up front: an inline call here would consume the prank
         int24 unchangedTick = vault.currentTick();
-
-        // The tick has not moved since vault creation, so updateTick has nothing to do
-        vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.SameTick.selector);
-        vault.updateTick(unchangedTick);
 
         // No fee revenue arrived, so notifyFees has nothing to distribute
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.ZeroAmount.selector);
         vault.notifyFees(0);
+
+        // The tick has not moved, and the keeper's report refreshes the timer anyway
+        vm.prank(operatorAddr);
+        vault.updateTick(unchangedTick);
+        assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "the unchanged report must refresh the timer");
+        assertEq(vault.currentTick(), unchangedTick, "the tick must not move");
+
+        vm.prank(lpA);
+        vm.expectRevert(LPVault.TimelockNotElapsed.selector);
+        vault.emergencyCancelAll();
     }
 
     // SC-3XTZ: heartbeat refreshes the silence timer
@@ -645,15 +651,18 @@ contract MintAndMergeResetTimelockTest is EmergencyCancelTestBase {
 
 // ──────────────────────────────────────────────
 // SC-3XU1, SC-3XUO, SC-3XU2: heartbeat access control and phase behavior
-// What: heartbeat() is Operator-only, keeps working while trading is paused,
-//       and reverts once the vault reaches the terminal Cancelled phase.
+// What: heartbeat() is Operator-only, keeps working while trading is paused
+//       and while the vault is wound down, and reverts once the vault reaches
+//       the terminal Cancelled phase.
 // Why:  A non-Operator must not be able to hold off emergencyCancelAll. A
-//       pause is an Admin decision about trading and says nothing about
-//       whether the Operator is alive, so a paused vault must not drift
-//       toward cancellation. Once every position is closed there is nothing
+//       pause is an Admin decision about trading, and a wind-down is an Oracle
+//       decision about the market. Neither says whether the Operator is alive,
+//       and updateTick rejects both states, so heartbeat() is the keeper's
+//       refresh path there. Once every position is closed there is nothing
 //       left to protect.
 // Example: LP calls heartbeat() -> NotOperator; admin pauses, operator
-//          heartbeats fine; after cancel, heartbeat() -> VaultCancelled.
+//          heartbeats fine; oracle winds down, operator heartbeats fine;
+//          after cancel, heartbeat() -> VaultCancelled.
 // ──────────────────────────────────────────────
 contract HeartbeatAccessAndPhaseTest is EmergencyCancelTestBase {
     // SC-3XU1: an LP cannot refresh the timer that protects them
@@ -713,6 +722,31 @@ contract HeartbeatAccessAndPhaseTest is EmergencyCancelTestBase {
 
         assertEq(
             vault.lastOperatorActivityTimestamp(), block.timestamp, "heartbeat must still work while trading is paused"
+        );
+    }
+
+    // SC-3XUO: while wound down, updateTick rejects the keeper's report, so
+    // heartbeat is the refresh path
+    function test_heartbeatWorksWhileWoundDown() public {
+        vm.prank(oracleAddr);
+        vault.startWindDown();
+        assertEq(vault.phase(), 2, "precondition: phase should be WindDown (2)");
+
+        // Read the tick up front: an inline call here would consume the prank
+        int24 unchangedTick = vault.currentTick();
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.VaultNotActive.selector);
+        vault.updateTick(unchangedTick);
+
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(operatorAddr);
+        vault.heartbeat();
+
+        assertEq(
+            vault.lastOperatorActivityTimestamp(),
+            block.timestamp,
+            "heartbeat must still work while the vault is wound down"
         );
     }
 
