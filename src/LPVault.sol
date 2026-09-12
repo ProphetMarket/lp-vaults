@@ -611,15 +611,15 @@ contract LPVault {
 
             // Compute uncollected fees using the same accumulator formula as collect
             uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
-            // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 are each
-            // individually wrapped mod 2^256 (see _computeFeeGrowthInside), and this
-            // subtraction is designed to cancel that wraparound out, mirroring Uniswap
-            // v3's audited fee-growth accounting. Do NOT route this product through
-            // _mulDiv: _mulDiv computes the exact mathematical product specifically to
-            // prevent overflow, which is the opposite of what's needed here -- applied
-            // to a wrapped near-2^256 delta it would compute an astronomically wrong
-            // (non-reverting) fee amount instead of the correct small one, a fund-drain
-            // risk strictly worse than reverting.
+            // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 both wrapped
+            // mod 2^256 by the same offset (see _computeFeeGrowthInside), so this
+            // subtraction must wrap too: it cancels the offset to the true small delta,
+            // mirroring Uniswap v3's fee-growth accounting. That subtraction is the
+            // load-bearing part. On a correct delta, liquidity * delta fits in 256 bits
+            // for every reachable value, so _mulDiv would return the same number; on a
+            // wrong delta both forms return a wrong number. The product stays in this
+            // block and never goes through _mulDiv by convention, so every fee site
+            // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
             uint256 fees;
             unchecked {
                 fees = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
@@ -781,15 +781,15 @@ contract LPVault {
         uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
 
         // Calculate fees accrued since the last collect (or mint).
-        // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 are each
-        // individually wrapped mod 2^256 (see _computeFeeGrowthInside), and this
-        // subtraction is designed to cancel that wraparound out, mirroring Uniswap
-        // v3's audited fee-growth accounting. Do NOT route this product through
-        // _mulDiv: _mulDiv computes the exact mathematical product specifically to
-        // prevent overflow, which is the opposite of what's needed here -- applied
-        // to a wrapped near-2^256 delta it would compute an astronomically wrong
-        // (non-reverting) fee amount instead of the correct small one, a fund-drain
-        // risk strictly worse than reverting.
+        // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 both wrapped
+        // mod 2^256 by the same offset (see _computeFeeGrowthInside), so this
+        // subtraction must wrap too: it cancels the offset to the true small delta,
+        // mirroring Uniswap v3's fee-growth accounting. That subtraction is the
+        // load-bearing part. On a correct delta, liquidity * delta fits in 256 bits
+        // for every reachable value, so _mulDiv would return the same number; on a
+        // wrong delta both forms return a wrong number. The product stays in this
+        // block and never goes through _mulDiv by convention, so every fee site
+        // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
         uint256 owed;
         unchecked {
             owed = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
@@ -1035,15 +1035,15 @@ contract LPVault {
         uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(tickLower, tickUpper);
 
         // Compute uncollected fees for the survivor before updating its snapshot.
-        // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 are each
-        // individually wrapped mod 2^256 (see _computeFeeGrowthInside), and this
-        // subtraction is designed to cancel that wraparound out, mirroring Uniswap
-        // v3's audited fee-growth accounting. Do NOT route this product through
-        // _mulDiv: _mulDiv computes the exact mathematical product specifically to
-        // prevent overflow, which is the opposite of what's needed here -- applied
-        // to a wrapped near-2^256 delta it would compute an astronomically wrong
-        // (non-reverting) fee amount instead of the correct small one, a fund-drain
-        // risk strictly worse than reverting.
+        // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 both wrapped
+        // mod 2^256 by the same offset (see _computeFeeGrowthInside), so this
+        // subtraction must wrap too: it cancels the offset to the true small delta,
+        // mirroring Uniswap v3's fee-growth accounting. That subtraction is the
+        // load-bearing part. On a correct delta, liquidity * delta fits in 256 bits
+        // for every reachable value, so _mulDiv would return the same number; on a
+        // wrong delta both forms return a wrong number. The product stays in this
+        // block and never goes through _mulDiv by convention, so every fee site
+        // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
         uint256 survivorFees;
         unchecked {
             survivorFees = uint256(survivor.liquidity) * (feeGrowthInsideX128 - survivor.feeGrowthInsideLastX128) / Q128;
@@ -1063,8 +1063,8 @@ contract LPVault {
             }
 
             // Compute uncollected fees for the consumed position.
-            // unchecked: same wraparound-cancellation as survivorFees above -- and
-            // the same "do not route through _mulDiv" rule applies here too.
+            // unchecked: same wraparound-cancellation as survivorFees above, and the
+            // same one-shape convention keeps this product out of _mulDiv.
             uint256 consumedFees;
             unchecked {
                 consumedFees =
@@ -1194,11 +1194,14 @@ contract LPVault {
     ///      the vault's inception. Used to snapshot feeGrowthInsideLastX128 at mint time.
     ///      Formula: feeGrowthInside = global - below(tickLower) - above(tickUpper)
     function _computeFeeGrowthInside(int24 tickLower, int24 tickUpper) internal view returns (uint256) {
-        // unchecked: feeGrowthOutside snapshots are taken at different points in time
-        // than they're read, so feeGrowthBelow + feeGrowthAbove can legitimately,
-        // temporarily exceed feeGrowthGlobalX128 at the moment of subtraction. This
-        // is expected to wrap mod 2^256 -- mirroring Uniswap v3's audited fee-growth
-        // accounting -- not an "overflow is provably impossible" situation.
+        // unchecked: a tick initialized late assumes all past growth sits on one
+        // side of it, so feeGrowthBelow + feeGrowthAbove can exceed
+        // feeGrowthGlobalX128 at the moment of subtraction. The result must wrap mod
+        // 2^256 -- mirroring Uniswap v3's fee-growth accounting -- and a position
+        // stores that wrapped value as its snapshot. A later inside - snapshot
+        // subtraction, also unchecked, cancels the offset to the true delta. This is
+        // the exception to CLAUDE.md checklist item 3 that ADR-8L1F (FEAT-T7AF)
+        // records, not an "overflow is provably impossible" situation.
         unchecked {
             // feeGrowthBelow: fees that grew while price was below tickLower
             uint256 feeGrowthBelow;
