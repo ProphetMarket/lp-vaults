@@ -3,32 +3,27 @@ pragma solidity 0.8.20;
 
 // FEAT-REPZ: Deploy LP Vault for a Market
 // UC-REQ0: Deploy Factory, UC-REQ1: Create Vault for Market
-// UC-REQ0-001: deploy-factory-with-role-registry
-// UC-REQ1-001: create-vault-and-initialize
 // FEAT-T7AF: Mint LP Position
 // UC-T7AG: Operator Mint Position for LP
-// UC-T7AG-001: operator-mint-position
 // FEAT-TOGR: Notify and Distribute Fees
 // UC-TOGS: Operator Notify Fee Revenue
-// UC-TOGS-001: notify-fees
 // FEAT-TVS0: Update Tick and Cross Ticks
 // UC-TVS1: Update Current Tick
-// UC-TVS1-001: update-tick-with-crossing
 // FEAT-U079: Collect Fees on a Position
 // UC-U07A: Collect Position Fees
-// UC-U07A-001: collect-fees
 // FEAT-JGE7: Vault Wind-Down Lifecycle
 // UC-JGEE: Start Wind Down
-// UC-JGEE-001: start-wind-down
 // FEAT-JXQO: Emergency Cancel All Positions
 // UC-JXQW: Emergency Cancel All
-// UC-JXQW-001: emergency-cancel-all
 // FEAT-K1M2: Merge Positions
 // UC-K1M8: Merge Same-Range Positions
-// UC-K1M8-001: merge-same-range-positions
 // FEAT-K1MD: Pause Trading
 // UC-K1MK: Pause and Unpause Vault
-// UC-K1MK-001: pause-and-unpause-vault
+// FEAT-3ZRI: Escrow Deposit for Mint Intent
+// UC-3Z92: Operator Escrow Deposit for Intent
+// FEAT-JAIJ: LP Escape Hatch
+// UC-JAIK: Reclaim Deposit
+// UC-3Z93: Operator Reclaim Deposit for LP
 
 /// @dev Minimal ERC-20 interface — only approve needed for exchange setup.
 interface IERC20 {
@@ -48,12 +43,16 @@ interface IConditionalTokens {
     function getPositionId(address collateralToken, bytes32 collectionId) external pure returns (uint256);
 }
 
-/// @dev Minimal factory interface for auth delegation (FR-FKD0, FR-FKD1, FR-FKD2).
-///      Vault modifiers read role state from the factory at call time.
+/// @dev Minimal factory interface for auth delegation (FR-FKD0, FR-FKD1, FR-FKD2) and for the two
+///      Safe derivation inputs (FR-9OYI). Vault modifiers read role state from the factory at call
+///      time, and _deriveSafe reads the derivation inputs the same way: both are immutable on the
+///      factory, and the vault's factory pointer is fixed at initialize(), so no Admin can change them.
 interface ILPVaultFactory {
     function operators(address) external view returns (uint256);
     function oracle() external view returns (address);
     function admins(address) external view returns (uint256);
+    function safeFactory() external view returns (address);
+    function safeProxyBytecodeHash() external view returns (bytes32);
 }
 
 /// @title LPVault
@@ -136,8 +135,8 @@ contract LPVault {
     uint8 public phase;
 
     /// @dev Circuit breaker flag. When true, trading entry points
-    ///      (mintPositionFor, notifyFees, updateTick, mergePositions) revert.
-    ///      LP exit paths (collect, reclaimDeposit) and emergencyCancelAll
+    ///      (depositForIntent, mintPositionFor, notifyFees, updateTick, mergePositions) revert.
+    ///      LP exit paths (collect, reclaimDeposit, reclaimDepositFor) and emergencyCancelAll
     ///      are unaffected. Independent of the phase state machine.
     bool public paused;
 
@@ -153,9 +152,9 @@ contract LPVault {
     /// @dev Counter for minting new positions
     uint256 public nextPositionId;
 
-    /// @dev Tracks the most recent block.timestamp at which an Operator called
-    ///      notifyFees or updateTick. Used by emergencyCancelAll to detect
-    ///      prolonged Operator silence.
+    /// @dev Tracks the most recent block.timestamp of any successful Operator call
+    ///      (every Operator function carries touchesHeartbeat). Used by
+    ///      emergencyCancelAll to detect prolonged Operator silence.
     uint256 public lastOperatorActivityTimestamp;
 
     /// @dev Identifies which LPVault implementation this clone was deployed from.
@@ -192,14 +191,29 @@ contract LPVault {
     mapping(bytes32 => bool) public usedIntents;
 
     // ──────────────────────────────────────────────
-    // Reclaim state (FEAT-JAIJ)
+    // Escrow state (FEAT-3ZRI)
     // ──────────────────────────────────────────────
 
-    /// @dev intentId => block.timestamp when Phase 1 (reclaim submission) was called.
-    ///      Set exactly once per intentId; never updated. Used by reclaimDeposit Phase 2
-    ///      to enforce RECLAIM_TIMELOCK. Would be immutable in a non-clone contract;
-    ///      storage because EIP-1167.
-    mapping(bytes32 => uint256) public intentTimestamps;
+    /// @dev One escrow per mint intent. `lp` is the Safe that paid and the only address that
+    ///      may consume the entry; address(0) means no escrow (ADR-45IC). `amount` packs with
+    ///      `lp` into one slot, and the inline SafeCast in depositForIntent keeps it exact
+    ///      (FR-45IA). `structHash` is the MintIntent hash that authorized the escrow, so the
+    ///      mint can bind the range, the amount, and the deadline without a second signature
+    ///      check (FR-3Z9W).
+    struct PendingDeposit {
+        address lp;
+        uint96 amount;
+        bytes32 structHash;
+    }
+
+    /// @dev intentId => escrow. Written once by depositForIntent, then only deleted, by
+    ///      mintPositionFor or by a reclaim. Never incremented and never reassigned.
+    mapping(bytes32 => PendingDeposit) public pendingDeposits;
+
+    /// @dev Sum of every pendingDeposits[*].amount (FR-9OYM). USDC.balanceOf(vault) is always
+    ///      at least this much. R9 pays burns and collects from balance - totalEscrowed, so
+    ///      escrowed USDC never pays an exit (decision C7).
+    uint256 public totalEscrowed;
 
     // ──────────────────────────────────────────────
     // TickBitmap (FEAT-TVS0)
@@ -220,8 +234,16 @@ contract LPVault {
     bytes32 private constant EIP712_DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
-    bytes32 private constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
+    /// @dev Every LP-signed type carries a deadline (FR-9OYJ, ADR-9OYP). `lp` is the LP's Safe.
+    bytes32 private constant MINT_INTENT_TYPEHASH = keccak256(
+        "MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId,uint256 deadline)"
+    );
+
+    /// @dev A distinct type for the relayed reclaim, so a mint authorization never doubles as a
+    ///      cancellation (ADR-4029). The refund comes from the escrow record, so the type carries
+    ///      neither the range nor the amount.
+    bytes32 private constant RECLAIM_INTENT_TYPEHASH =
+        keccak256("ReclaimIntent(address lp,bytes32 intentId,uint256 deadline)");
 
     uint256 private constant SECP256K1N_HALF = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
@@ -238,11 +260,6 @@ contract LPVault {
     /// @dev Maximum number of initialized ticks that can be crossed in a single
     ///      updateTick call. Prevents gas griefing on large price moves.
     uint256 internal constant MAX_TICK_CROSSINGS = 256;
-
-    /// @dev Minimum wait between Phase 1 (reclaim submission) and Phase 2 (execution).
-    ///      24 hours = 86400 seconds. Polygon block.timestamp tolerance is ±15s, which
-    ///      is negligible at this scale.
-    uint256 public constant RECLAIM_TIMELOCK = 24 hours;
 
     /// @dev Minimum silence duration before any position holder can trigger
     ///      emergencyCancelAll. 7 days is long enough to distinguish operator
@@ -290,6 +307,11 @@ contract LPVault {
     error TradingIsPaused();
     error NotConditionalTokens();
     error UnknownTokenId();
+    // FEAT-3ZRI, FEAT-JAIJ: one error per escrow state
+    error DepositNotEscrowed();
+    error DepositAlreadyEscrowed();
+    error IntentMismatch();
+    error IntentExpired();
 
     // ──────────────────────────────────────────────
     // Events
@@ -312,10 +334,10 @@ contract LPVault {
     // SC-U07B, SC-U07F, SC-U07G: emitted when LP collects nonzero fees
     event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
 
-    // SC-JAIL: emitted on Phase 1 of reclaimDeposit (records submission timestamp)
-    event ReclaimSubmitted(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
+    // SC-3Z94: emitted on every successful escrow; lp is the Safe that paid
+    event DepositEscrowed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
 
-    // SC-JAIL: emitted on Phase 2 of reclaimDeposit (USDC transferred to LP)
+    // SC-JAIL, SC-3Z9D: emitted by both reclaim paths with the recorded Safe and the recorded amount
     event DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
 
     // SC-K1M9: emitted when Operator merges same-range positions
@@ -378,7 +400,7 @@ contract LPVault {
     }
 
     /// @dev Gates trading entry points while the vault is paused.
-    ///      LP exit paths (collect, reclaimDeposit) are NOT gated.
+    ///      LP exit paths (collect, reclaimDeposit, reclaimDepositFor) are NOT gated.
     modifier whenNotPaused() {
         if (paused) revert TradingIsPaused();
         _;
@@ -581,9 +603,9 @@ contract LPVault {
     // SC-JGEF through SC-JGEK: Oracle-driven vault lifecycle transition
     /// @notice Transitions the vault from Active to WindDown phase.
     /// @dev One-way transition — there is no mechanism to revert from WindDown
-    ///      back to Active. Once in WindDown, mintPositionFor reverts (existing
-    ///      phase guard at the top of that function), while collect and
-    ///      reclaimDeposit remain callable so LPs can exit.
+    ///      back to Active. Once in WindDown, depositForIntent and mintPositionFor
+    ///      revert (phase guard at the top of each), while collect, reclaimDeposit,
+    ///      and reclaimDepositFor remain callable so LPs can exit.
     ///      ORACLE TRUST ASSUMPTION: The Oracle can freeze minting on any vault
     ///      by calling startWindDown(). LPs must trust that the Oracle only
     ///      triggers wind-down when the underlying market has resolved.
@@ -598,8 +620,8 @@ contract LPVault {
     // ──────────────────────────────────────────────
 
     // SC-K1ML, SC-K1MM, SC-K1MN: admin-only circuit breaker
-    /// @notice Halts all trading entry points (mintPositionFor, notifyFees,
-    ///         updateTick, mergePositions) while keeping LP exit paths live.
+    /// @notice Halts all trading entry points (depositForIntent, mintPositionFor,
+    ///         notifyFees, updateTick, mergePositions) while keeping LP exit paths live.
     /// @dev Does not change the vault's phase — pause and phase are orthogonal.
     function pauseTrading() external onlyAdmin {
         paused = true;
@@ -705,20 +727,107 @@ contract LPVault {
     }
 
     // ──────────────────────────────────────────────
+    // Escrow deposit (FEAT-3ZRI, UC-3Z92)
+    // ──────────────────────────────────────────────
+
+    // SC-3Z94 through SC-3Z9B, SC-9OY9, SC-9OYA, SC-9OYB, SC-9OYD: operator-gated per-intent escrow
+    /// @notice Pulls an LP's USDC from the LP's Safe against a signed mint intent and records the
+    ///         escrow under the intentId, so the mint and the reclaim spend exactly what was recorded.
+    /// @dev OPERATOR TRUST ASSUMPTION: The Operator chooses whether and when to escrow an intent.
+    ///      The Operator cannot fabricate a deposit, cannot pull from a Safe whose owner key did not
+    ///      sign this exact intent and approve the vault, and cannot escrow more than the signed
+    ///      amount. A refusal leaves the USDC in the Safe, so there is nothing to rescue (ADR-3Z9Z).
+    ///      Once escrowed, the LP's exit is the one-call reclaimDeposit (FEAT-JAIJ).
+    ///
+    ///      MEV analysis: the escrow creates no position, touches no tick, and reads no price.
+    ///      The only ordering effect is that one escrow blocks a second on the same intentId,
+    ///      and the signature binds that intentId to one Safe, so no third party is exposed.
+    ///
+    ///      The signer is the Safe's owner key, never the Safe: the vault requires that the Safe
+    ///      derived from the recovered key equals `lp` (ADR-9OYP). A valid signature never proves
+    ///      ownership of an intentId; the recorded Safe does (ADR-45IC).
+    ///      Deadline check: `block.timestamp > deadline` reverts. A deadline is inclusive. Polygon's
+    ///      block.timestamp tolerance is ±15s, so an intent signed with a deadline that close to the
+    ///      current block may land on either side (CLAUDE.md checklist item 12). The deadline applies
+    ///      once, here; the mint reads no clock (decision C1).
+    ///      Checks-effects-interactions (NFR-3Z9U): every check first, the record and totalEscrowed
+    ///      second, the USDC pull last, so a failed pull leaves no record behind (SC-9OYD).
+    /// @param lp The LP's Safe — the recorded depositor and the USDC source
+    /// @param tickLower Lower tick bound — must be < tickUpper and aligned to tickSpacing
+    /// @param tickUpper Upper tick bound — must be > tickLower and aligned to tickSpacing
+    /// @param usdcAmount USDC to pull from the Safe — must be > 0
+    /// @param intentId Unique identifier for replay protection, shared with the mint and the reclaims
+    /// @param deadline Last block.timestamp at which this deposit is accepted
+    /// @param signature EIP-712 signature from the Safe's owner key over the MintIntent struct
+    function depositForIntent(
+        address lp,
+        int24 tickLower,
+        int24 tickUpper,
+        uint256 usdcAmount,
+        bytes32 intentId,
+        uint256 deadline,
+        bytes calldata signature
+    ) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
+        // --- Checks ---
+
+        // An escrow only funds a mint, and mints are Active-only
+        if (phase != 1) revert VaultNotActive();
+
+        // A zero escrow could never mint (FR-3Z9O)
+        if (usdcAmount == 0) revert ZeroAmount();
+
+        // The deadline applies once, at the deposit (FR-9OYK)
+        // forge-lint: disable-next-line(block-timestamp)
+        if (block.timestamp > deadline) revert IntentExpired();
+
+        // Never take USDC for an intent the mint always rejects (FR-9OYL)
+        _requireValidRange(tickLower, tickUpper);
+
+        // The owner key must derive the named Safe (FR-3Z9Q)
+        bytes32 structHash = _mintIntentHash(lp, tickLower, tickUpper, usdcAmount, intentId, deadline);
+        _verifySafeOwnerSignature(lp, structHash, signature);
+
+        // A spent intent can never be funded again, and never twice (FR-3Z9N)
+        if (usedIntents[intentId]) revert IntentAlreadyUsed();
+        if (pendingDeposits[intentId].lp != address(0)) revert DepositAlreadyEscrowed();
+
+        // --- Effects ---
+
+        pendingDeposits[intentId] = PendingDeposit({lp: lp, amount: _toUint96(usdcAmount), structHash: structHash});
+        totalEscrowed += usdcAmount;
+
+        // --- Interactions (external calls last, per checks-effects-interactions) ---
+
+        // Pull USDC from the Safe, which approved the vault through a relayed Safe transaction (C25)
+        _safeTransferFrom(usdc, lp, address(this), usdcAmount);
+
+        emit DepositEscrowed(intentId, lp, usdcAmount);
+    }
+
+    // ──────────────────────────────────────────────
     // Position minting (FEAT-T7AF, UC-T7AG)
     // ──────────────────────────────────────────────
 
-    // SC-T7AH through SC-T7AR: operator-gated LP position mint via EIP-712 signed intent
-    /// @notice Executes an LP's signed EIP-712 mint intent to create a concentrated-liquidity position.
-    /// @dev OPERATOR TRUST ASSUMPTION: The Operator can submit any LP's signed intent
-    ///      at any time. LPs must trust that the Operator submits their intent promptly.
-    ///      This trust is bounded by the reclaimDeposit escape hatch planned in feature 7.
-    /// @param lp LP wallet address — must match the signer of the EIP-712 intent
+    // SC-T7AH through SC-T7AR, SC-3Z9J, SC-45IE, SC-3Z9K: operator-gated mint that consumes an escrow
+    /// @notice Creates the concentrated-liquidity position that an escrowed mint intent authorizes.
+    /// @dev OPERATOR TRUST ASSUMPTION: The Operator chooses when to mint an escrowed intent. The
+    ///      Operator cannot change its range, amount, or deadline (the recorded struct hash binds
+    ///      them), cannot mint an intent that was never escrowed, and cannot give one Safe's deposit
+    ///      to another (the recorded Safe must equal `lp`). LPs must trust that the Operator mints
+    ///      promptly; the LP's exit is the one-call reclaimDeposit (FEAT-JAIJ), which the Operator
+    ///      cannot block.
+    ///      The mint verifies no signature and moves no USDC: the escrow did both (FEAT-3ZRI).
+    ///      It reads no clock either. `deadline` is an argument only because the struct hash
+    ///      needs it, so a deposit made near its deadline can still mint (decision C1).
+    ///      The mint makes no external call. The nonReentrant guard stays as defense in depth
+    ///      (NFR-T7B7), so a later revision that adds an external call cannot inherit an
+    ///      unguarded function.
+    /// @param lp The LP's Safe — must be the escrow's recorded depositor
     /// @param tickLower Lower tick bound — must be < tickUpper and aligned to tickSpacing
     /// @param tickUpper Upper tick bound — must be > tickLower and aligned to tickSpacing
-    /// @param usdcAmount USDC to pull from the LP's wallet — must be > 0
+    /// @param usdcAmount USDC amount of the intent — must be > 0 and equal the escrowed amount
     /// @param intentId Unique identifier for replay protection
-    /// @param signature EIP-712 signature from the LP over the MintIntent struct
+    /// @param deadline The deadline the owner key signed — part of the recorded hash
     /// @return positionId The ID of the newly created position
     function mintPositionFor(
         address lp,
@@ -726,7 +835,7 @@ contract LPVault {
         int24 tickUpper,
         uint256 usdcAmount,
         bytes32 intentId,
-        bytes calldata signature
+        uint256 deadline
     ) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat returns (uint256 positionId) {
         // --- Checks ---
 
@@ -736,20 +845,26 @@ contract LPVault {
         // USDC amount must be non-zero
         if (usdcAmount == 0) revert ZeroAmount();
 
-        // Range must be valid: lower < upper
-        if (tickLower >= tickUpper) revert InvalidRange();
+        // Range must be valid and aligned (FR-T7B2, FR-T7B3)
+        _requireValidRange(tickLower, tickUpper);
 
-        // Both ticks must align to the vault's tickSpacing
-        if (tickLower % tickSpacing != 0 || tickUpper % tickSpacing != 0) revert TickNotAligned();
-
-        // Verify EIP-712 signature from the LP
-        _verifyMintIntent(lp, tickLower, tickUpper, usdcAmount, intentId, signature);
-
-        // Replay protection: each intentId can only be used once
+        // Replay protection, read before the escrow so a replay reports IntentAlreadyUsed (FR-T7B1)
         if (usedIntents[intentId]) revert IntentAlreadyUsed();
-        usedIntents[intentId] = true;
+
+        // The escrow is the only proof of deposit and of ownership (FR-45ID, FR-3Z9W)
+        PendingDeposit memory escrow = pendingDeposits[intentId];
+        if (escrow.lp == address(0)) revert DepositNotEscrowed();
+        if (escrow.lp != lp) revert NotIntentOwner();
+        if (escrow.structHash != _mintIntentHash(lp, tickLower, tickUpper, usdcAmount, intentId, deadline)) {
+            revert IntentMismatch();
+        }
 
         // --- Effects ---
+
+        // Consume the escrow before any other state, for mutual exclusion with the reclaims (FR-3ZVK)
+        usedIntents[intentId] = true;
+        delete pendingDeposits[intentId];
+        totalEscrowed -= escrow.amount;
 
         // Compute liquidity weight from USDC and range width
         // casting to uint256 is safe because tickUpper > tickLower is validated above
@@ -792,10 +907,7 @@ contract LPVault {
             activeLiquidity += liquidity;
         }
 
-        // --- Interactions (external calls last, per checks-effects-interactions) ---
-
-        // Pull USDC from the LP's wallet into the vault
-        _safeTransferFrom(usdc, lp, address(this), usdcAmount);
+        // No interaction: the USDC entered the vault at depositForIntent
 
         emit PositionMinted(positionId, lp, tickLower, tickUpper, liquidity, usdcAmount, intentId);
     }
@@ -861,78 +973,93 @@ contract LPVault {
     }
 
     // ──────────────────────────────────────────────
-    // Deposit reclaim (FEAT-JAIJ, UC-JAIK)
+    // Deposit reclaim (FEAT-JAIJ, UC-JAIK, UC-3Z93)
     // ──────────────────────────────────────────────
 
-    // SC-JAIL through SC-JAIP: two-phase LP escape hatch for unfulfilled mint intents
-    /// @notice Allows an LP to reclaim USDC deposited via the deposit-then-credit flow when
-    ///         the Operator fails to call mintPositionFor. Two-phase operation (ADR-JB78):
-    ///         Phase 1 (first call): records intentTimestamps[intentId] = block.timestamp and
-    ///         emits ReclaimSubmitted. Phase 2 (after RECLAIM_TIMELOCK): marks usedIntents,
-    ///         transfers usdcAmount back to the LP, and emits DepositReclaimed.
-    /// @dev OPERATOR TRUST ASSUMPTION: The Operator's co-signature attests that the deposit
-    ///      was received. LPs must trust that the Operator signs promptly and honestly. A
-    ///      dishonest Operator who refuses to co-sign can block reclaim, but the LP's USDC
-    ///      is still recoverable via emergencyCancelAll (feature 8, not yet implemented).
-    /// @param lp LP wallet address — must match msg.sender and LP EIP-712 signature
-    /// @param tickLower Lower tick bound from the original MintIntent
-    /// @param tickUpper Upper tick bound from the original MintIntent
-    /// @param usdcAmount USDC amount from the original MintIntent
-    /// @param intentId Unique identifier from the original MintIntent
-    /// @param lpSignature EIP-712 signature from the LP over the MintIntent struct
-    /// @param operatorSignature EIP-712 signature from a registered Operator over the same MintIntent
-    function reclaimDeposit(
-        address lp,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId,
-        bytes calldata lpSignature,
-        bytes calldata operatorSignature
-    ) external nonReentrant {
+    // SC-JAIL, SC-3Z9L, SC-45IG, SC-JAIN, SC-3ZA0, SC-JAIP, SC-9OYE: one-call LP escape hatch
+    /// @notice Refunds the USDC escrowed against an intent to the Safe that paid it, in one call.
+    /// @dev The escrow record proves the deposit (ADR-3ZA1, ADR-9OYQ), so this path needs no
+    ///      signature, no Operator co-signature, no timelock, no phase check, and no pause check.
+    ///      It reads no Operator state, so it works with every Operator removed (NFR-3Z9X) and in
+    ///      every phase, including Cancelled (FR-9OYO). The caller must be the recorded Safe:
+    ///      a valid signature never proves ownership of an intentId (ADR-45IC).
+    ///      A mint and a reclaim of one intentId share usedIntents on purpose, so exactly one of
+    ///      them can happen (ADR-JAIY).
+    /// @param intentId The escrowed intent to refund
+    function reclaimDeposit(bytes32 intentId) external nonReentrant {
         // --- Checks ---
 
-        // Cancelled vaults have already distributed all funds
-        if (phase == 3) revert VaultCancelled();
-
-        // Caller must be the LP named in the intent
-        if (msg.sender != lp) revert NotIntentOwner();
-
-        // Verify LP's EIP-712 signature over the MintIntent struct
-        _verifyMintIntent(lp, tickLower, tickUpper, usdcAmount, intentId, lpSignature);
-
-        // Verify operator's EIP-712 signature over the same MintIntent struct
-        // and confirm the recovered signer is a registered operator
-        _verifyOperatorSignature(lp, tickLower, tickUpper, usdcAmount, intentId, operatorSignature);
-
-        // Replay protection: intentId must not have been used by mintPositionFor or a prior reclaim
+        // Replay protection, read before the escrow so a replay reports IntentAlreadyUsed (FR-JAIS, FR-JAIU)
         if (usedIntents[intentId]) revert IntentAlreadyUsed();
 
-        // --- Phase 1: Record submission timestamp ---
+        // The escrow is the only proof of deposit and of ownership (FR-3ZVM, FR-45IF)
+        PendingDeposit memory escrow = pendingDeposits[intentId];
+        if (escrow.lp == address(0)) revert DepositNotEscrowed();
+        if (escrow.lp != msg.sender) revert NotIntentOwner();
 
-        if (intentTimestamps[intentId] == 0) {
-            intentTimestamps[intentId] = block.timestamp;
-            emit ReclaimSubmitted(intentId, lp, usdcAmount);
-            return;
-        }
+        // --- Effects and interactions ---
 
-        // --- Phase 2: Execute reclaim after timelock ---
+        _refundEscrow(intentId, escrow);
+    }
 
-        // Timelock must have elapsed since Phase 1 submission (±15s Polygon tolerance is negligible at 24h scale)
+    // SC-3Z9D through SC-3Z9I, SC-45IH, SC-9OYF, SC-9OYG, SC-9OYH: operator-relayed reclaim
+    /// @notice Relays the owner key's signed ReclaimIntent to refund that Safe's escrowed USDC.
+    /// @dev OPERATOR TRUST ASSUMPTION: The Operator can censor, reorder, or delay a relayed
+    ///      cancellation. The Operator cannot start one without the owner key's ReclaimIntent,
+    ///      cannot replay a MintIntent as a reclaim (distinct typehash, ADR-4029), cannot redirect
+    ///      the money (the refund goes to the recorded Safe, never to msg.sender), and cannot
+    ///      refund a Safe other than the one that paid. A refusal leaves the Safe with the
+    ///      self-service reclaimDeposit.
+    ///
+    ///      MEV analysis: the call returns a Safe's own escrow. The one ordering effect is the
+    ///      race with mintPositionFor for the same intentId through the shared usedIntents, and
+    ///      that race is between the Operator and the LP who signed both messages. No third party
+    ///      is exposed, and no price is read.
+    ///
+    ///      Same deadline rule as depositForIntent: inclusive, with Polygon's ±15s tolerance
+    ///      (CLAUDE.md checklist item 12). No phase check and no pause check (FR-9OYO).
+    /// @param lp The LP's Safe — must be the escrow's recorded depositor
+    /// @param intentId The escrowed intent to refund
+    /// @param deadline Last block.timestamp at which this reclaim is accepted
+    /// @param signature EIP-712 signature from the Safe's owner key over the ReclaimIntent struct
+    function reclaimDepositFor(address lp, bytes32 intentId, uint256 deadline, bytes calldata signature)
+        external
+        onlyOperator
+        nonReentrant
+        touchesHeartbeat
+    {
+        // --- Checks ---
+
         // forge-lint: disable-next-line(block-timestamp)
-        if (block.timestamp - intentTimestamps[intentId] < RECLAIM_TIMELOCK) {
-            revert TimelockNotElapsed();
-        }
+        if (block.timestamp > deadline) revert IntentExpired();
 
+        // The owner key must derive the named Safe (FR-3ZVP, NFR-JAIX)
+        _verifySafeOwnerSignature(lp, keccak256(abi.encode(RECLAIM_INTENT_TYPEHASH, lp, intentId, deadline)), signature);
+
+        // Same guards as reclaimDeposit, with the proven Safe in place of msg.sender
+        if (usedIntents[intentId]) revert IntentAlreadyUsed();
+        PendingDeposit memory escrow = pendingDeposits[intentId];
+        if (escrow.lp == address(0)) revert DepositNotEscrowed();
+        if (escrow.lp != lp) revert NotIntentOwner();
+
+        // --- Effects and interactions ---
+
+        _refundEscrow(intentId, escrow);
+    }
+
+    /// @dev One body for both reclaim entry points. Settles the record before the transfer
+    ///      (NFR-JAIW), and pays the recorded Safe the recorded amount, never a caller value.
+    function _refundEscrow(bytes32 intentId, PendingDeposit memory escrow) internal {
         // --- Effects ---
 
-        // Mark intentId as used to prevent double-refund and mutual exclusion with mintPositionFor
         usedIntents[intentId] = true;
+        delete pendingDeposits[intentId];
+        totalEscrowed -= escrow.amount;
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
-        _safeTransfer(usdc, lp, usdcAmount);
-        emit DepositReclaimed(intentId, lp, usdcAmount);
+        _safeTransfer(usdc, escrow.lp, escrow.amount);
+        emit DepositReclaimed(intentId, escrow.lp, escrow.amount);
     }
 
     // ──────────────────────────────────────────────
@@ -1152,63 +1279,59 @@ contract LPVault {
     }
 
     // ──────────────────────────────────────────────
-    // Internal: EIP-712 signature verification
+    // Internal: intent hashing and range validation
     // ──────────────────────────────────────────────
 
-    /// @dev Verifies that `signature` is a valid EIP-712 signature from `lp` over
-    ///      a MintIntent struct with the given fields. Rejects malleable signatures
-    ///      (high-s) and invalid v values per CLAUDE.md security checklist item 5.
-    function _verifyMintIntent(
+    /// @dev The MintIntent struct hash. The deposit records it and the mint recomputes it, from
+    ///      one function, so the two can never disagree on the field order (FR-3Z9W).
+    function _mintIntentHash(
         address lp,
         int24 tickLower,
         int24 tickUpper,
         uint256 usdcAmount,
         bytes32 intentId,
-        bytes calldata signature
-    ) internal view {
-        // Build the EIP-712 digest: \x19\x01 || domainSeparator || structHash
-        bytes32 structHash = keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, tickLower, tickUpper, usdcAmount, intentId));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-
-        // Decode the 65-byte signature into r, s, v
-        if (signature.length != 65) revert InvalidSignature();
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-        assembly {
-            r := calldataload(signature.offset)
-            s := calldataload(add(signature.offset, 0x20))
-            v := byte(0, calldataload(add(signature.offset, 0x40)))
-        }
-
-        // Reject malleable signatures: s must be in the lower half of secp256k1's order
-        if (uint256(s) > SECP256K1N_HALF) revert InvalidSignature();
-
-        // v must be 27 or 28 — reject all other values
-        if (v != 27 && v != 28) revert InvalidSignature();
-
-        // Recover the signer and verify it matches the declared LP address
-        address signer = ecrecover(digest, v, r, s);
-        if (signer == address(0) || signer != lp) revert InvalidSignature();
+        uint256 deadline
+    ) internal pure returns (bytes32) {
+        return keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, tickLower, tickUpper, usdcAmount, intentId, deadline));
     }
 
-    /// @dev Verifies that `signature` is a valid EIP-712 signature from a registered operator
-    ///      over a MintIntent struct with the given fields. Same digest as _verifyMintIntent
-    ///      (operator signs the same struct), but the recovered signer is checked against the
-    ///      factory's operator registry instead of a declared address.
-    ///      Rejects malleable signatures (high-s) and invalid v values per CLAUDE.md rule 5.
-    function _verifyOperatorSignature(
-        address lp,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId,
-        bytes calldata signature
-    ) internal view {
-        // Build the EIP-712 digest (same struct as _verifyMintIntent)
-        bytes32 structHash = keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, tickLower, tickUpper, usdcAmount, intentId));
+    /// @dev The range and alignment checks the deposit and the mint share (FR-T7B2, FR-T7B3,
+    ///      FR-9OYL). The deposit runs them so the vault never takes USDC it can only refund.
+    function _requireValidRange(int24 tickLower, int24 tickUpper) internal view {
+        // Range must be valid: lower < upper
+        if (tickLower >= tickUpper) revert InvalidRange();
+
+        // Both ticks must align to the vault's tickSpacing
+        if (tickLower % tickSpacing != 0 || tickUpper % tickSpacing != 0) revert TickNotAligned();
+    }
+
+    // ──────────────────────────────────────────────
+    // Internal: Safe owner-key signature verification (ADR-9OYP)
+    // ──────────────────────────────────────────────
+
+    /// @dev The one check every relayed LP path calls (the deposit, the relayed reclaim, and the
+    ///      later relayed burn and collect). Builds the EIP-712 digest, recovers the signer, and
+    ///      requires that the Safe the Poly Safe factory derives from that signer equals `safe`.
+    ///      A Safe has no private key, so ecrecover can never return a Safe address; the owner key
+    ///      signs, and the derivation binds it to its Safe, exactly as the exchange checks orders.
+    ///      Known property: a Safe owner who swaps the owner key leaves the old key able to derive
+    ///      the same Safe, so the old key keeps the relayed paths until the vault holds nothing for
+    ///      that Safe. The exchange has the same property for orders.
+    ///      This check never proves ownership of an intentId: any owner key can sign over any
+    ///      intentId naming its own Safe. Every path that spends an escrow checks the recorded
+    ///      Safe (ADR-45IC).
+    function _verifySafeOwnerSignature(address safe, bytes32 structHash, bytes calldata signature) internal view {
+        // Build the EIP-712 digest: \x19\x01 || domainSeparator || structHash
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
 
+        address signer = _recoverSigner(digest, signature);
+        if (_deriveSafe(signer) != safe) revert InvalidSignature();
+    }
+
+    /// @dev Decodes a 65-byte signature and recovers the signer. Rejects malleable signatures
+    ///      (high-s) and invalid v values per CLAUDE.md security checklist item 5, and a zero
+    ///      recovery. One copy for every LP signature (FR-T7AZ, NFR-JAIX).
+    function _recoverSigner(bytes32 digest, bytes calldata signature) internal pure returns (address) {
         // Decode the 65-byte signature into r, s, v
         if (signature.length != 65) revert InvalidSignature();
         bytes32 r;
@@ -1226,9 +1349,22 @@ contract LPVault {
         // v must be 27 or 28 — reject all other values
         if (v != 27 && v != 28) revert InvalidSignature();
 
-        // Recover the signer and verify it is a registered operator via factory delegation
         address signer = ecrecover(digest, v, r, s);
-        if (signer == address(0) || ILPVaultFactory(factory).operators(signer) != 1) revert InvalidSignature();
+        if (signer == address(0)) revert InvalidSignature();
+        return signer;
+    }
+
+    /// @dev The address the Poly Safe factory deploys for `owner`: the CREATE2 address with the
+    ///      factory as deployer, keccak256(abi.encode(owner)) as salt, and the combined proxy
+    ///      bytecode hash as init code hash, as in the exchange's PolySafeLib. Both inputs are
+    ///      immutable on the factory and read here at call time (FR-9OYI).
+    function _deriveSafe(address owner) internal view returns (address) {
+        ILPVaultFactory f = ILPVaultFactory(factory);
+        bytes32 salt = keccak256(abi.encode(owner));
+        bytes32 raw = keccak256(abi.encodePacked(bytes1(0xff), f.safeFactory(), salt, f.safeProxyBytecodeHash()));
+        // casting to uint160 keeps the low 20 bytes, which is the CREATE2 address by definition
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return address(uint160(uint256(raw)));
     }
 
     // ──────────────────────────────────────────────
@@ -1564,6 +1700,15 @@ contract LPVault {
         // casting to uint128 is safe because overflow is checked on the line above
         // forge-lint: disable-next-line(unsafe-typecast)
         return uint128(x);
+    }
+
+    /// @dev uint256 → uint96 with overflow check. The escrow amount packs with the Safe into one
+    ///      slot (FR-45IA); a silent truncation would record less than the USDC collected.
+    function _toUint96(uint256 x) internal pure returns (uint96) {
+        if (x > type(uint96).max) revert SafeCastOverflow();
+        // casting to uint96 is safe because overflow is checked on the line above
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return uint96(x);
     }
 
     /// @dev uint128 → int128 with overflow check (liquidity is always positive)

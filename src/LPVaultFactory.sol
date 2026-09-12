@@ -5,12 +5,8 @@ import {LPVault, IConditionalTokens} from "./LPVault.sol";
 
 // FEAT-REPZ: Deploy LP Vault for a Market
 // UC-REQ0: Deploy Factory, UC-REQ1: Create Vault for Market, UC-REQ2: Manage Roles on Factory
-// UC-REQ0-001: deploy-factory-with-role-registry
-// UC-REQ1-001: create-vault-and-initialize
-// UC-REQ2-001: factory-role-management
 // FEAT-KX5N: Upgradeable Vault Implementation Pointer
 // UC-KX5O: Schedule and Apply Implementation Upgrade
-// UC-KX5O-001: schedule-apply-cancel-impl-upgrade
 
 /// @title LPVaultFactory
 /// @notice Deploys per-market LP vault clones (EIP-1167) and manages the factory-level role registry.
@@ -48,6 +44,16 @@ contract LPVaultFactory {
 
     /// @notice Gnosis ConditionalTokens (ERC-1155) contract address
     address public immutable conditionalTokens;
+
+    // FR-9OYI, ADR-9OYP: the two inputs of the Safe derivation. Every vault reads them here
+    // at call time, as it reads roles, so no Admin can change them. The vault stores neither:
+    // initialize() with 13 parameters does not compile (stack too deep in the ABI decoder).
+    /// @notice The Poly Safe factory that deploys each user's Safe with CREATE2.
+    address public immutable safeFactory;
+
+    /// @notice keccak256(proxyCreationCode ++ abi.encode(masterCopy)) of that factory,
+    ///         the init code hash in the CREATE2 derivation.
+    bytes32 public immutable safeProxyBytecodeHash;
 
     // ──────────────────────────────────────────────
     // Implementation pointer (FEAT-KX5N)
@@ -96,6 +102,8 @@ contract LPVaultFactory {
     error NoPendingSchedule();
     error ScheduleAlreadyPending();
     error TimelockNotElapsed();
+    // SC-9OY7: a zero hash would make every derived Safe wrong on every vault
+    error ZeroBytecodeHash();
 
     // SC-6HBV, SC-6HBW, SC-6HBX: one error per outcome-token identity defect
     error ZeroConditionId();
@@ -145,7 +153,7 @@ contract LPVaultFactory {
     // Constructor
     // ──────────────────────────────────────────────
 
-    // SC-REQ3, SC-REQ4: constructor initializes role registry and stores addresses
+    // SC-REQ3, SC-REQ4, SC-9OY7: constructor initializes role registry and stores addresses
     /// @param implementation_ LPVault implementation for EIP-1167 cloning
     /// @param usdc_ USDC ERC-20 address
     /// @param exchange_ ProphetCTFExchange address
@@ -153,6 +161,8 @@ contract LPVaultFactory {
     /// @param admin_ Initial admin wallet
     /// @param oracle_ Initial oracle wallet (must differ from operator_)
     /// @param operator_ Initial operator wallet (must differ from oracle_)
+    /// @param safeFactory_ Poly Safe factory on this chain — must be non-zero
+    /// @param safeProxyBytecodeHash_ keccak256 of that factory's getContractBytecode() — must be non-zero
     constructor(
         address implementation_,
         address usdc_,
@@ -160,17 +170,25 @@ contract LPVaultFactory {
         address conditionalTokens_,
         address admin_,
         address oracle_,
-        address operator_
+        address operator_,
+        address safeFactory_,
+        bytes32 safeProxyBytecodeHash_
     ) {
         // Role separation: oracle and operator must be distinct wallets.
         // Compromise of one must not unlock the other's powers.
         if (oracle_ == operator_) revert RoleSeparation();
+
+        // An immutable can never be corrected, and a zero input breaks every relayed LP path
+        if (safeFactory_ == address(0)) revert ZeroAddress();
+        if (safeProxyBytecodeHash_ == bytes32(0)) revert ZeroBytecodeHash();
 
         // Store external contract addresses
         implementation = implementation_;
         usdc = usdc_;
         exchange = exchange_;
         conditionalTokens = conditionalTokens_;
+        safeFactory = safeFactory_;
+        safeProxyBytecodeHash = safeProxyBytecodeHash_;
 
         // Start version counter at 1 (the initial deployment is version 1)
         implementationVersion = 1;
@@ -338,14 +356,15 @@ contract LPVaultFactory {
     }
 
     // ──────────────────────────────────────────────
-    // Role management (UC-REQ2-001)
+    // Role management (UC-REQ2)
     // ──────────────────────────────────────────────
 
     // SC-REQB, SC-REQC: register a new operator with role-separation enforcement
     /// @notice Registers a new operator address.
     /// @dev OPERATOR TRUST ASSUMPTION: Operators can execute transactional functions
-    ///      (mintPositionFor, notifyFees, updateTick, mergePositions). Users must
-    ///      trust that operators act honestly when crediting positions and reporting fees.
+    ///      (depositForIntent, mintPositionFor, reclaimDepositFor, notifyFees, updateTick,
+    ///      mergePositions, heartbeat). Users must trust that operators act honestly when
+    ///      escrowing deposits, crediting positions, and reporting fees.
     /// @param operator_ Address to register as operator — must not be the current oracle
     function addOperator(address operator_) external onlyAdmin {
         // Role separation: oracle and operator must be distinct wallets
