@@ -3,7 +3,7 @@ id: FEAT-K1M2
 name: Merge Positions
 use_cases: [UC-K1M8]
 scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC, SC-3XUP, SC-3XUQ]
-last_update: 2026-08-01
+last_update: 2026-09-11
 ---
 
 # Architecture: Merge Positions
@@ -89,7 +89,7 @@ _None — merge is a pure storage operation with no external calls._
 
 ## Architecture Decisions
 
-_None — mergePositions follows the existing position structure and fee accumulator pattern._
+The fee-growth subtraction in this feature (the fee deltas in `mergePositions()`, survivor and consumed) runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF.
 
 ## Testing Decisions
 

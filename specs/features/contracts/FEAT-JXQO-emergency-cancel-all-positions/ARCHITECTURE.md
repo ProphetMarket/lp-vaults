@@ -3,7 +3,7 @@ id: FEAT-JXQO
 name: Emergency Cancel All Positions
 use_cases: [UC-JXQW]
 scenarios: [SC-JXQX, SC-JXQY, SC-JXQZ, SC-JXR0, SC-JXR1, SC-JXR2, SC-3XTZ, SC-3XU0, SC-3XU1, SC-3XUO, SC-3XU2]
-last_update: 2026-08-01
+last_update: 2026-09-11
 ---
 
 # Architecture: Emergency Cancel All Positions
@@ -161,6 +161,8 @@ We accept a residual risk this does not address: an Operator that is technically
 
 **ADR-JXQP:** Position-holder gating instead of open-access
 In the context of who can trigger the emergency cancel, facing the choice between allowing any address vs. restricting to position holders, we decided to require the caller to hold at least one position to prevent griefing by external addresses that have no stake in the vault, accepting that an LP with even a dust position can trigger the cancel once the timelock elapses.
+
+The fee-growth subtraction in this feature (the fee delta in `emergencyCancelAll()`) runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF.
 
 ## Testing Decisions
 

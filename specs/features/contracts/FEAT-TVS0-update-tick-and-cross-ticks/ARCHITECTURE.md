@@ -3,7 +3,7 @@ id: FEAT-TVS0
 name: Update Tick and Cross Ticks
 use_cases: [UC-TVS1]
 scenarios: [SC-TVS2, SC-TVS3, SC-TVS4, SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8]
-last_update: 2026-06-18
+last_update: 2026-09-11
 ---
 
 # Architecture: Update Tick and Cross Ticks
@@ -120,3 +120,5 @@ In the context of iterating from currentTick to newTick, facing the risk that a 
 
 **ADR-TVUW:** 256 max initialized-tick crossings per call
 In the context of large price moves that could cross hundreds of initialized ticks, facing the risk of gas griefing or block-limit exhaustion, we decided to cap initialized-tick crossings at 256 per updateTick call and revert with TooManyTicksCrossed if exceeded, forcing the Keeper to chunk into multiple calls, accepting the operational complexity of multi-call chunking for extreme price movements.
+
+The fee-growth subtraction in this feature (the flip in `_crossTick()`) runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF.

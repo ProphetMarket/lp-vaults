@@ -3,7 +3,7 @@ id: UC-T7AG
 name: Operator Mint Position for LP
 feature: FEAT-T7AF
 status: implemented
-version: 2
+version: 3
 actor: Operator
 ---
 
@@ -125,6 +125,43 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 - `ticks[20].liquidityGross` storage: increased additively; `feeGrowthOutsideX128` preserved
 - `ticks[60]` storage: initialized
 - Position and intent storage updated
+
+---
+
+### SC-8L1C: Mint over a stale shared tick succeeds
+
+**Given:**
+- Vault with tickSpacing = 10 and currentTick = 0
+- LP holds P1 = [0, 300) and P2 = [100, 200), both minted at currentTick = 0, so ticks 100, 200, and 300 initialized with feeGrowthOutsideX128 = 0
+- The Operator called notifyFees, so feeGrowthGlobalX128 = G1 > 0
+- The Operator called updateTick(150), which crossed tick 100 and set ticks[100].feeGrowthOutsideX128 = G1
+- The Operator called notifyFees again, so feeGrowthGlobalX128 = G2 > G1
+- Tick 50 has never been used
+- LP signed a valid MintIntent: tickLower = 50, tickUpper = 100, usdcAmount = 500, unique intentId
+
+**Steps:**
+1. Operator submits the LP's signed mint intent
+2. System verifies signature and validates inputs
+3. System records intentId as used
+4. System initializes tick 50 with feeGrowthOutsideX128 = G2, since 50 <= currentTick (150)
+5. System finds tick 100 already initialized and keeps feeGrowthOutsideX128 = G1
+6. System computes feeGrowthInside([50, 100)) = G2 - G2 - (G2 - G1), which wraps modulo 2^256 to 2^256 - (G2 - G1), inside `unchecked`
+7. System creates the position with feeGrowthInsideLastX128 = that wrapped value
+8. System does NOT modify activeLiquidity (currentTick 150 >= tickUpper 100, position is out of range)
+9. System pulls 500 USDC from the LP
+
+**Outcomes:**
+- The mint does not revert
+- Position exists with owner = LP, liquidity > 0, and feeGrowthInsideLastX128 = 2^256 - (G2 - G1)
+- activeLiquidity unchanged
+
+**Side Effects:**
+- `PositionMinted` event emitted
+- `ticks[50]` storage: initialized with feeGrowthOutsideX128 = G2
+- `ticks[100]` storage: feeGrowthOutsideX128 preserved at G1, liquidityGross increased
+- Position and intent storage updated
+- No fee distribution triggered
+- No tick crossing triggered
 
 ---
 

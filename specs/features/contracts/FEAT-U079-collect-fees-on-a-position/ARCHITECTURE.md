@@ -2,8 +2,8 @@
 id: FEAT-U079
 name: Collect Fees on a Position
 use_cases: [UC-U07A]
-scenarios: [SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G]
-last_update: 2026-06-18
+scenarios: [SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E]
+last_update: 2026-09-11
 ---
 
 # Architecture: Collect Fees on a Position
@@ -72,7 +72,7 @@ erDiagram
 - `feeGrowthInsideLastX128` is set to the current `feeGrowthInsideX128` after every collect -- no double-counting
 - Owed fees for a position can never exceed the total fee revenue distributed since the position was minted
 - `collect` does not modify `liquidity`, `tickLower`, `tickUpper`, or any tick state -- it is read-only on fee accumulators
-- The sum of all positions' collected fees cannot exceed `feeGrowthGlobalX128 * activeLiquidity / Q128` (bounded by Q128 dust)
+- The sum of every position's claimable fees plus every fee paid by `collect` never exceeds the sum of amounts passed to `notifyFees`, with no slack, because every rounding on the path rounds down
 
 ## Component Inventory
 
@@ -124,10 +124,12 @@ erDiagram
 | SC-U07E | Position not found | `src/LPVault.sol:collect()` |
 | SC-U07F | Collect during wind-down | `src/LPVault.sol:collect()`, `src/LPVault.sol:_computeFeeGrowthInside()`, `src/LPVault.sol:_safeTransfer()` |
 | SC-U07G | Second collect only pays new fees | `src/LPVault.sol:collect()`, `src/LPVault.sol:_computeFeeGrowthInside()`, `src/LPVault.sol:_safeTransfer()` |
+| SC-8L1D | Immediate collect on a wrapped snapshot owes zero | `src/LPVault.sol:collect()`, `src/LPVault.sol:_computeFeeGrowthInside()` |
+| SC-8L1E | Collect after the price re-enters the wrapped range pays growth since mint | `src/LPVault.sol:collect()`, `src/LPVault.sol:_computeFeeGrowthInside()`, `src/LPVault.sol:_safeTransfer()` |
 
 ## Architecture Decisions
 
-> No non-obvious decisions for this feature -- collect follows the canonical Uniswap v3 fee collection pattern (compute feeGrowthInside, delta with snapshot, payout, update snapshot).
+Collect follows the Uniswap v3 fee collection pattern (compute feeGrowthInside, delta with snapshot, payout, update snapshot). The `owed` delta in `collect()` runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF, which owns `_computeFeeGrowthInside()`.
 
 ## Testing Decisions
 

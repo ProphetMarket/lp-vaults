@@ -3,7 +3,7 @@ id: UC-U07A
 name: Collect Position Fees
 feature: FEAT-U079
 status: implemented
-version: 1
+version: 2
 actor: LP
 ---
 
@@ -155,5 +155,53 @@ LP calls `collect(positionId)`.
 - Position storage: `feeGrowthInsideLastX128` updated from G1 to G2
 - USDC transfer reflects only the delta, proving no double-counting
 - No previous collect's fees are re-paid
+
+---
+
+### SC-8L1D: Immediate collect on a wrapped snapshot owes zero
+
+**Given:**
+- The state of "Mint over a stale shared tick succeeds" (SC-8L1C in UC-T7AG) after the mint: LP holds P3 = [50, 100) with feeGrowthInsideLastX128 = 2^256 - (G2 - G1), currentTick = 150, feeGrowthGlobalX128 = G2
+- No notifyFees call since the mint
+
+**Steps:**
+1. LP calls collect(P3)
+2. System verifies caller is position.owner
+3. System computes feeGrowthInsideX128 = G2 - G2 - (G2 - G1) inside `unchecked`, which equals the snapshot
+4. System calculates owed = liquidity * (feeGrowthInsideX128 - feeGrowthInsideLastX128) / Q128 inside `unchecked` = 0
+
+**Outcomes:**
+- LP receives no USDC
+- Transaction succeeds without revert
+
+**Side Effects:**
+- No USDC transfer
+- No FeesCollected event emitted
+- Position snapshot unchanged (same value written)
+
+---
+
+### SC-8L1E: Collect after the price re-enters the wrapped range pays growth since mint
+
+**Given:**
+- The state of "Mint over a stale shared tick succeeds" (SC-8L1C in UC-T7AG) after the mint
+- The Operator called updateTick(75), which crossed tick 100 right-to-left and set ticks[100].feeGrowthOutsideX128 = G2 - G1, so P1 = [0, 300) and P3 = [50, 100) are in range
+- The Operator called notifyFees(F), so feeGrowthGlobalX128 = G3 = G2 + F * Q128 / (L1 + L3), where L1 and L3 are the liquidity of P1 and P3
+
+**Steps:**
+1. LP calls collect(P3)
+2. System verifies caller is position.owner
+3. System computes feeGrowthInsideX128 = G3 - G2 - (G2 - G1) inside `unchecked`
+4. System calculates owed = L3 * (feeGrowthInsideX128 - feeGrowthInsideLastX128) / Q128 inside `unchecked` = L3 * (G3 - G2) / Q128, because both operands wrapped by the same offset
+5. System sets position.feeGrowthInsideLastX128 = feeGrowthInsideX128
+6. System transfers owed USDC to the LP
+
+**Outcomes:**
+- LP receives exactly L3 * (G3 - G2) / Q128 USDC, the growth since the mint and nothing else
+
+**Side Effects:**
+- `FeesCollected(P3, owner, owed)` event emitted
+- Position storage: `feeGrowthInsideLastX128` updated
+- USDC balance: vault decreases by `owed`, LP increases by `owed`
 
 ---

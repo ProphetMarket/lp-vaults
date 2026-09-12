@@ -2,8 +2,8 @@
 id: FEAT-T7AF
 name: Mint LP Position
 use_cases: [UC-T7AG]
-scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AQ, SC-T7AR, SC-3XU5, SC-3XU6]
-last_update: 2026-08-01
+scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AQ, SC-T7AR, SC-3XU5, SC-3XU6, SC-8L1C]
+last_update: 2026-09-11
 ---
 
 # Architecture: Mint LP Position
@@ -115,7 +115,7 @@ erDiagram
 | File | Role | Key Exports |
 |------|------|-------------|
 | `src/LPVault.sol` | Per-market vault -- position minting, tick initialization, EIP-712 verification, fee growth computation | `mintPositionFor()`, `_mintPosition()`, `_initializeTick()`, `_computeFeeGrowthInside()`, `_verifyMintIntent()` |
-| `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp.t.sol` | Integration tests for all 11 scenarios | SC-T7AH through SC-T7AR |
+| `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp.t.sol` | Integration tests for all 11 scenarios | SC-T7AH through SC-T7AR, SC-8L1C |
 
 ## Event Topology
 
@@ -157,6 +157,7 @@ erDiagram
 | SC-3XU6 | Reverted mint leaves silence timer untouched | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-T7AI | Successful out-of-range mint | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_initializeTick()` |
 | SC-T7AJ | Second position on existing tick | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_initializeTick()` |
+| SC-8L1C | Mint over a stale shared tick succeeds | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_initializeTick()`, `src/LPVault.sol:_computeFeeGrowthInside()` |
 | SC-T7AK | Inverted range revert | `src/LPVault.sol:mintPositionFor()` |
 | SC-T7AL | Misaligned tick revert | `src/LPVault.sol:mintPositionFor()` |
 | SC-T7AM | Non-active vault revert | `src/LPVault.sol:mintPositionFor()` |
@@ -176,6 +177,13 @@ In the context of computing position liquidity from a USDC deposit, facing the c
 
 **ADR-T7CF:** EIP-712 signed intent for operator-gated minting
 In the context of LP onboarding under the operator-executes-all model (ADR-RFS9 from FEAT-REPZ), facing the need for the LP to authorize specific mint parameters without directly calling the vault, we decided to use EIP-712 typed structured data (MintIntent struct) signed by the LP and submitted by the Operator, with intentId-based replay protection, to achieve cryptographic authorization verifiable on-chain while keeping the execution path operator-gated, accepting that the LP must pre-approve the vault for USDC (ERC-20 approve) and trust the Operator to submit their intent in a timely manner -- a trust assumption bounded by the reclaimDeposit escape hatch planned in feature 7.
+
+**ADR-8L1F:** The fee-growth delta wraps in `unchecked` and never uses `_mulDiv`
+In the context of Uniswap v3 lazy fee accounting compiled under Solidity 0.8.20 checked arithmetic, facing a normal accounting state (a position minted over a tick that another position initialized earlier) that reverts every mint, collect, merge, and emergency cancel on that range (audit NM-0986 issue 6.5), we decided to run the subtractions in `_computeFeeGrowthInside`, the flip in `_crossTick`, and every `feeGrowthInsideX128 - feeGrowthInsideLastX128` subtraction with the `liquidity * delta / Q128` product that consumes it inside `unchecked`, with a comment at each site, and never to route that product through `_mulDiv`, to achieve the exact modular arithmetic the formula needs and one shape at every site, accepting an explicit exception to `CLAUDE.md` checklist item 3 and a reader who must trust the comment at each site.
+
+The mechanism: a tick initialized late assumes all past growth sits on one side of it, so `below + above` can exceed `global`, and `global - below - above` must wrap modulo 2^256. A position stores that wrapped value as its snapshot. Later, `inside_now - snapshot` must also wrap, because both values wrapped by the same offset and the subtraction cancels the offset to the true small delta. That subtraction is the load-bearing part. On a correct delta, `liquidity * delta` fits in 256 bits for every reachable value, so `_mulDiv` and the unchecked product return the same number. On a wrong delta, both return a wrong number. The no-`_mulDiv` rule is therefore a convention that keeps one shape at every fee site and keeps the shape the auditors reviewed, not a safety claim.
+
+Rejected: signed integers, because `feeGrowthGlobalX128` itself can approach 2^256. Rejected: a fee model without wraparound, because it would replace an audited pattern with a new one. The sites at the time of this decision: `_computeFeeGrowthInside()`, `_crossTick()`, `collect()`, `mergePositions()` (survivor and consumed), and `emergencyCancelAll()`. A burn (R9 in `audits/audit-fixes-ranged.md`) adds a sixth site with the same shape.
 
 ## Testing Decisions
 
