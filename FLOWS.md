@@ -162,17 +162,22 @@ sequenceDiagram
     participant Vault as LPVault
 
     Operator->>Vault: updateTick(newTick)
-    Note right of Vault: Checks:<br/>• phase == Active<br/>• newTick != currentTick
+    Note right of Vault: Checks:<br/>• phase == Active<br/>• not paused
+    Note right of Vault: lastOperatorActivityTimestamp = now
 
-    loop for each initialized tick between oldTick and newTick
-        Note right of Vault: crossTick(tick):<br/>  feeGrowthOutside = global - outside<br/>  activeLiquidity += liquidityNet (or -net)
-        Note right of Vault: max 256 ticks per call<br/>(TooManyTicksCrossed if exceeded)
+    alt newTick == currentTick
+        Note right of Vault: return (no crossing, no event)
+    else newTick != currentTick
+        loop for each initialized tick between oldTick and newTick
+            Note right of Vault: crossTick(tick):<br/>  feeGrowthOutside = global - outside<br/>  activeLiquidity += liquidityNet (or -net)
+            Note right of Vault: max 256 ticks per call<br/>(TooManyTicksCrossed if exceeded)
+        end
+
+        Note right of Vault: currentTick = newTick<br/>TickUpdated event emitted
     end
-
-    Note right of Vault: currentTick = newTick<br/>lastOperatorActivityTimestamp = now
 ```
 
-**When to call:** Whenever the CLOB mid-price moves enough to cross one or more initialized ticks. The Keeper bot (holding an Operator key) calls this continuously.
+**When to call:** The Keeper bot (holding an Operator key) reports the tick every 60 seconds and after fills. A report with the unchanged tick refreshes only the Operator heartbeat, so it costs about as little as `heartbeat()` and needs no second transaction. While the vault is paused or wound down, `updateTick` reverts and the Keeper calls `heartbeat()` instead.
 
 **Chunking:** If the price has moved more than 256 initialized ticks, the Operator must call `updateTick` multiple times, landing on intermediate ticks to process the full range.
 
@@ -278,7 +283,7 @@ sequenceDiagram
     actor LP as Any LP (position holder)
     participant Vault as LPVault
 
-    Note over LP,Vault: Operator has not called notifyFees or updateTick for 7 days
+    Note over LP,Vault: No successful Operator call (including heartbeat()) for 7 days
 
     LP->>Vault: emergencyCancelAll()
     Note right of Vault: Checks:<br/>• phase != Cancelled<br/>• block.timestamp - lastOperatorActivityTimestamp ≥ 7 days<br/>• caller owns at least one position with liquidity > 0
@@ -294,7 +299,7 @@ sequenceDiagram
     Note right of Vault: EmergencyCancelExecuted event emitted
 ```
 
-**When to call:** After 7 days without any `notifyFees` or `updateTick` call from the Operator. The triggering LP does not need to be the admin — any active position holder can call it.
+**When to call:** After 7 days without any successful Operator call (`mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`). The triggering LP does not need to be the admin — any active position holder can call it.
 
 **Why CEI (checks-effects-interactions):** All position state is zeroed and the phase flipped to Cancelled **before** the USDC transfer loop. This prevents reentrancy even if USDC were a malicious token.
 
@@ -320,6 +325,7 @@ sequenceDiagram
     Operator->>Vault: notifyFees(...)      ← REVERTS TradingIsPaused
     Operator->>Vault: updateTick(...)      ← REVERTS TradingIsPaused
     Operator->>Vault: mergePositions(...)  ← REVERTS TradingIsPaused
+    Operator->>Vault: heartbeat()          ✓ SUCCEEDS (liveness signal, not gated by pause)
 
     LP->>Vault: collect(positionId)        ✓ SUCCEEDS (exit path always open)
     LP->>Vault: reclaimDeposit(...)        ✓ SUCCEEDS (exit path always open)
@@ -427,6 +433,7 @@ sequenceDiagram
 | `notifyFees` | Operator | Active / WindDown | Not paused; activeLiquidity > 0 |
 | `updateTick` | Operator | Active | Not paused; max 256 ticks |
 | `mergePositions` | Operator | Active / WindDown | Not paused |
+| `heartbeat` | Operator | Active / WindDown | Works while paused; refreshes the silence timer only |
 | `collect` | LP (owner) | Active / WindDown | Always open; works while paused |
 | `reclaimDeposit` | LP (owner) | Active / WindDown | Always open; works while paused |
 | `emergencyCancelAll` | Any position holder | Active / WindDown | After 7-day silence |

@@ -35,7 +35,7 @@ Full specs are under `specs/features/`. Feature index: [specs/FEATURES.md](specs
 | Role | Authority | Notes |
 |------|-----------|-------|
 | **Admin** | Registry-only: add/remove operators, set oracle, pause trading, schedule/apply/cancel implementation upgrades, two-step admin transfer | Cannot call user-facing vault functions |
-| **Operator** | Transactional: `mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions` | Multiple addresses allowed; must be separate from Oracle |
+| **Operator** | Transactional: `mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat` | Multiple addresses allowed; must be separate from Oracle |
 | **Oracle** | Lifecycle: `createVault` (factory), `startWindDown` (vault) | Single wallet; must be separate from Operator |
 | **LP** | Any wallet: `mintPosition`, `collect`, `burnPosition`, `reclaimDeposit` on their own positions | |
 | **Keeper** | Off-chain bot holding an Operator key — no on-chain role | Not a contract concept |

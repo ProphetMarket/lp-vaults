@@ -68,6 +68,7 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 | `reclaimDeposit(intent, operatorSig)` | LP (signed intent + timelock) | `LPVault` |
 | `collect(positionId)`, `burnPosition(positionId)` | LP (`position.owner`) | `LPVault` |
 | `notifyFees(amount)`, `updateTick(newTick)`, `mergePositions(...)` | Operator | `LPVault` |
+| `heartbeat()` | Operator | `LPVault` |
 | `startWindDown()` | Oracle | `LPVault` |
 | `emergencyCancelAll()` | any position holder, after operator-silence timelock | `LPVault` |
 
@@ -77,6 +78,7 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 - **Admin is registry-only.** Admin cannot directly call user-facing functions (no `mintPositionFor`, no `notifyFees`). Admin only manages who else holds what role.
 - **No upgradability.** Vaults are immutable EIP-1167 clones. The implementation contract address is fixed at factory deploy time. If a fix is needed, deploy a new factory; vaults already in-flight keep their old implementation.
 - **OPERATOR TRUST ASSUMPTION NatSpec on every operator-gated function.** Match `ProphetCTFExchange.sol`'s style — explicitly state what the operator can do and what users must trust.
+- **Every Operator function, present and future, carries `touchesHeartbeat` beside `onlyOperator`** (the liveness decision ADR-3XU3 in FEAT-JXQO, and the silence-timer requirement FR-JXQS). This includes the four the audit plan adds later: `depositForIntent`, `reclaimDepositFor`, `burnPositionFor`, and `collectFor`.
 
 ## Foundry conventions
 

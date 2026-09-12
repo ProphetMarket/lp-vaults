@@ -238,7 +238,7 @@ function mintPositionFor(
     uint256  usdcAmount,
     bytes32  intentId,
     bytes calldata signature
-) external onlyOperator nonReentrant returns (uint256 positionId)
+) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat returns (uint256 positionId)
 ```
 
 **Actor:** Operator
@@ -292,7 +292,7 @@ sequenceDiagram
 ### `LPVault.notifyFees`
 
 ```solidity
-function notifyFees(uint256 amount) external onlyOperator whenNotPaused
+function notifyFees(uint256 amount) external onlyOperator whenNotPaused touchesHeartbeat
 ```
 
 **Actor:** Operator
@@ -326,19 +326,47 @@ sequenceDiagram
 
 ---
 
-### `LPVault.updateTick`
+### `LPVault.heartbeat`
 
 ```solidity
-function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant
+function heartbeat() external onlyOperator touchesHeartbeat
 ```
 
 **Actor:** Operator
 
-Synchronises the vault's price tick with the off-chain CLOB mid-price. Crosses every initialised tick between `currentTick` and `newTick`, flipping per-tick fee accumulators and adjusting `activeLiquidity`.
+Refreshes `lastOperatorActivityTimestamp` and changes nothing else. This is the Operator's refresh path while the vault is paused or wound down, where `updateTick` reverts, and for an Operator with no report to send. On an Active market the keeper's `updateTick` with the current tick refreshes the timer itself. Every Operator function carries `touchesHeartbeat`, so every successful Operator call refreshes the timer.
+
+```mermaid
+sequenceDiagram
+    actor Operator
+    participant Vault as LPVault
+
+    Operator->>Vault: heartbeat()
+    Note right of Vault: Checks:<br/>phase != Cancelled
+    Note right of Vault: lastOperatorActivityTimestamp = now
+```
+
+**Events:** none
+
+**Reverts:**
+- `NotOperator()` — caller is not an operator
+- `VaultCancelled()` — vault is in terminal Cancelled phase
+
+---
+
+### `LPVault.updateTick`
+
+```solidity
+function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat
+```
+
+**Actor:** Operator
+
+Synchronises the vault's price tick with the off-chain CLOB mid-price. Crosses every initialised tick between `currentTick` and `newTick`, flipping per-tick fee accumulators and adjusting `activeLiquidity`. A call with the current tick refreshes only `lastOperatorActivityTimestamp` and returns: no crossing, no bitmap read, no event. The keeper reports every 60 seconds and after fills, so this is the normal case.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `newTick` | `int24` | The new price tick; must differ from `currentTick` |
+| `newTick` | `int24` | The new price tick. A value equal to `currentTick` refreshes only the heartbeat |
 
 ```mermaid
 sequenceDiagram
@@ -346,24 +374,28 @@ sequenceDiagram
     participant Vault as LPVault
 
     Operator->>Vault: updateTick(newTick)
-    Note right of Vault: Checks:<br/>not paused<br/>phase == Active<br/>newTick != currentTick
+    Note right of Vault: Checks:<br/>not paused<br/>phase == Active
+    Note right of Vault: lastOperatorActivityTimestamp = now
 
-    loop for each initialised tick between currentTick and newTick
-        Note right of Vault: crossTick(tick):<br/>feeGrowthOutside = global - outside<br/>activeLiquidity += liquidityNet (or -net)
-        Note right of Vault: Stops and reverts if crossCount > 256
+    alt newTick == currentTick
+        Note right of Vault: return (no crossing, no event)
+    else newTick != currentTick
+        loop for each initialised tick between currentTick and newTick
+            Note right of Vault: crossTick(tick):<br/>feeGrowthOutside = global - outside<br/>activeLiquidity += liquidityNet (or -net)
+            Note right of Vault: Stops and reverts if crossCount > 256
+        end
+
+        Note right of Vault: currentTick = newTick
+        Note right of Vault: TickUpdated event emitted
     end
-
-    Note right of Vault: currentTick = newTick<br/>lastOperatorActivityTimestamp = now
-    Note right of Vault: TickUpdated event emitted
 ```
 
-**Events:** `TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed)`
+**Events:** `TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed)` — only when the tick changes
 
 **Reverts:**
 - `NotOperator()` — caller is not an operator
 - `TradingIsPaused()` — vault is paused
 - `VaultNotActive()` — vault is not in Active phase
-- `SameTick()` — `newTick` equals `currentTick`
 - `TooManyTicksCrossed()` — more than 256 initialised ticks between old and new tick; call multiple times with intermediate values
 
 ---
@@ -411,7 +443,7 @@ sequenceDiagram
 
 ```solidity
 function mergePositions(uint256[] calldata positionIds)
-    external onlyOperator whenNotPaused nonReentrant
+    external onlyOperator whenNotPaused nonReentrant touchesHeartbeat
 ```
 
 **Actor:** Operator
@@ -526,7 +558,7 @@ function emergencyCancelAll() external nonReentrant
 
 **Actor:** Any position holder (after operator-silence timelock)
 
-Force-closes all open positions, computes each owner's payout (principal + fees), zeroes all position state, transitions the vault to terminal Cancelled phase, and transfers USDC to each owner. Callable after 7 days without any `notifyFees` or `updateTick` call.
+Force-closes all open positions, computes each owner's payout (principal + fees), zeroes all position state, transitions the vault to terminal Cancelled phase, and transfers USDC to each owner. Callable after 7 days without any successful Operator call (`mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
