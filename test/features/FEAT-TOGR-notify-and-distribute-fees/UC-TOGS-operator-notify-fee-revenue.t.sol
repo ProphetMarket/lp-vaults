@@ -9,7 +9,7 @@ import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
@@ -17,7 +17,7 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 // Deploys the full stack (factory + vault clone), mints an in-range position
 // to establish activeLiquidity > 0, and provides helpers for storage manipulation.
 // ──────────────────────────────────────────────
-contract NotifyFeesTestBase is ConditionalTokensFixture {
+contract NotifyFeesTestBase is LPVaultFixture {
     using stdStorage for StdStorage;
 
     LPVaultFactory factory;
@@ -39,20 +39,15 @@ contract NotifyFeesTestBase is ConditionalTokensFixture {
     uint256 constant LIQUIDITY_PRECISION = 1e18;
     uint256 constant Q128 = 2 ** 128;
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
 
     function setUp() public virtual {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
@@ -61,34 +56,7 @@ contract NotifyFeesTestBase is ConditionalTokensFixture {
         // Mint a position to establish activeLiquidity > 0.
         // Range [0, 100] with 1000 USDC → liquidity = 1000 * 1e18 / 100 = 10e18.
         // currentTick defaults to 0, so [0, 100) is in-range → activeLiquidity = 10e18.
-        mockUsdc.mint(lp, 1_000_000);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
-
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 1000, keccak256("setup-mint"));
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
-    }
-
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 1000, keccak256("setup-mint"));
     }
 
     /// @dev Reference mulDiv for expected-value computation in tests.
@@ -268,12 +236,12 @@ contract NotifyFeesSequentialTest is NotifyFeesTestBase {
 contract NotifyFeesNoLiquidityTest is NotifyFeesTestBase {
     function setUp() public override {
         // Skip the parent setUp's position mint — we want activeLiquidity == 0.
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 

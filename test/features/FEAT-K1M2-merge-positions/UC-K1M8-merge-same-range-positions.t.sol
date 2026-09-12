@@ -8,7 +8,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
@@ -17,7 +17,7 @@ import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 // Deploys the full stack (factory + vault clone), mints two in-range positions
 // owned by the same LP on the same tick range [0, 100), and provides helpers.
 // ──────────────────────────────────────────────
-contract MergePositionsTestBase is ConditionalTokensFixture {
+contract MergePositionsTestBase is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -37,11 +37,6 @@ contract MergePositionsTestBase is ConditionalTokensFixture {
     uint256 constant LIQUIDITY_PRECISION = 1e18;
     uint256 constant Q128 = 2 ** 128;
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     event PositionsMerged(uint256[] positionIds, uint256 survivorId);
 
     // Position IDs assigned during setUp
@@ -49,51 +44,22 @@ contract MergePositionsTestBase is ConditionalTokensFixture {
     uint256 posB;
 
     function setUp() public virtual {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
         vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
-        mockUsdc.mint(lp, 1_000_000);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
-
         // Mint position A: range [0, 100), 500 USDC → liquidity = 5e18
-        bytes memory sigA = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-a"));
-        vm.prank(operatorAddr);
-        posA = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-a"), sigA);
+        posA = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 500, keccak256("mint-a"));
 
         // Mint position B: range [0, 100), 500 USDC → liquidity = 5e18
-        bytes memory sigB = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-b"));
-        vm.prank(operatorAddr);
-        posB = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-b"), sigB);
-    }
-
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
+        posB = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 500, keccak256("mint-b"));
     }
 
     function _buildIds(uint256 id0, uint256 id1) internal pure returns (uint256[] memory) {
@@ -182,10 +148,7 @@ contract MergePositionsRangeMismatchTest is MergePositionsTestBase {
         super.setUp();
 
         // Mint position C with a different upper tick: range [0, 200)
-        mockUsdc.mint(lp, 1_000_000);
-        bytes memory sigC = _signMintIntent(LP_PK, lp, int24(0), int24(200), 500, keccak256("mint-c"));
-        vm.prank(operatorAddr);
-        posC = vault.mintPositionFor(lp, int24(0), int24(200), 500, keccak256("mint-c"), sigC);
+        posC = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(200), 500, keccak256("mint-c"));
     }
 
     // SC-K1MA: reverts with RangeMismatch when tick ranges differ
@@ -258,34 +221,26 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
     // 2. Mint posB → activeLiquidity doubles, second notifyFees(400) split equally
     // Result: posA accrued ~800, posB accrued ~200
     function setUp() public override {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
         vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
-        mockUsdc.mint(lp, 1_000_000);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
-
         // Mint posA: 500 USDC on [0, 100) → liq = 5e18, activeLiquidity = 5e18
-        bytes memory sigA = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-a"));
-        vm.prank(operatorAddr);
-        posA = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-a"), sigA);
+        posA = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 500, keccak256("mint-a"));
 
         // Distribute 600 USDC fees while posA is the only in-range position
         vm.prank(operatorAddr);
         vault.notifyFees(600);
 
         // Mint posB: 500 USDC on [0, 100) → liq = 5e18, activeLiquidity = 10e18
-        bytes memory sigB = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-b"));
-        vm.prank(operatorAddr);
-        posB = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-b"), sigB);
+        posB = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 500, keccak256("mint-b"));
 
         // Distribute 400 USDC fees split between posA and posB (200 each)
         vm.prank(operatorAddr);
@@ -409,7 +364,7 @@ contract MergePositionsAccessControlTest is MergePositionsTestBase {
 // feeGrowthInsideLastX128 slot, exercising the survivor and the consumed
 // position in separate scenarios so both call sites are proven fixed.
 // ──────────────────────────────────────────────
-contract MergePositionsWraparoundTestBase is ConditionalTokensFixture {
+contract MergePositionsWraparoundTestBase is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -426,56 +381,24 @@ contract MergePositionsWraparoundTestBase is ConditionalTokensFixture {
     int24 vaultTickSpacing = int24(10);
     uint128 minFirstLiq = uint128(1e18);
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     function setUp() public virtual {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
         vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
-
-        mockUsdc.mint(lp, 1_000_000e18);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
-    }
-
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
     }
 
     function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId)
         internal
         returns (uint256)
     {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        return _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
     }
 
     function _buildIds(uint256 id0, uint256 id1) internal pure returns (uint256[] memory) {

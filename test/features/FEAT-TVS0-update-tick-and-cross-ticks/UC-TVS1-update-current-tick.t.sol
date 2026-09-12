@@ -8,7 +8,7 @@ pragma solidity 0.8.20;
 import {Test, Vm} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
@@ -23,7 +23,7 @@ import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 //   tick 200: liquidityGross=20e18, liquidityNet=-20e18, feeGrowthOutside=0
 //   currentTick=0, activeLiquidity=10e18
 // ──────────────────────────────────────────────
-contract UpdateTickTestBase is ConditionalTokensFixture {
+contract UpdateTickTestBase is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -40,30 +40,20 @@ contract UpdateTickTestBase is ConditionalTokensFixture {
     int24 vaultTickSpacing = int24(10);
     uint128 minFirstLiq = uint128(10e18);
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     // Declare events for vm.expectEmit matching
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
     function setUp() public virtual {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
         vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
-
-        // Fund LP and approve vault
-        mockUsdc.mint(lp, 1_000_000e18);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
 
         // Position A: [0, 100) with 1000 USDC → liquidity = 10e18
         _mintPosition(int24(0), int24(100), 1000, keccak256("pos-a"));
@@ -77,30 +67,7 @@ contract UpdateTickTestBase is ConditionalTokensFixture {
     }
 
     function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId) internal {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId, address(vault));
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
-    }
-
-    function _domainSeparatorFor(address vaultAddr) internal view returns (bytes32) {
-        return keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, vaultAddr));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId,
-        address vaultAddr
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparatorFor(vaultAddr), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
+        _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
     }
 }
 
@@ -317,7 +284,7 @@ contract UpdateTickNoTicksCrossedTest is UpdateTickTestBase {
 // Why:  Gas griefing prevention. Without the cap, a large price move could
 //       exhaust the block gas limit.
 // ──────────────────────────────────────────────
-contract UpdateTickTooManyTicksTest is ConditionalTokensFixture {
+contract UpdateTickTooManyTicksTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -330,20 +297,15 @@ contract UpdateTickTooManyTicksTest is ConditionalTokensFixture {
     uint256 constant LP_PK = 0xA11CE;
     address lp;
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
     function setUp() public {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
@@ -351,9 +313,6 @@ contract UpdateTickTooManyTicksTest is ConditionalTokensFixture {
         vault = LPVault(_createVault(factory, oracleAddr, keccak256("many-ticks"), int24(1), uint128(1)));
 
         // Fund LP generously
-        mockUsdc.mint(lp, 1_000_000e18);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
 
         // First position [0, 300) — meets minimumFirstLiquidity floor
         _mintPositionOnVault(int24(0), int24(300), 300, keccak256("big-pos"));
@@ -372,15 +331,7 @@ contract UpdateTickTooManyTicksTest is ConditionalTokensFixture {
     }
 
     function _mintPositionOnVault(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId) internal {
-        bytes32 structHash = keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, tickLower, tickUpper, usdcAmount, intentId));
-        bytes32 domainSep =
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", domainSep, structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(LP_PK, digest);
-        bytes memory sig = abi.encodePacked(r, s, v);
-
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
     }
 
     // SC-TVS5: reverts when crossing more than 256 initialized ticks
@@ -629,7 +580,7 @@ contract TickBitmapTest is UpdateTickTestBase {
 // arrived at that value" -- the same defensive posture Uniswap v3 itself
 // applies to this exact line.
 // ──────────────────────────────────────────────
-contract CrossTickWraparoundTestBase is ConditionalTokensFixture {
+contract CrossTickWraparoundTestBase is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -646,64 +597,32 @@ contract CrossTickWraparoundTestBase is ConditionalTokensFixture {
     int24 vaultTickSpacing = int24(10);
     uint128 minFirstLiq = uint128(1e18);
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
     uint256 posId;
 
     function setUp() public virtual {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
         vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
-
-        mockUsdc.mint(lp, 1_000_000e18);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
 
         // A position spanning [0, 200) initializes ticks 0 and 200, and
         // keeps activeLiquidity nonzero so notifyFees can run.
         posId = _mintPosition(int24(0), int24(200), 1000, keccak256("wide"));
     }
 
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
-    }
-
     function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId)
         internal
         returns (uint256)
     {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        return _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
     }
 
     /// @dev Overwrites ticks[tick].feeGrowthOutsideX128 directly.

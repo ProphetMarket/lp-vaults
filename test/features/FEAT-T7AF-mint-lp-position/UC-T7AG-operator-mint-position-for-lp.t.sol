@@ -3,20 +3,20 @@ pragma solidity 0.8.20;
 
 // UC-T7AG: Operator Mint Position for LP
 // Integration tests for every scenario in this use case.
-// Covers: SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AR, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AQ, SC-8L1C
+// Covers: SC-T7AH, SC-T7AI, SC-T7AJ, SC-8L1C, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-3Z9J, SC-45IE, SC-3Z9K, SC-T7AR, SC-3XU5, SC-3XU6
 
-import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract with shared setup for all mint scenarios.
-// Deploys factory, creates vault, funds LP, and provides EIP-712 signing helper.
+// Deploys factory, creates vault, and escrows intents for the LP's Safe. The mint
+// consumes an escrow: it verifies no signature and moves no USDC (FEAT-3ZRI did both).
 // ──────────────────────────────────────────────
-contract MintPositionTestBase is ConditionalTokensFixture {
+contract MintPositionTestBase is LPVaultFixture {
     using stdStorage for StdStorage;
 
     LPVaultFactory factory;
@@ -29,6 +29,7 @@ contract MintPositionTestBase is ConditionalTokensFixture {
     address exchangeAddr = makeAddr("exchange");
 
     uint256 constant LP_PK = 0xA11CE;
+    /// @dev The LP's Safe: the recorded depositor and the position owner.
     address lp;
 
     bytes32 marketId = bytes32(uint256(1));
@@ -36,11 +37,6 @@ contract MintPositionTestBase is ConditionalTokensFixture {
     uint128 minFirstLiq = uint128(10e18);
 
     uint256 constant LIQUIDITY_PRECISION = 1e18;
-
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
     event PositionMinted(
         uint256 indexed positionId,
@@ -53,44 +49,28 @@ contract MintPositionTestBase is ConditionalTokensFixture {
     );
 
     function setUp() public virtual {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
         vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
-
-        // Fund LP with USDC and approve vault for max spending
-        mockUsdc.mint(lp, 100_000);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
     }
 
-    /// @dev Computes the EIP-712 domain separator for the vault.
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
+    /// @dev Funds the Safe and escrows an intent for it with the far deadline.
+    function _escrowIntent(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId) internal {
+        _fundSafe(mockUsdc, lp, address(vault), usdcAmount);
+        _escrow(vault, operatorAddr, LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE);
     }
 
-    /// @dev Signs a MintIntent struct with the given private key.
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
+    /// @dev Mints an escrowed intent as the Operator.
+    function _mint(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId) internal returns (uint256) {
+        vm.prank(operatorAddr);
+        return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE);
     }
 
     /// @dev Sets the vault's currentTick via storage manipulation (no updateTick yet).
@@ -106,18 +86,17 @@ contract MintPositionTestBase is ConditionalTokensFixture {
 
 // ──────────────────────────────────────────────
 // SC-T7AH: Successful in-range mint with fresh ticks
-// What: When the Operator submits a valid EIP-712 mint intent for a range
-//       that spans the current tick (in-range), the vault creates the position,
-//       initializes both bound ticks with correct feeGrowthOutside values,
-//       adds liquidity to activeLiquidity, pulls USDC from the LP, and
-//       emits PositionMinted. This is the primary happy path for LP onboarding.
-// Why:  This scenario exercises the complete mint flow end-to-end: signature
-//       verification, tick initialization, fee snapshot, active liquidity
-//       update, and USDC transfer. It's the most common case in production.
-// Example: vault at currentTick=50 with feeGrowthGlobal=1000, LP mints
-//          range [20, 80] with 600 USDC. Tick 20 initializes with
-//          feeGrowthOutside=1000 (below current), tick 80 with 0 (above).
-//          liquidity = 600 * 1e18 / 60 = 10e18. activeLiquidity += 10e18.
+// What: When the Operator mints an escrowed intent for a range that spans the
+//       current tick (in-range), the vault consumes the escrow, creates the
+//       position owned by the Safe, initializes both bound ticks with correct
+//       feeGrowthOutside values, adds liquidity to activeLiquidity, moves no
+//       USDC, and emits PositionMinted. This is the primary happy path.
+// Why:  This scenario exercises the complete mint flow end-to-end: the escrow
+//       checks, tick initialization, fee snapshot, active liquidity update,
+//       and the escrow deletion. It's the most common case in production.
+// Example: vault at currentTick=50 with feeGrowthGlobal=1000, escrow of 600
+//          for [20, 80]. Tick 20 initializes with feeGrowthOutside=1000 (below
+//          current), tick 80 with 0 (above). liquidity = 600 * 1e18 / 60 = 10e18.
 // ──────────────────────────────────────────────
 contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     int24 tickLower = int24(20);
@@ -129,16 +108,15 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
         super.setUp();
         _setCurrentTick(int24(50));
         _setFeeGrowthGlobalX128(1000);
+        _escrowIntent(tickLower, tickUpper, usdcAmount, intentId);
     }
 
-    // SC-T7AH: position record has correct owner, ticks, and liquidity
+    // SC-T7AH: position record has correct owner (the Safe), ticks, and liquidity
     function test_positionRecordIsCorrect() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        uint256 posId = vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         (address owner, int24 tl, int24 tu, uint128 liq,, uint256 owed) = vault.positions(posId);
-        assertEq(owner, lp, "position owner should be LP");
+        assertEq(owner, lp, "position owner should be the LP's Safe");
         assertEq(tl, tickLower, "tickLower should match");
         assertEq(tu, tickUpper, "tickUpper should match");
         // liquidity = 600 * 1e18 / (80 - 20) = 10e18
@@ -148,9 +126,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
 
     // SC-T7AH: feeGrowthInsideLastX128 snapshot is correct
     function test_feeGrowthInsideSnapshotPreventsRetroactiveClaims() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        uint256 posId = vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         // feeGrowthInside = global(1000) - below(1000) - above(0) = 0
         // below: currentTick(50) >= tickLower(20) → ticks[20].feeGrowthOutside = 1000 (just initialized)
@@ -161,9 +137,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
 
     // SC-T7AH: tick 20 initialized with feeGrowthOutside = feeGrowthGlobal (below currentTick)
     function test_lowerTickInitializedCorrectly() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside) = vault.ticks(tickLower);
         assertEq(feeGrowthOutside, 1000, "tick 20 feeGrowthOutside should equal feeGrowthGlobal");
@@ -173,9 +147,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
 
     // SC-T7AH: tick 80 initialized with feeGrowthOutside = 0 (above currentTick)
     function test_upperTickInitializedCorrectly() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside) = vault.ticks(tickUpper);
         assertEq(feeGrowthOutside, 0, "tick 80 feeGrowthOutside should be 0 (above currentTick)");
@@ -186,42 +158,47 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     // SC-T7AH: activeLiquidity increased (position is in-range)
     function test_activeLiquidityIncreasedForInRangePosition() public {
         uint128 before_ = vault.activeLiquidity();
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         assertEq(vault.activeLiquidity(), before_ + uint128(10e18), "activeLiquidity should increase");
     }
 
-    // SC-T7AH: USDC transferred from LP to vault
-    function test_usdcTransferredFromLpToVault() public {
-        uint256 lpBefore = mockUsdc.balanceOf(lp);
+    // SC-T7AH: the mint moves no USDC; the escrow already holds it
+    function test_mintMovesNoUsdc() public {
+        uint256 safeBefore = mockUsdc.balanceOf(lp);
         uint256 vaultBefore = mockUsdc.balanceOf(address(vault));
+        assertEq(vaultBefore, usdcAmount, "precondition: the escrow put 600 USDC in the vault");
 
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        assertEq(mockUsdc.balanceOf(lp), lpBefore - usdcAmount, "LP balance should decrease");
-        assertEq(mockUsdc.balanceOf(address(vault)), vaultBefore + usdcAmount, "vault balance should increase");
+        assertEq(mockUsdc.balanceOf(lp), safeBefore, "the Safe's balance must not change at the mint");
+        assertEq(mockUsdc.balanceOf(address(vault)), vaultBefore, "the vault's balance must not change at the mint");
     }
 
-    // SC-T7AH: PositionMinted event emitted
-    function test_emitsPositionMintedEvent() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
+    // SC-T7AH: the escrow is consumed and totalEscrowed falls by 600
+    function test_mintConsumesEscrow() public {
+        assertEq(vault.totalEscrowed(), usdcAmount, "precondition: 600 escrowed");
 
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
+
+        (address recorded, uint96 amount, bytes32 structHash) = vault.pendingDeposits(intentId);
+        assertEq(recorded, address(0), "escrow entry should be deleted");
+        assertEq(amount, 0, "escrow amount should be deleted");
+        assertEq(structHash, bytes32(0), "escrow hash should be deleted");
+        assertEq(vault.totalEscrowed(), 0, "totalEscrowed should fall by the escrowed amount");
+    }
+
+    // SC-T7AH: PositionMinted event emitted with the Safe as owner
+    function test_emitsPositionMintedEvent() public {
         vm.expectEmit(true, true, false, true, address(vault));
         emit PositionMinted(0, lp, tickLower, tickUpper, uint128(10e18), usdcAmount, intentId);
 
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
     }
 
     // SC-T7AH: intentId recorded as used
     function test_intentIdRecordedAsUsed() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         assertTrue(vault.usedIntents(intentId), "intentId should be marked as used");
     }
@@ -229,9 +206,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     // SC-T7AH: nextPositionId incremented
     function test_nextPositionIdIncremented() public {
         uint256 before_ = vault.nextPositionId();
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         assertEq(vault.nextPositionId(), before_ + 1, "nextPositionId should increment");
     }
@@ -256,23 +231,20 @@ contract MintPositionOutOfRangeTest is MintPositionTestBase {
         super.setUp();
         _setCurrentTick(int24(50));
         _setFeeGrowthGlobalX128(2000);
+        _escrowIntent(tickLower, tickUpper, usdcAmount, intentId);
     }
 
     // SC-T7AI: activeLiquidity unchanged for out-of-range position
     function test_activeLiquidityUnchangedWhenOutOfRange() public {
         uint128 before_ = vault.activeLiquidity();
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         assertEq(vault.activeLiquidity(), before_, "activeLiquidity should NOT change for out-of-range");
     }
 
     // SC-T7AI: both ticks initialized with feeGrowthOutside = 0 (both above currentTick)
     function test_bothTicksInitializedWithZeroFeeGrowthOutside() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         (,, uint256 fgOutLower) = vault.ticks(tickLower);
         (,, uint256 fgOutUpper) = vault.ticks(tickUpper);
@@ -280,18 +252,17 @@ contract MintPositionOutOfRangeTest is MintPositionTestBase {
         assertEq(fgOutUpper, 0, "tick 90 feeGrowthOutside should be 0 (above current)");
     }
 
-    // SC-T7AI: position created and USDC transferred
-    function test_positionCreatedAndUsdcTransferred() public {
-        uint256 lpBefore = mockUsdc.balanceOf(lp);
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        uint256 posId = vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+    // SC-T7AI: position created for the Safe and the escrow consumed, with no USDC moved
+    function test_positionCreatedAndEscrowConsumed() public {
+        uint256 vaultBefore = mockUsdc.balanceOf(address(vault));
+        uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         (address owner,,, uint128 liq,,) = vault.positions(posId);
-        assertEq(owner, lp, "position owner should be LP");
+        assertEq(owner, lp, "position owner should be the LP's Safe");
         // liquidity = 300 * 1e18 / 30 = 10e18
         assertEq(liq, uint128(10e18), "liquidity should be correct");
-        assertEq(mockUsdc.balanceOf(lp), lpBefore - usdcAmount, "USDC should be transferred");
+        assertEq(mockUsdc.balanceOf(address(vault)), vaultBefore, "no USDC should move at the mint");
+        assertEq(vault.totalEscrowed(), 0, "totalEscrowed should fall by 300");
     }
 }
 
@@ -315,18 +286,14 @@ contract MintPositionExistingTickTest is MintPositionTestBase {
         _setFeeGrowthGlobalX128(1000);
 
         // First mint establishes tick 20 with feeGrowthOutside = 1000 and tick 60 = 0
-        bytes memory sig1 = _signMintIntent(LP_PK, lp, int24(20), int24(60), 400, intentId1);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, int24(20), int24(60), 400, intentId1, sig1);
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(60), 400, intentId1);
     }
 
     // SC-T7AJ: second position accumulates liquidityGross on shared tick
     function test_liquidityGrossAccumulatesOnExistingTick() public {
         (uint128 liqGrossBefore,,) = vault.ticks(int24(20));
 
-        bytes memory sig2 = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, intentId2);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId2, sig2);
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, intentId2);
 
         // Second position liquidity: 600 * 1e18 / 60 = 10e18
         (uint128 liqGrossAfter,,) = vault.ticks(int24(20));
@@ -340,12 +307,19 @@ contract MintPositionExistingTickTest is MintPositionTestBase {
         // Simulate fee growth changing between mints
         _setFeeGrowthGlobalX128(5000);
 
-        bytes memory sig2 = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, intentId2);
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId2, sig2);
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, intentId2);
 
         (,, uint256 fgOutAfter) = vault.ticks(int24(20));
         assertEq(fgOutAfter, fgOutBefore, "feeGrowthOutside should be preserved, not re-initialized");
+    }
+
+    // SC-T7AJ: the second mint deletes its own escrow and leaves totalEscrowed at 0
+    function test_secondMintConsumesItsEscrow() public {
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, intentId2);
+
+        (address recorded,,) = vault.pendingDeposits(intentId2);
+        assertEq(recorded, address(0), "second escrow should be deleted");
+        assertEq(vault.totalEscrowed(), 0, "no escrow should remain");
     }
 }
 
@@ -382,9 +356,7 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
         internal
         returns (uint256)
     {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        return _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
     }
 
     /// @dev notifyFees moves no USDC, so funding the vault is enough for the
@@ -420,7 +392,7 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
         uint256 posId = _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
 
         (address owner,,, uint128 liquidity,,) = vault.positions(posId);
-        assertEq(owner, lp, "position should be minted to the LP");
+        assertEq(owner, lp, "position should be minted to the LP's Safe");
         assertGt(liquidity, 0, "minted position should have nonzero liquidity");
         assertEq(vault.activeLiquidity(), activeBefore, "activeLiquidity unchanged: currentTick 150 >= tickUpper 100");
     }
@@ -456,7 +428,8 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
 // SC-T7AM: Non-active vault revert
 // SC-T7AR: Zero amount revert
 // What: Validation checks reject structurally invalid mint requests before
-//       any state is touched. Each fires a distinct custom error.
+//       any state is touched. Each fires a distinct custom error, and each
+//       fires before the escrow is read, so no escrow is needed to reach it.
 // Why:  Early reverts protect the vault from recording positions with
 //       impossible ranges, misaligned ticks, or zero liquidity. They also
 //       prevent minting into a wound-down vault.
@@ -464,96 +437,93 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
 contract MintPositionValidationTest is MintPositionTestBase {
     // SC-T7AK: tickLower >= tickUpper reverts with InvalidRange
     function test_revertsOnInvertedRange() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(80), int24(20), 600, keccak256("inv"));
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.InvalidRange.selector);
-        vault.mintPositionFor(lp, int24(80), int24(20), 600, keccak256("inv"), sig);
+        vault.mintPositionFor(lp, int24(80), int24(20), 600, keccak256("inv"), FAR_DEADLINE);
     }
 
     // SC-T7AK: tickLower == tickUpper reverts with InvalidRange
     function test_revertsOnEqualTicks() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(50), int24(50), 600, keccak256("eq"));
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.InvalidRange.selector);
-        vault.mintPositionFor(lp, int24(50), int24(50), 600, keccak256("eq"), sig);
+        vault.mintPositionFor(lp, int24(50), int24(50), 600, keccak256("eq"), FAR_DEADLINE);
     }
 
     // SC-T7AL: tick not aligned to tickSpacing reverts with TickNotAligned
     function test_revertsOnMisalignedLowerTick() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(15), int24(80), 600, keccak256("mis"));
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.TickNotAligned.selector);
-        vault.mintPositionFor(lp, int24(15), int24(80), 600, keccak256("mis"), sig);
+        vault.mintPositionFor(lp, int24(15), int24(80), 600, keccak256("mis"), FAR_DEADLINE);
     }
 
     // SC-T7AL: misaligned upper tick also reverts
     function test_revertsOnMisalignedUpperTick() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(75), 600, keccak256("mis2"));
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.TickNotAligned.selector);
-        vault.mintPositionFor(lp, int24(20), int24(75), 600, keccak256("mis2"), sig);
+        vault.mintPositionFor(lp, int24(20), int24(75), 600, keccak256("mis2"), FAR_DEADLINE);
     }
 
-    // SC-T7AM: mint on a non-active vault reverts with VaultNotActive
+    // SC-T7AM: mint on a non-active vault reverts with VaultNotActive, even for an escrowed intent
     function test_revertsWhenVaultNotActive() public {
+        bytes32 intentId = keccak256("wd");
+        _escrowIntent(int24(20), int24(80), 600, intentId);
+
         // Move the vault to WindDown (phase 2) through the Oracle
         vm.prank(oracleAddr);
         vault.startWindDown();
 
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, keccak256("wd"));
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.VaultNotActive.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, keccak256("wd"), sig);
+        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, FAR_DEADLINE);
     }
 
     // SC-T7AR: usdcAmount == 0 reverts with ZeroAmount
     function test_revertsOnZeroAmount() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 0, keccak256("zero"));
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.ZeroAmount.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 0, keccak256("zero"), sig);
+        vault.mintPositionFor(lp, int24(20), int24(80), 0, keccak256("zero"), FAR_DEADLINE);
     }
 }
 
 // ──────────────────────────────────────────────
 // SC-T7AN: Non-operator caller revert
 // What: Only registered Operators can call mintPositionFor. All other
-//       callers — LP, Admin, Oracle, arbitrary addresses — get NotOperator.
+//       callers — the LP's Safe, Admin, Oracle, arbitrary addresses — get NotOperator.
 // Why:  FR-RFS6 from FEAT-REPZ mandates operator-only position creation
 //       to eliminate the first-LP inflation attack vector.
 // ──────────────────────────────────────────────
 contract MintPositionAccessControlTest is MintPositionTestBase {
-    // SC-T7AN: LP calling directly reverts
-    function test_revertsWhenLpCallsDirectly() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, keccak256("lp-call"));
-        vm.prank(lp);
+    bytes32 intentId = keccak256("access");
+
+    function setUp() public override {
+        super.setUp();
+        _escrowIntent(int24(20), int24(80), 600, intentId);
+    }
+
+    function _mintAs(address caller) internal {
+        vm.prank(caller);
         vm.expectRevert(LPVault.NotOperator.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, keccak256("lp-call"), sig);
+        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, FAR_DEADLINE);
+    }
+
+    // SC-T7AN: the LP's Safe calling directly reverts
+    function test_revertsWhenLpCallsDirectly() public {
+        _mintAs(lp);
     }
 
     // SC-T7AN: Admin calling reverts
     function test_revertsWhenAdminCalls() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, keccak256("admin-call"));
-        vm.prank(admin);
-        vm.expectRevert(LPVault.NotOperator.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, keccak256("admin-call"), sig);
+        _mintAs(admin);
     }
 
     // SC-T7AN: Oracle calling reverts
     function test_revertsWhenOracleCalls() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, keccak256("oracle-call"));
-        vm.prank(oracleAddr);
-        vm.expectRevert(LPVault.NotOperator.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, keccak256("oracle-call"), sig);
+        _mintAs(oracleAddr);
     }
 
     // SC-T7AN: arbitrary address calling reverts
     function test_revertsWhenNobodyCalls() public {
-        address nobody = makeAddr("nobody");
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, keccak256("nobody-call"));
-        vm.prank(nobody);
-        vm.expectRevert(LPVault.NotOperator.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, keccak256("nobody-call"), sig);
+        _mintAs(makeAddr("nobody"));
     }
 }
 
@@ -561,29 +531,33 @@ contract MintPositionAccessControlTest is MintPositionTestBase {
 // SC-T7AO: First mint below minimum liquidity
 // What: When activeLiquidity == 0 and the computed liquidity from the mint
 //       falls below minimumFirstLiquidity, the call reverts with
-//       BelowMinimumFirstLiquidity.
+//       BelowMinimumFirstLiquidity, and the escrow stays in place.
 // Why:  FR-RFS7 from FEAT-REPZ prevents a tiny first position from
 //       manipulating the fee accumulator (the v3 analog of the ERC-4626
 //       first-depositor inflation attack).
 // ──────────────────────────────────────────────
 contract MintPositionFirstMintFloorTest is MintPositionTestBase {
-    // SC-T7AO: first mint with liquidity below floor reverts
+    // SC-T7AO: first mint with liquidity below floor reverts, and the escrow survives for a reclaim
     function test_revertsWhenFirstMintBelowFloor() public {
         // minFirstLiq = 10e18. A mint of 1 USDC across [0, 10] gives
         // liquidity = 1 * 1e18 / 10 = 0.1e18 = 1e17, which is < 10e18.
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(10), 1, keccak256("tiny"));
+        bytes32 intentId = keccak256("tiny");
+        _escrowIntent(int24(0), int24(10), 1, intentId);
+
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.BelowMinimumFirstLiquidity.selector);
-        vault.mintPositionFor(lp, int24(0), int24(10), 1, keccak256("tiny"), sig);
+        vault.mintPositionFor(lp, int24(0), int24(10), 1, intentId, FAR_DEADLINE);
+
+        (address recorded, uint96 amount,) = vault.pendingDeposits(intentId);
+        assertEq(recorded, lp, "escrow should stay in place after the failed mint");
+        assertEq(amount, 1, "escrow amount should be untouched");
     }
 
     // SC-T7AO: first mint with liquidity at exactly the floor succeeds
     function test_succeedsWhenFirstMintMeetsFloor() public {
         // minFirstLiq = 10e18. A mint of 100 USDC across [0, 10] gives
         // liquidity = 100 * 1e18 / 10 = 10e18, which == 10e18. Should succeed.
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(10), 100, keccak256("ok"));
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, int24(0), int24(10), 100, keccak256("ok"), sig);
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(10), 100, keccak256("ok"));
 
         assertGt(vault.activeLiquidity(), 0, "activeLiquidity should be non-zero after first mint");
     }
@@ -592,89 +566,121 @@ contract MintPositionFirstMintFloorTest is MintPositionTestBase {
 // ──────────────────────────────────────────────
 // SC-T7AP: Duplicate intentId revert
 // What: Reusing an intentId that was already consumed in a successful mint
-//       reverts with IntentAlreadyUsed. The usedIntents mapping is write-once.
-// Why:  Replay protection prevents the same signed intent from being
-//       executed twice — the LP only authorized one mint per intentId.
+//       reverts with IntentAlreadyUsed before the escrow is read. The
+//       usedIntents mapping is write-once.
+// Why:  Replay protection prevents the same intent from being executed
+//       twice — the LP only authorized one mint per intentId.
 // ──────────────────────────────────────────────
 contract MintPositionReplayProtectionTest is MintPositionTestBase {
     bytes32 intentId = keccak256("replay-me");
 
-    // SC-T7AP: second use of the same intentId reverts
+    // SC-T7AP: second use of the same intentId reverts, and reports the replay, not the missing escrow
     function test_revertsOnDuplicateIntentId() public {
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(10), 100, intentId);
-
         // First use succeeds
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, int24(0), int24(10), 100, intentId, sig);
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(10), 100, intentId);
 
         // Second use reverts
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.IntentAlreadyUsed.selector);
-        vault.mintPositionFor(lp, int24(0), int24(10), 100, intentId, sig);
+        vault.mintPositionFor(lp, int24(0), int24(10), 100, intentId, FAR_DEADLINE);
     }
 }
 
 // ──────────────────────────────────────────────
-// SC-T7AQ: Invalid signature revert
-// What: Signatures that don't match the declared LP, or that exhibit
-//       malleability (high-s, invalid v), are rejected with InvalidSignature.
-// Why:  EIP-712 verification is the LP's authorization gate. Accepting
-//       invalid signatures would let anyone mint on the LP's behalf.
-//       Malleability rejection (CLAUDE.md security checklist item 5)
-//       prevents an attacker from deriving a second valid signature
-//       from an observed one.
+// SC-3Z9J: Revert when no deposit is escrowed for the intent
+// SC-45IE: Revert when the escrow belongs to a different Safe
+// SC-3Z9K: Revert when the recorded hash does not match the arguments
+// What: The escrow record is the mint's only proof of deposit and of
+//       ownership. No escrow → DepositNotEscrowed. Another Safe's escrow →
+//       NotIntentOwner, before the hash compare. A changed range, amount, or
+//       deadline → IntentMismatch.
+// Why:  Audit NM-0986 issues 6.1 and 6.2: no position without recorded USDC,
+//       and never a second pull. A valid signature never proves who owns an
+//       intentId, and the mint checks no signature at all, so the recorded
+//       Safe is the only ownership proof (FR-45ID). The recorded hash is what
+//       binds the intent's terms (FR-3Z9W).
 // ──────────────────────────────────────────────
-contract MintPositionSignatureTest is MintPositionTestBase {
-    // SC-T7AQ: wrong signer — LP signed but operator submits with different lp address
-    function test_revertsWhenSignerMismatch() public {
-        address fakeLp = makeAddr("fakeLp");
-        // Sign as real LP but submit with fakeLp address
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, keccak256("wrong-signer"));
-        vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.InvalidSignature.selector);
-        vault.mintPositionFor(fakeLp, int24(20), int24(80), 600, keccak256("wrong-signer"), sig);
+contract MintPositionEscrowChecksTest is MintPositionTestBase {
+    bytes32 intentId = keccak256("escrowed");
+
+    function setUp() public override {
+        super.setUp();
+        _escrowIntent(int24(20), int24(80), 600, intentId);
     }
 
-    // SC-T7AQ: malleable signature (high-s value) reverts
-    function test_revertsOnHighSValue() public {
-        bytes32 intentId = keccak256("high-s");
-        bytes32 structHash =
-            keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, int24(20), int24(80), uint256(600), intentId));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(LP_PK, digest);
-
-        // Flip s to the upper half of the secp256k1 curve (malleable counterpart)
-        uint256 secp256k1n = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141;
-        bytes32 highS = bytes32(secp256k1n - uint256(s));
-        uint8 flippedV = v == 27 ? 28 : 27;
-        bytes memory malleableSig = abi.encodePacked(r, highS, flippedV);
+    // SC-3Z9J: no escrow for the intentId
+    function test_revertsWhenNothingEscrowed() public {
+        bytes32 unknown = keccak256("never-escrowed");
+        uint256 nextBefore = vault.nextPositionId();
 
         vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.InvalidSignature.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, malleableSig);
+        vm.expectRevert(LPVault.DepositNotEscrowed.selector);
+        vault.mintPositionFor(lp, int24(20), int24(80), 600, unknown, FAR_DEADLINE);
+
+        assertEq(vault.nextPositionId(), nextBefore, "no position created");
+        assertFalse(vault.usedIntents(unknown), "usedIntents unchanged");
     }
 
-    // SC-T7AQ: invalid v value reverts
-    function test_revertsOnInvalidV() public {
-        bytes32 intentId = keccak256("bad-v");
-        bytes32 structHash =
-            keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, int24(20), int24(80), uint256(600), intentId));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (, bytes32 r, bytes32 s) = vm.sign(LP_PK, digest);
-
-        // Set v to invalid value (not 27 or 28)
-        bytes memory badVSig = abi.encodePacked(r, s, uint8(26));
+    // SC-45IE: the escrow belongs to Safe A, and the Operator names Safe B
+    function test_revertsWhenEscrowBelongsToAnotherSafe() public {
+        address safeB = _safeOf(vm.addr(0xB0B));
 
         vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.InvalidSignature.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, badVSig);
+        vm.expectRevert(LPVault.NotIntentOwner.selector);
+        vault.mintPositionFor(safeB, int24(20), int24(80), 600, intentId, FAR_DEADLINE);
+
+        (address recorded, uint96 amount,) = vault.pendingDeposits(intentId);
+        assertEq(recorded, lp, "A's escrow is untouched");
+        assertEq(amount, 600, "A's escrow amount is untouched");
     }
 
-    // SC-T7AQ: empty signature reverts
-    function test_revertsOnEmptySignature() public {
+    // SC-3Z9K: a different range reverts IntentMismatch
+    function test_revertsOnDifferentRange() public {
         vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.InvalidSignature.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, keccak256("empty"), "");
+        vm.expectRevert(LPVault.IntentMismatch.selector);
+        vault.mintPositionFor(lp, int24(20), int24(90), 600, intentId, FAR_DEADLINE);
+    }
+
+    // SC-3Z9K: a different amount reverts IntentMismatch
+    function test_revertsOnDifferentAmount() public {
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.IntentMismatch.selector);
+        vault.mintPositionFor(lp, int24(20), int24(80), 500, intentId, FAR_DEADLINE);
+    }
+
+    // SC-3Z9K: a different deadline reverts IntentMismatch
+    function test_revertsOnDifferentDeadline() public {
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.IntentMismatch.selector);
+        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, FAR_DEADLINE - 1);
+    }
+
+    // SC-3Z9K: a mismatch leaves the escrow in place with its recorded terms
+    function test_mismatchLeavesEscrowInPlace() public {
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.IntentMismatch.selector);
+        vault.mintPositionFor(lp, int24(20), int24(80), 500, intentId, FAR_DEADLINE);
+
+        (address recorded, uint96 amount,) = vault.pendingDeposits(intentId);
+        assertEq(recorded, lp, "escrow should stay recorded for the Safe");
+        assertEq(amount, 600, "escrow amount should be unchanged");
+        assertEq(vault.totalEscrowed(), 600, "totalEscrowed should be unchanged");
+    }
+
+    // SC-3Z9K: the mint reads no clock: a deposit made near its deadline still mints after it
+    function test_mintSucceedsAfterTheDeadlineHasPassed() public {
+        bytes32 lateIntent = keccak256("near-deadline");
+        uint256 deadline = block.timestamp + 10;
+        _fundSafe(mockUsdc, lp, address(vault), 600);
+        _escrow(vault, operatorAddr, LP_PK, lp, int24(20), int24(80), 600, lateIntent, deadline);
+
+        vm.warp(deadline + 1 days);
+
+        vm.prank(operatorAddr);
+        uint256 posId = vault.mintPositionFor(lp, int24(20), int24(80), 600, lateIntent, deadline);
+
+        (address owner,,,,,) = vault.positions(posId);
+        assertEq(owner, lp, "the mint should succeed after the deposit's deadline passed");
     }
 }
 
@@ -692,14 +698,13 @@ contract MintPositionSignatureTest is MintPositionTestBase {
 contract MintRefreshesOperatorSilenceTimerTest is MintPositionTestBase {
     // SC-3XU5: a successful mint advances the timer to the current block
     function test_successfulMintRefreshesSilenceTimer() public {
+        bytes32 intentId = keccak256("mint-refreshes-timer");
+        _escrowIntent(int24(20), int24(80), 600, intentId);
+
         // Move well past vault creation so a stale timer would be obvious
         vm.warp(block.timestamp + 1 days);
 
-        bytes32 intentId = keccak256("mint-refreshes-timer");
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, intentId);
-
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, sig);
+        _mint(int24(20), int24(80), 600, intentId);
 
         assertEq(
             vault.lastOperatorActivityTimestamp(), block.timestamp, "a successful mint should refresh the silence timer"
@@ -709,10 +714,7 @@ contract MintRefreshesOperatorSilenceTimerTest is MintPositionTestBase {
     // SC-3XU6: a mint rejected for a duplicate intentId leaves the timer alone
     function test_revertedMintOnDuplicateIntentLeavesSilenceTimerUntouched() public {
         bytes32 intentId = keccak256("mint-duplicate-intent");
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, intentId);
-
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, sig);
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, intentId);
 
         uint256 timerAfterFirstMint = vault.lastOperatorActivityTimestamp();
 
@@ -721,7 +723,7 @@ contract MintRefreshesOperatorSilenceTimerTest is MintPositionTestBase {
 
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.IntentAlreadyUsed.selector);
-        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, sig);
+        vault.mintPositionFor(lp, int24(20), int24(80), 600, intentId, FAR_DEADLINE);
 
         assertEq(
             vault.lastOperatorActivityTimestamp(),
@@ -736,12 +738,9 @@ contract MintRefreshesOperatorSilenceTimerTest is MintPositionTestBase {
 
         vm.warp(block.timestamp + 1 days);
 
-        bytes32 intentId = keccak256("mint-inverted-range");
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(80), int24(20), 600, intentId);
-
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.InvalidRange.selector);
-        vault.mintPositionFor(lp, int24(80), int24(20), 600, intentId, sig);
+        vault.mintPositionFor(lp, int24(80), int24(20), 600, keccak256("mint-inverted-range"), FAR_DEADLINE);
 
         assertEq(vault.lastOperatorActivityTimestamp(), timerBefore, "a reverted mint must not count as proof of life");
     }

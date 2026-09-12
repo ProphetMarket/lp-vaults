@@ -3,12 +3,12 @@ pragma solidity 0.8.20;
 
 // UC-REQ0: Deploy Factory
 // Integration tests for every scenario in this use case.
-// Covers: SC-REQ3, SC-REQ4, SC-REQ5
+// Covers: SC-REQ3, SC-REQ4, SC-REQ5, SC-9OY7
 
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
@@ -25,8 +25,22 @@ contract LPVaultFactoryHarness is LPVaultFactory {
         address conditionalTokens_,
         address admin_,
         address oracle_,
-        address operator_
-    ) LPVaultFactory(implementation_, usdc_, exchange_, conditionalTokens_, admin_, oracle_, operator_) {}
+        address operator_,
+        address safeFactory_,
+        bytes32 safeProxyBytecodeHash_
+    )
+        LPVaultFactory(
+            implementation_,
+            usdc_,
+            exchange_,
+            conditionalTokens_,
+            admin_,
+            oracle_,
+            operator_,
+            safeFactory_,
+            safeProxyBytecodeHash_
+        )
+    {}
 
     function guardedByAdmin() external onlyAdmin {}
     function guardedByOperator() external onlyOperator {}
@@ -46,11 +60,11 @@ contract LPVaultHarness is LPVault {
 // Why:  The factory is the root of trust — every vault clone inherits its
 //       registry at initialize() time. If the constructor doesn't set roles
 //       and addresses correctly, every downstream operation is compromised.
-// Example: constructor(impl, usdc, exchange, ct, admin, oracle, operator)
+// Example: constructor(impl, usdc, exchange, ct, admin, oracle, operator, safeFactory, hash)
 //          with oracle != operator
 //          → admins[admin]==1, adminCount==1, oracle stored, operators[operator]==1,
-//          all four immutable addresses queryable.
-contract DeployFactorySuccessTest is Test {
+//          all four immutable addresses and the two Safe derivation inputs queryable.
+contract DeployFactorySuccessTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault impl;
 
@@ -66,8 +80,18 @@ contract DeployFactorySuccessTest is Test {
         // _disableInitializers(), locking it from direct initialization.
         impl = new LPVault();
 
-        // Deploy the factory with all seven addresses
-        factory = new LPVaultFactory(address(impl), usdcAddr, exchangeAddr, ctAddr, admin, oracleAddr, operatorAddr);
+        // Deploy the factory with all seven addresses and the two Safe derivation inputs
+        factory = new LPVaultFactory(
+            address(impl),
+            usdcAddr,
+            exchangeAddr,
+            ctAddr,
+            admin,
+            oracleAddr,
+            operatorAddr,
+            SAFE_FACTORY,
+            SAFE_PROXY_BYTECODE_HASH
+        );
     }
 
     // SC-REQ3: admins[initialAdmin] == 1
@@ -109,6 +133,70 @@ contract DeployFactorySuccessTest is Test {
     function test_conditionalTokensAddressIsStored() public view {
         assertEq(factory.conditionalTokens(), ctAddr, "conditionalTokens should match constructor arg");
     }
+
+    // SC-REQ3: safeFactory returns the Poly Safe factory address (FR-REQI)
+    function test_safeFactoryIsStored() public view {
+        assertEq(factory.safeFactory(), SAFE_FACTORY, "safeFactory should match constructor arg");
+    }
+
+    // SC-REQ3: safeProxyBytecodeHash returns the combined proxy bytecode hash (FR-REQI)
+    function test_safeProxyBytecodeHashIsStored() public view {
+        assertEq(
+            factory.safeProxyBytecodeHash(),
+            SAFE_PROXY_BYTECODE_HASH,
+            "safeProxyBytecodeHash should match constructor arg"
+        );
+    }
+}
+
+// SC-9OY7: Zero Safe derivation input reverts
+// What: A zero Safe factory reverts ZeroAddress and a zero proxy bytecode hash
+//       reverts ZeroBytecodeHash, before any state is written.
+// Why:  Both values are immutable. A zero input would make every derived Safe
+//       wrong on every vault the factory creates, and nothing can correct it
+//       after deployment (FR-REQI).
+// Example: constructor(..., safeFactory=0x0, hash) → revert ZeroAddress.
+contract DeployFactoryZeroSafeInputTest is LPVaultFixture {
+    LPVault impl;
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    function setUp() public {
+        impl = new LPVault();
+    }
+
+    // SC-9OY7: safeFactory == address(0) reverts ZeroAddress
+    function test_revertsOnZeroSafeFactory() public {
+        vm.expectRevert(LPVaultFactory.ZeroAddress.selector);
+        new LPVaultFactory(
+            address(impl),
+            makeAddr("usdc"),
+            makeAddr("exchange"),
+            makeAddr("ct"),
+            admin,
+            oracleAddr,
+            operatorAddr,
+            address(0),
+            SAFE_PROXY_BYTECODE_HASH
+        );
+    }
+
+    // SC-9OY7: safeProxyBytecodeHash == bytes32(0) reverts ZeroBytecodeHash
+    function test_revertsOnZeroSafeProxyBytecodeHash() public {
+        vm.expectRevert(LPVaultFactory.ZeroBytecodeHash.selector);
+        new LPVaultFactory(
+            address(impl),
+            makeAddr("usdc"),
+            makeAddr("exchange"),
+            makeAddr("ct"),
+            admin,
+            oracleAddr,
+            operatorAddr,
+            SAFE_FACTORY,
+            bytes32(0)
+        );
+    }
 }
 
 // SC-REQ4: Deployment reverts when oracle equals operator
@@ -118,7 +206,7 @@ contract DeployFactorySuccessTest is Test {
 //       NFR-RER1). Compromise of one must not unlock the other's powers.
 //       The constructor is the first enforcement point for this invariant.
 // Example: constructor(..., oracle=0xABC, operator=0xABC) → revert RoleSeparation.
-contract DeployFactoryOracleEqualsOperatorTest is Test {
+contract DeployFactoryOracleEqualsOperatorTest is LPVaultFixture {
     // SC-REQ4: deployment reverts when oracle == operator
     function test_revertsWhenOracleEqualsOperator() public {
         LPVault impl = new LPVault();
@@ -133,7 +221,9 @@ contract DeployFactoryOracleEqualsOperatorTest is Test {
             makeAddr("ct"),
             admin,
             sameAddr, // oracle
-            sameAddr // operator — same address triggers RoleSeparation
+            sameAddr, // operator — same address triggers RoleSeparation
+            SAFE_FACTORY,
+            SAFE_PROXY_BYTECODE_HASH
         );
     }
 }
@@ -147,7 +237,7 @@ contract DeployFactoryOracleEqualsOperatorTest is Test {
 //       (default storage) so the initializer modifier allows the first call.
 //       Also validates that factory is derived from msg.sender.
 // Example: create minimal proxy of impl → call initialize() → all storage set.
-contract CloneInitializeSuccessTest is ConditionalTokensFixture {
+contract CloneInitializeSuccessTest is LPVaultFixture {
     // SC-REQ5: clone initializes successfully (positive counterpart)
     function test_cloneCanBeInitialized() public {
         LPVault impl = new LPVault();
@@ -163,7 +253,7 @@ contract CloneInitializeSuccessTest is ConditionalTokensFixture {
         (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) = _prepareBinaryCondition(mktId, usdcAddr);
 
         // Deploy real factory so vault delegation works (FR-FKD0/1/2)
-        LPVaultFactory realFactory = new LPVaultFactory(
+        LPVaultFactory realFactory = _deployFactory(
             address(impl), usdcAddr, exchangeAddr, ctAddr, makeAddr("admin"), makeAddr("oracle"), makeAddr("operator")
         );
 
@@ -209,7 +299,7 @@ contract CloneInitializeSuccessTest is ConditionalTokensFixture {
             _prepareBinaryCondition(bytes32(uint256(1)), usdc1);
 
         // Deploy real factory so vault delegation works
-        LPVaultFactory realFactory = new LPVaultFactory(
+        LPVaultFactory realFactory = _deployFactory(
             address(impl), usdc1, makeAddr("exchange"), ct1, makeAddr("admin"), makeAddr("oracle"), makeAddr("operator")
         );
 
@@ -304,7 +394,7 @@ contract ImplementationNotInitializableTest is Test {
 // Why:  The modifiers are exported (provides) and downstream slices depend
 //       on them working. Testing them here proves the inlined Auth pattern
 //       is wired correctly at the storage level.
-contract FactoryModifierTest is Test {
+contract FactoryModifierTest is LPVaultFixture {
     LPVaultFactoryHarness factory;
 
     address admin = makeAddr("admin");
@@ -315,7 +405,15 @@ contract FactoryModifierTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         factory = new LPVaultFactoryHarness(
-            address(impl), makeAddr("usdc"), makeAddr("exchange"), makeAddr("ct"), admin, oracleAddr, operatorAddr
+            address(impl),
+            makeAddr("usdc"),
+            makeAddr("exchange"),
+            makeAddr("ct"),
+            admin,
+            oracleAddr,
+            operatorAddr,
+            SAFE_FACTORY,
+            SAFE_PROXY_BYTECODE_HASH
         );
     }
 
@@ -358,7 +456,7 @@ contract FactoryModifierTest is Test {
 //       a clone so the vault is in initialized state with a known registry.
 // Why:  The vault's modifiers are also exported (provides). A clone starts
 //       with zero storage, so we initialize it first to set up the registry.
-contract VaultModifierTest is ConditionalTokensFixture {
+contract VaultModifierTest is LPVaultFixture {
     LPVaultHarness vault;
 
     address factoryAddr;
@@ -382,7 +480,7 @@ contract VaultModifierTest is ConditionalTokensFixture {
         address ctAddr = address(_deployConditionalTokens());
         (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) =
             _prepareBinaryCondition(bytes32(uint256(1)), usdcAddr);
-        realFactory = new LPVaultFactory(
+        realFactory = _deployFactory(
             address(implHarness), usdcAddr, makeAddr("exchange"), ctAddr, admin, oracleAddr, operatorAddr
         );
 

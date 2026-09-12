@@ -9,7 +9,8 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture, ITestConditionalTokens} from "../../fixtures/ConditionalTokensFixture.sol";
+import {ITestConditionalTokens} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 /// @dev The receiver surface under test. Declared here rather than reaching through
@@ -47,7 +48,7 @@ contract ForeignERC1155 {
 //          all storage set including the identity, USDC allowance = max,
 //          CT approvedForAll = true, VaultCreated event emitted.
 // ──────────────────────────────────────────────
-contract CreateVaultSuccessTest is ConditionalTokensFixture {
+contract CreateVaultSuccessTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault impl;
     MockERC20 mockUsdc;
@@ -73,7 +74,7 @@ contract CreateVaultSuccessTest is ConditionalTokensFixture {
         impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
         (conditionId, yesTokenId, noTokenId) = _prepareBinaryCondition(marketId, address(mockUsdc));
@@ -170,7 +171,7 @@ contract CreateVaultSuccessTest is ConditionalTokensFixture {
 // Example: oracle creates vault for marketId=0x01, then tries again →
 //          revert DuplicateMarket.
 // ──────────────────────────────────────────────
-contract CreateVaultDuplicateMarketTest is ConditionalTokensFixture {
+contract CreateVaultDuplicateMarketTest is LPVaultFixture {
     LPVaultFactory factory;
 
     address admin = makeAddr("admin");
@@ -183,7 +184,7 @@ contract CreateVaultDuplicateMarketTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
     }
@@ -209,7 +210,7 @@ contract CreateVaultDuplicateMarketTest is ConditionalTokensFixture {
 //       markets exist, Operators execute trading actions.
 // Example: operatorAddr calls createVault → revert NotOracle.
 // ──────────────────────────────────────────────
-contract CreateVaultAccessControlTest is ConditionalTokensFixture {
+contract CreateVaultAccessControlTest is LPVaultFixture {
     LPVaultFactory factory;
 
     address admin = makeAddr("admin");
@@ -225,7 +226,7 @@ contract CreateVaultAccessControlTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         (conditionId, yesTokenId, noTokenId) = _prepareBinaryCondition(bytes32(uint256(1)), address(mockUsdc));
@@ -262,7 +263,7 @@ contract CreateVaultAccessControlTest is ConditionalTokensFixture {
 // Example: factory creates vault (clone initialized) → anyone calls
 //          initialize() again → revert AlreadyInitialized.
 // ──────────────────────────────────────────────
-contract VaultReInitializeTest is ConditionalTokensFixture {
+contract VaultReInitializeTest is LPVaultFixture {
     LPVaultFactory factory;
 
     address admin = makeAddr("admin");
@@ -273,7 +274,7 @@ contract VaultReInitializeTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
     }
@@ -313,7 +314,7 @@ contract VaultReInitializeTest is ConditionalTokensFixture {
 // Example: deploy clone via assembly → non-factory calls
 //          initialize(... factory_=realFactory ...) → revert NotFactory.
 // ──────────────────────────────────────────────
-contract VaultOnlyFactoryInitializeTest is ConditionalTokensFixture {
+contract VaultOnlyFactoryInitializeTest is LPVaultFixture {
     LPVault impl;
     LPVaultFactory factory;
     address nobody = makeAddr("nobody");
@@ -322,7 +323,7 @@ contract VaultOnlyFactoryInitializeTest is ConditionalTokensFixture {
         impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl),
             address(mockUsdc),
             makeAddr("exchange"),
@@ -380,7 +381,7 @@ contract VaultOnlyFactoryInitializeTest is ConditionalTokensFixture {
 //       fee accumulator division when fees arrive with activeLiquidity == 0.
 // Example: oracle calls createVault(marketId, tickSpacing, 0) → revert ZeroFloor.
 // ──────────────────────────────────────────────
-contract CreateVaultZeroFloorTest is ConditionalTokensFixture {
+contract CreateVaultZeroFloorTest is LPVaultFixture {
     LPVaultFactory factory;
 
     address admin = makeAddr("admin");
@@ -391,7 +392,7 @@ contract CreateVaultZeroFloorTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
     }
@@ -411,7 +412,7 @@ contract CreateVaultZeroFloorTest is ConditionalTokensFixture {
 // ConditionalTokens contract, and helpers that prepare conditions and call createVault
 // as the Oracle with an explicit identity.
 // ──────────────────────────────────────────────
-contract OutcomeIdentityTestBase is ConditionalTokensFixture {
+contract OutcomeIdentityTestBase is LPVaultFixture {
     LPVaultFactory factory;
     MockERC20 mockUsdc;
 
@@ -430,7 +431,7 @@ contract OutcomeIdentityTestBase is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         (conditionId, yesTokenId, noTokenId) = _prepareBinaryCondition(marketId, address(mockUsdc));
@@ -594,7 +595,7 @@ contract CreateVaultGasLimitTest is OutcomeIdentityTestBase {
 //          setMinimumFirstLiquidity(2000) → stored value = 2000,
 //          MinimumFirstLiquidityUpdated(1000, 2000) emitted.
 // ──────────────────────────────────────────────
-contract SetMinFirstLiqSuccessTest is ConditionalTokensFixture {
+contract SetMinFirstLiqSuccessTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -611,7 +612,7 @@ contract SetMinFirstLiqSuccessTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), initialMin));
@@ -645,7 +646,7 @@ contract SetMinFirstLiqSuccessTest is ConditionalTokensFixture {
 //       handle transactional actions, not governance.
 // Example: operatorAddr calls setMinimumFirstLiquidity(2000) → revert NotOracle.
 // ──────────────────────────────────────────────
-contract SetMinFirstLiqAccessControlTest is ConditionalTokensFixture {
+contract SetMinFirstLiqAccessControlTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -660,7 +661,7 @@ contract SetMinFirstLiqAccessControlTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
@@ -697,7 +698,7 @@ contract SetMinFirstLiqAccessControlTest is ConditionalTokensFixture {
 //       guard provides. The invariant must hold at every write path.
 // Example: oracle calls setMinimumFirstLiquidity(0) → revert ZeroFloor.
 // ──────────────────────────────────────────────
-contract SetMinFirstLiqZeroTest is ConditionalTokensFixture {
+contract SetMinFirstLiqZeroTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -711,7 +712,7 @@ contract SetMinFirstLiqZeroTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
@@ -736,7 +737,7 @@ contract SetMinFirstLiqZeroTest is ConditionalTokensFixture {
 // Example: holder transfers 500e6 of the YES token id to the vault → the transfer
 //          completes, the vault's balance is 500e6, and the hook returned 0xf23a6e61.
 // ──────────────────────────────────────────────
-contract VaultReceivesOutcomeTokensTest is ConditionalTokensFixture {
+contract VaultReceivesOutcomeTokensTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -755,7 +756,7 @@ contract VaultReceivesOutcomeTokensTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
@@ -848,7 +849,7 @@ contract VaultReceivesOutcomeTokensTest is ConditionalTokensFixture {
 // Example: an arbitrary EOA, or an unrelated ERC-1155 contract trying to push its
 //          own token ids into the vault, both revert with NotConditionalTokens.
 // ──────────────────────────────────────────────
-contract VaultRejectsForeignERC1155Test is ConditionalTokensFixture {
+contract VaultRejectsForeignERC1155Test is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     ForeignERC1155 foreignToken;
@@ -866,7 +867,7 @@ contract VaultRejectsForeignERC1155Test is ConditionalTokensFixture {
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
         foreignToken = new ForeignERC1155();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
@@ -918,7 +919,7 @@ contract VaultRejectsForeignERC1155Test is ConditionalTokensFixture {
 // Example: holder transfers a YES token of condition B to a vault for condition A →
 //          revert UnknownTokenId, and the vault's balances do not change.
 // ──────────────────────────────────────────────
-contract VaultRejectsForeignTokenIdTest is ConditionalTokensFixture {
+contract VaultRejectsForeignTokenIdTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -937,7 +938,7 @@ contract VaultRejectsForeignTokenIdTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
@@ -993,7 +994,7 @@ contract VaultRejectsForeignTokenIdTest is ConditionalTokensFixture {
 //       answer they skip the transfer entirely, even though the hooks work.
 // Example: supportsInterface(0x4e2312e0) == true, supportsInterface(0xffffffff) == false.
 // ──────────────────────────────────────────────
-contract VaultSupportsInterfaceTest is ConditionalTokensFixture {
+contract VaultSupportsInterfaceTest is LPVaultFixture {
     LPVault vault;
 
     address admin = makeAddr("admin");
@@ -1004,7 +1005,7 @@ contract VaultSupportsInterfaceTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        LPVaultFactory factory = new LPVaultFactory(
+        LPVaultFactory factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
@@ -1043,7 +1044,7 @@ contract VaultSupportsInterfaceTest is ConditionalTokensFixture {
 //       instantly — no per-vault updates needed for key rotation.
 // Example: factory.operators(operatorAddr) == 1, vault.operators(operatorAddr) == 1.
 // ──────────────────────────────────────────────
-contract VaultOperatorDelegationTest is ConditionalTokensFixture {
+contract VaultOperatorDelegationTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -1055,7 +1056,7 @@ contract VaultOperatorDelegationTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
@@ -1083,7 +1084,7 @@ contract VaultOperatorDelegationTest is ConditionalTokensFixture {
 //       vaults — the vault never stores a stale oracle address.
 // Example: factory.oracle() == oracleAddr, vault.oracle() == oracleAddr.
 // ──────────────────────────────────────────────
-contract VaultOracleDelegationTest is ConditionalTokensFixture {
+contract VaultOracleDelegationTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -1095,7 +1096,7 @@ contract VaultOracleDelegationTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
@@ -1116,7 +1117,7 @@ contract VaultOracleDelegationTest is ConditionalTokensFixture {
 //       needing per-vault admin management functions.
 // Example: factory.admins(admin) == 1, vault.admins(admin) == 1.
 // ──────────────────────────────────────────────
-contract VaultAdminDelegationTest is ConditionalTokensFixture {
+contract VaultAdminDelegationTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -1128,7 +1129,7 @@ contract VaultAdminDelegationTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
@@ -1158,7 +1159,7 @@ contract VaultAdminDelegationTest is ConditionalTokensFixture {
 // Example: vault created → vault.admins(admin) == 1 via factory delegation,
 //          but no admins mapping exists locally on the vault.
 // ──────────────────────────────────────────────
-contract VaultNoLocalRoleStateTest is ConditionalTokensFixture {
+contract VaultNoLocalRoleStateTest is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -1170,7 +1171,7 @@ contract VaultNoLocalRoleStateTest is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
         vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));

@@ -10,7 +10,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ── Shared fixtures ───────────────────────────
@@ -19,7 +19,7 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 ///      starts from the same registry state.
 ///      Events are re-declared here because Solidity 0.8.20 does not
 ///      support ContractName.EventName emit syntax.
-contract RoleManagementBase is Test {
+contract RoleManagementBase is LPVaultFixture {
     event NewOperator(address indexed newOperatorAddress, address indexed admin);
     event RemovedOperator(address indexed removedOperator, address indexed admin);
     event AdminTransferProposed(address indexed currentAdmin, address indexed proposedAdmin);
@@ -34,7 +34,7 @@ contract RoleManagementBase is Test {
 
     function setUp() public virtual {
         LPVault impl = new LPVault();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), makeAddr("usdc"), makeAddr("exchange"), makeAddr("ct"), admin, oracleAddr, operatorAddr
         );
     }
@@ -45,7 +45,7 @@ contract RoleManagementBase is Test {
 ///      creates one vault, so each test proves that a role change on the
 ///      factory reaches a vault that already exists.
 ///      Events are re-declared here for the same reason as above.
-contract VaultPropagationBase is ConditionalTokensFixture {
+contract VaultPropagationBase is LPVaultFixture {
     event NewOperator(address indexed newOperatorAddress, address indexed admin);
     event RemovedOperator(address indexed removedOperator, address indexed admin);
     event RemovedAdmin(address indexed removedAdmin, address indexed admin);
@@ -63,7 +63,7 @@ contract VaultPropagationBase is ConditionalTokensFixture {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
 

@@ -8,7 +8,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
@@ -16,7 +16,7 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 // Deploys factory + vault clone, mints one in-range position (so
 // notifyFees has nonzero activeLiquidity), and provides helpers.
 // ──────────────────────────────────────────────
-contract PauseTradingTestBase is ConditionalTokensFixture {
+contract PauseTradingTestBase is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -36,58 +36,25 @@ contract PauseTradingTestBase is ConditionalTokensFixture {
     uint256 constant LIQUIDITY_PRECISION = 1e18;
     uint256 constant Q128 = 2 ** 128;
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     event TradingPaused(address indexed caller);
     event TradingUnpaused(address indexed caller);
 
     uint256 positionId;
 
     function setUp() public virtual {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
         vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
-        // Fund LP and approve vault
-        mockUsdc.mint(lp, 1_000_000);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
-
         // Mint one position: range [0, 100), 1000 USDC → liquidity = 10e18
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 1000, keccak256("setup-mint"));
-        vm.prank(operatorAddr);
-        positionId = vault.mintPositionFor(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
-    }
-
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
+        positionId = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 1000, keccak256("setup-mint"));
     }
 
     function _pause() internal {
@@ -124,14 +91,16 @@ contract PauseTradingPauseAndGateTest is PauseTradingTestBase {
         vault.pauseTrading();
     }
 
-    // SC-K1ML: mintPositionFor reverts while paused
+    // SC-K1ML: mintPositionFor reverts while paused, even for an intent escrowed before the pause
     function test_mintPositionForRevertsWhilePaused() public {
+        bytes32 intentId = keccak256("paused-mint");
+        _fundSafe(mockUsdc, lp, address(vault), 100);
+        _escrow(vault, operatorAddr, LP_PK, lp, int24(0), int24(100), 100, intentId, FAR_DEADLINE);
         _pause();
 
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 100, keccak256("paused-mint"));
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.TradingIsPaused.selector);
-        vault.mintPositionFor(lp, int24(0), int24(100), 100, keccak256("paused-mint"), sig);
+        vault.mintPositionFor(lp, int24(0), int24(100), 100, intentId, FAR_DEADLINE);
     }
 
     // SC-K1ML: notifyFees reverts while paused
@@ -155,9 +124,7 @@ contract PauseTradingPauseAndGateTest is PauseTradingTestBase {
     // SC-K1ML: mergePositions reverts while paused
     function test_mergePositionsRevertsWhilePaused() public {
         // Mint a second position to make merge possible
-        bytes memory sig2 = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, keccak256("mint-2"));
-        vm.prank(operatorAddr);
-        uint256 pos2 = vault.mintPositionFor(lp, int24(0), int24(100), 500, keccak256("mint-2"), sig2);
+        uint256 pos2 = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 500, keccak256("mint-2"));
 
         _pause();
 
@@ -284,54 +251,60 @@ contract PauseTradingCollectTest is PauseTradingTestBase {
 
 // ──────────────────────────────────────────────
 // SC-K1MP: ReclaimDeposit works while paused
-// What: While the vault is paused, LP can still call reclaimDeposit()
-//       to recover USDC from an unfulfilled mint intent after timelock.
-// Why:  LP exit paths must never be blocked by pause.
+// What: While the vault is paused, the Safe can still call reclaimDeposit()
+//       to recover the USDC escrowed against an intent that was not minted,
+//       in one call with no wait.
+// Why:  LP exit paths must never be blocked by pause (FR-K1MI).
 // ──────────────────────────────────────────────
 contract PauseTradingReclaimTest is PauseTradingTestBase {
-    uint256 constant OPERATOR_PK = 0xBEEF;
+    bytes32 intentId = keccak256("reclaim-intent");
+    uint256 reclaimAmount = 200;
 
     function setUp() public override {
         super.setUp();
 
-        // Register the operator key so we can sign operator signatures
-        address opSigner = vm.addr(OPERATOR_PK);
-        vm.prank(admin);
-        factory.addOperator(opSigner);
+        // Escrow an intent that the Operator never mints
+        _fundSafe(mockUsdc, lp, address(vault), reclaimAmount);
+        _escrow(vault, operatorAddr, LP_PK, lp, int24(0), int24(100), reclaimAmount, intentId, FAR_DEADLINE);
     }
 
     // SC-K1MP: reclaimDeposit succeeds while paused
     function test_reclaimDepositSucceedsWhilePaused() public {
-        // Set up an unfulfilled mint intent with a fresh intentId
-        bytes32 intentId = keccak256("reclaim-intent");
-        uint256 reclaimAmount = 200;
-
-        // LP signs the mint intent
-        bytes memory lpSig = _signMintIntent(LP_PK, lp, int24(0), int24(100), reclaimAmount, intentId);
-
-        // Operator signs the same mint intent
-        bytes memory opSig = _signMintIntent(OPERATOR_PK, lp, int24(0), int24(100), reclaimAmount, intentId);
-
-        // Phase 1: submit the reclaim (records timestamp)
-        vm.prank(lp);
-        vault.reclaimDeposit(lp, int24(0), int24(100), reclaimAmount, intentId, lpSig, opSig);
-
-        // Advance past RECLAIM_TIMELOCK (24 hours)
-        vm.warp(block.timestamp + 24 hours + 1);
-
-        // Fund vault with USDC for the refund
-        mockUsdc.mint(address(vault), reclaimAmount);
-
-        // Pause the vault
         _pause();
 
-        // Phase 2: execute reclaim while paused — should succeed
         uint256 lpBalBefore = mockUsdc.balanceOf(lp);
         vm.prank(lp);
-        vault.reclaimDeposit(lp, int24(0), int24(100), reclaimAmount, intentId, lpSig, opSig);
+        vault.reclaimDeposit(intentId);
         uint256 lpBalAfter = mockUsdc.balanceOf(lp);
 
-        assertEq(lpBalAfter - lpBalBefore, reclaimAmount, "LP should receive reclaim amount while paused");
+        assertEq(lpBalAfter - lpBalBefore, reclaimAmount, "the Safe should receive the escrow while paused");
+        assertTrue(vault.usedIntents(intentId), "intentId should be marked as used");
+        (address recorded,,) = vault.pendingDeposits(intentId);
+        assertEq(recorded, address(0), "escrow should be deleted");
+    }
+
+    // FR-K1MI: reclaimDepositFor succeeds while paused
+    function test_reclaimDepositForSucceedsWhilePaused() public {
+        _pause();
+        bytes memory sig = _signReclaimIntent(address(vault), LP_PK, lp, intentId, FAR_DEADLINE);
+
+        uint256 lpBalBefore = mockUsdc.balanceOf(lp);
+        vm.prank(operatorAddr);
+        vault.reclaimDepositFor(lp, intentId, FAR_DEADLINE, sig);
+
+        assertEq(mockUsdc.balanceOf(lp) - lpBalBefore, reclaimAmount, "the relayed reclaim should pay while paused");
+    }
+
+    // FR-K1MI, SC-K1ML: depositForIntent joins the trading entry points that revert while paused
+    function test_depositForIntentRevertsWhilePaused() public {
+        _pause();
+        bytes32 fresh = keccak256("paused-deposit");
+        _fundSafe(mockUsdc, lp, address(vault), 100);
+        bytes memory sig = _signMintIntent(address(vault), LP_PK, lp, int24(0), int24(100), 100, fresh, FAR_DEADLINE);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.TradingIsPaused.selector);
+        vault.depositForIntent(lp, int24(0), int24(100), 100, fresh, FAR_DEADLINE, sig);
     }
 }
 

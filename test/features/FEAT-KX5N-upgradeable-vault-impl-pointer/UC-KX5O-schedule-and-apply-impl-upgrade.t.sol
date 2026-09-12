@@ -8,7 +8,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
@@ -17,7 +17,7 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 // helpers for scheduling, warping past timelock, and deploying a
 // second implementation for upgrade tests.
 // ──────────────────────────────────────────────
-contract ImplUpgradeTestBase is ConditionalTokensFixture {
+contract ImplUpgradeTestBase is LPVaultFixture {
     LPVaultFactory factory;
     LPVault implV1;
     MockERC20 mockUsdc;
@@ -37,7 +37,7 @@ contract ImplUpgradeTestBase is ConditionalTokensFixture {
         implV1 = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(implV1), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
     }

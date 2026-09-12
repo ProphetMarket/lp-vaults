@@ -12,11 +12,10 @@ pragma solidity 0.8.20;
 // collect(), and _crossTick() to hold without ever reverting or
 // fabricating/destroying fees.
 
-import {Test} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {LPVaultFactory} from "../../src/LPVaultFactory.sol";
 import {LPVault} from "../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
@@ -25,18 +24,14 @@ import {MockERC20} from "../fixtures/MockERC20.sol";
 // NoActiveLiquidity) doesn't abort the run -- only unexpected reverts inside
 // the vault's own arithmetic would surface as an invariant failure.
 // ──────────────────────────────────────────────
-contract FeeGrowthAccountingHandler is Test {
+contract FeeGrowthAccountingHandler is LPVaultFixture {
     LPVault public vault;
     MockERC20 public mockUsdc;
     address public operatorAddr;
 
     uint256 constant LP_PK = 0xA11CE;
+    /// @dev The LP's Safe: the position owner and the address that collects.
     address public lp;
-
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
     uint256[] public positionIds;
     uint256 internal intentNonce;
@@ -46,11 +41,7 @@ contract FeeGrowthAccountingHandler is Test {
         vault = vault_;
         mockUsdc = mockUsdc_;
         operatorAddr = operatorAddr_;
-        lp = vm.addr(LP_PK);
-
-        mockUsdc.mint(lp, type(uint128).max);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
+        lp = _safeOf(vm.addr(LP_PK));
     }
 
     function positionCount() external view returns (uint256) {
@@ -59,22 +50,6 @@ contract FeeGrowthAccountingHandler is Test {
 
     function positionIdAt(uint256 i) external view returns (uint256) {
         return positionIds[i];
-    }
-
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _sign(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId)
-        internal
-        view
-        returns (bytes memory)
-    {
-        bytes32 structHash = keccak256(abi.encode(MINT_INTENT_TYPEHASH, lp, tickLower, tickUpper, usdcAmount, intentId));
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(LP_PK, digest);
-        return abi.encodePacked(r, s, v);
     }
 
     // Mints a randomly-ranged, spacing-aligned position of a bounded size.
@@ -89,10 +64,16 @@ contract FeeGrowthAccountingHandler is Test {
         uint256 usdcAmount = bound(usdcAmountSeed, 1e6, 10e18);
 
         bytes32 intentId = keccak256(abi.encode("handler-mint", intentNonce++));
-        bytes memory sig = _sign(tickLower, tickUpper, usdcAmount, intentId);
+
+        // Escrow first: the deposit never fails here, because the range and the
+        // amount are bounded above. The mint is the call whose expected reverts
+        // (BelowMinimumFirstLiquidity) the try/catch absorbs; a failed mint
+        // leaves an escrow that this invariant does not read.
+        _fundSafe(mockUsdc, lp, address(vault), usdcAmount);
+        _escrow(vault, operatorAddr, LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE);
 
         vm.prank(operatorAddr);
-        try vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig) returns (uint256 id) {
+        try vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE) returns (uint256 id) {
             positionIds.push(id);
         } catch {}
     }
@@ -126,7 +107,7 @@ contract FeeGrowthAccountingHandler is Test {
     uint256 public totalFeesPaidOut;
 }
 
-contract FeeGrowthAccountingInvariantTest is StdInvariant, ConditionalTokensFixture {
+contract FeeGrowthAccountingInvariantTest is StdInvariant, LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -143,7 +124,7 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, ConditionalTokensFixt
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 

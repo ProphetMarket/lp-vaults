@@ -8,7 +8,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
@@ -16,7 +16,7 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 // Deploys factory + vault clone, mints an in-range position for the LP,
 // and distributes fees so there is a position with claimable fees.
 // ──────────────────────────────────────────────
-contract StartWindDownTestBase is ConditionalTokensFixture {
+contract StartWindDownTestBase is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -36,11 +36,6 @@ contract StartWindDownTestBase is ConditionalTokensFixture {
     uint256 constant LIQUIDITY_PRECISION = 1e18;
     uint256 constant Q128 = 2 ** 128;
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     // Events declared for expectEmit
     event VaultWindDownStarted(bytes32 indexed marketId);
     event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
@@ -49,12 +44,12 @@ contract StartWindDownTestBase is ConditionalTokensFixture {
     uint256 positionId;
 
     function setUp() public virtual {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
@@ -62,39 +57,12 @@ contract StartWindDownTestBase is ConditionalTokensFixture {
 
         // Mint a position: range [0, 100) with 1000 USDC so there's
         // something to collect and an existing position for exit-path tests.
-        mockUsdc.mint(lp, 1_000_000);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
-
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 1000, keccak256("setup-mint"));
-        vm.prank(operatorAddr);
-        positionId = vault.mintPositionFor(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
+        positionId = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 1000, keccak256("setup-mint"));
 
         // Distribute fees so the position has something to collect
         mockUsdc.mint(address(vault), 500);
         vm.prank(operatorAddr);
         vault.notifyFees(500);
-    }
-
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
     }
 
     /// @dev Transitions the vault to WindDown using the real startWindDown() function.
@@ -219,54 +187,64 @@ contract RevertWhenNonOracleCallsTest is StartWindDownTestBase {
 }
 
 // ──────────────────────────────────────────────
-// SC-JGEI + SC-JGEJ: Mint paths revert in WindDown
-// What: After startWindDown(), mintPositionFor reverts with VaultNotActive
-//       even with a valid LP-signed intent. No position is created and the
-//       intentId is not consumed.
+// SC-JGEI: depositForIntent reverts in WindDown
+// SC-JGEJ: mintPositionFor reverts in WindDown
+// What: After startWindDown(), depositForIntent reverts with VaultNotActive
+//       and records no escrow, and mintPositionFor reverts with VaultNotActive
+//       even for an intent that was escrowed before the wind-down. No position
+//       is created and the intentId is not consumed, so the Safe can reclaim it.
 // Why:  WindDown means the market has resolved — new capital entering a
-//       resolved market would be trapped with no purpose.
-// Note: mintPosition does not exist as a separate function in this codebase.
-//       SC-JGEI is subsumed by SC-JGEJ since mintPositionFor is the only
-//       mint entry point.
+//       resolved market would be trapped with no purpose (FR-JGEB).
 // ──────────────────────────────────────────────
 contract MintRevertsInWindDownTest is StartWindDownTestBase {
+    bytes32 intentId = keccak256("wind-down-mint");
+
     function setUp() public override {
         super.setUp();
+        // Escrow before the wind-down, so the mint is what the phase blocks
+        _fundSafe(mockUsdc, lp, address(vault), 500);
+        _escrow(vault, operatorAddr, LP_PK, lp, int24(0), int24(100), 500, intentId, FAR_DEADLINE);
         _windDownVault();
     }
 
-    // SC-JGEI + SC-JGEJ: mintPositionFor reverts with VaultNotActive
-    function test_mintPositionForRevertsInWindDown() public {
-        bytes32 intentId = keccak256("wind-down-mint");
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, intentId);
+    // SC-JGEI: depositForIntent reverts with VaultNotActive and records nothing
+    function test_depositForIntentRevertsInWindDown() public {
+        bytes32 fresh = keccak256("wind-down-deposit");
+        _fundSafe(mockUsdc, lp, address(vault), 500);
+        bytes memory sig = _signMintIntent(address(vault), LP_PK, lp, int24(0), int24(100), 500, fresh, FAR_DEADLINE);
 
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.VaultNotActive.selector);
-        vault.mintPositionFor(lp, int24(0), int24(100), 500, intentId, sig);
+        vault.depositForIntent(lp, int24(0), int24(100), 500, fresh, FAR_DEADLINE, sig);
+
+        (address recorded,,) = vault.pendingDeposits(fresh);
+        assertEq(recorded, address(0), "no escrow should be recorded in WindDown");
+        assertEq(mockUsdc.balanceOf(lp), 500, "no USDC should move");
+    }
+
+    // SC-JGEJ: mintPositionFor reverts with VaultNotActive
+    function test_mintPositionForRevertsInWindDown() public {
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.VaultNotActive.selector);
+        vault.mintPositionFor(lp, int24(0), int24(100), 500, intentId, FAR_DEADLINE);
     }
 
     // SC-JGEJ: no position created (nextPositionId unchanged)
     function test_nextPositionIdUnchangedAfterRevert() public {
         uint256 nextIdBefore = vault.nextPositionId();
 
-        bytes32 intentId = keccak256("wind-down-mint-2");
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, intentId);
-
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.VaultNotActive.selector);
-        vault.mintPositionFor(lp, int24(0), int24(100), 500, intentId, sig);
+        vault.mintPositionFor(lp, int24(0), int24(100), 500, intentId, FAR_DEADLINE);
 
         assertEq(vault.nextPositionId(), nextIdBefore, "nextPositionId should not change");
     }
 
     // SC-JGEJ: intentId not consumed
     function test_intentIdNotConsumedAfterRevert() public {
-        bytes32 intentId = keccak256("wind-down-mint-3");
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 500, intentId);
-
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.VaultNotActive.selector);
-        vault.mintPositionFor(lp, int24(0), int24(100), 500, intentId, sig);
+        vault.mintPositionFor(lp, int24(0), int24(100), 500, intentId, FAR_DEADLINE);
 
         assertEq(vault.usedIntents(intentId), false, "intentId should not be marked as used");
     }
@@ -325,5 +303,45 @@ contract ExitPathsSucceedInWindDownTest is StartWindDownTestBase {
         vault.collect(positionId);
 
         assertEq(vault.phase(), 2, "phase should still be WindDown");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-JGEK (reclaim side): both reclaim paths succeed in WindDown
+// What: An escrow made before the wind-down is refundable by the Safe's own
+//       reclaimDeposit and by the Operator's reclaimDepositFor after
+//       startWindDown().
+// Why:  FR-JGEC: exit paths keep the Active behavior in WindDown.
+// ──────────────────────────────────────────────
+contract ReclaimPathsInWindDownTest is StartWindDownTestBase {
+    bytes32 escrowIntent = keccak256("wind-down-escrow");
+    uint256 escrowAmount = 500;
+
+    function setUp() public override {
+        super.setUp();
+        _fundSafe(mockUsdc, lp, address(vault), escrowAmount);
+        _escrow(vault, operatorAddr, LP_PK, lp, int24(0), int24(100), escrowAmount, escrowIntent, FAR_DEADLINE);
+        _windDownVault();
+    }
+
+    // SC-JGEK: reclaimDeposit(intentId) succeeds in WindDown
+    function test_reclaimDepositSucceedsInWindDown() public {
+        uint256 before_ = mockUsdc.balanceOf(lp);
+
+        vm.prank(lp);
+        vault.reclaimDeposit(escrowIntent);
+
+        assertEq(mockUsdc.balanceOf(lp) - before_, escrowAmount, "the Safe should receive its escrow in WindDown");
+    }
+
+    // SC-JGEK: reclaimDepositFor succeeds in WindDown
+    function test_reclaimDepositForSucceedsInWindDown() public {
+        uint256 before_ = mockUsdc.balanceOf(lp);
+        bytes memory sig = _signReclaimIntent(address(vault), LP_PK, lp, escrowIntent, FAR_DEADLINE);
+
+        vm.prank(operatorAddr);
+        vault.reclaimDepositFor(lp, escrowIntent, FAR_DEADLINE, sig);
+
+        assertEq(mockUsdc.balanceOf(lp) - before_, escrowAmount, "the relayed reclaim should pay the Safe in WindDown");
     }
 }

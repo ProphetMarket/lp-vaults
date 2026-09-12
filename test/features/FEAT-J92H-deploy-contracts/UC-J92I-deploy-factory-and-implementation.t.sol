@@ -4,12 +4,36 @@ pragma solidity 0.8.20;
 // FEAT-J92H: Deploy Contracts
 // UC-J92I: Deploy Factory and Implementation
 // Integration tests for every scenario in this use case.
-// Covers: SC-J92J, SC-J92K, SC-J92L, SC-J92M, SC-K49S
+// Covers: SC-J92J, SC-J92K, SC-J92L, SC-J92M, SC-K49S, SC-9OY8
 
 import {Test} from "forge-std/Test.sol";
 import {DeployScript} from "../../../script/Deploy.s.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
+
+// ──────────────────────────────────────────────
+// StubSafeFactory: stands in for the Poly Safe factory. Returns known bytes
+// from getContractBytecode() so the test can compute the expected hash
+// itself (SC-9OY8). The real factory's hash per chain is in DEPLOYMENT.md.
+// ──────────────────────────────────────────────
+contract StubSafeFactory {
+    bytes internal code;
+    address public masterCopy;
+
+    constructor(bytes memory code_, address masterCopy_) {
+        code = code_;
+        masterCopy = masterCopy_;
+    }
+
+    function getContractBytecode() external view returns (bytes memory) {
+        return code;
+    }
+}
+
+/// @dev The made-up Safe derivation inputs the deploy tests pass. The script reads the real hash
+///      from the chain in run(); deploy() takes whatever value it is given.
+address constant SAFE_FACTORY = 0x5AfeFaC70000000000000000000000000000aBcd;
+bytes32 constant SAFE_PROXY_BYTECODE_HASH = keccak256("deploy-test.safeProxyBytecodeHash");
 
 // SC-J92J: Successful deployment with valid configuration
 // What: Running the deploy helper with all valid, distinct addresses deploys both
@@ -17,8 +41,9 @@ import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 //       matching every provided address.
 // Why:  The deploy helper is the core deployment logic shared by run() and tests.
 //       If any address is wired incorrectly, the entire vault system is misconfigured.
-// Example: deploy(usdc, exchange, ct, admin, oracle, operator)
-//          → factory.usdc() == usdc, factory.implementation() == deployed LPVault.
+// Example: deploy(usdc, exchange, ct, admin, oracle, operator, safeFactory, hash)
+//          → factory.usdc() == usdc, factory.implementation() == deployed LPVault,
+//          factory.safeProxyBytecodeHash() == hash.
 contract DeployScriptSuccessTest is Test {
     DeployScript script;
     LPVault lpVault;
@@ -33,7 +58,9 @@ contract DeployScriptSuccessTest is Test {
 
     function setUp() public {
         script = new DeployScript();
-        (lpVault, factory) = script.deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+        (lpVault, factory) = script.deploy(
+            usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr, SAFE_FACTORY, SAFE_PROXY_BYTECODE_HASH
+        );
     }
 
     // SC-J92J: LPVault implementation is deployed at a non-zero address
@@ -98,6 +125,20 @@ contract DeployScriptSuccessTest is Test {
     function test_factoryOperatorIsRegistered() public view {
         assertEq(factory.operators(operatorAddr), 1, "OPERATOR_ADDRESS should be registered as operator");
     }
+
+    // SC-J92J: factory.safeFactory() equals SAFE_FACTORY_ADDRESS
+    function test_factorySafeFactoryMatchesEnvVar() public view {
+        assertEq(factory.safeFactory(), SAFE_FACTORY, "factory.safeFactory should match SAFE_FACTORY_ADDRESS");
+    }
+
+    // SC-J92J: factory.safeProxyBytecodeHash() equals the hash passed to deploy
+    function test_factorySafeProxyBytecodeHashMatchesDeployArg() public view {
+        assertEq(
+            factory.safeProxyBytecodeHash(),
+            SAFE_PROXY_BYTECODE_HASH,
+            "factory.safeProxyBytecodeHash should match the hash read from the Safe factory"
+        );
+    }
 }
 
 // SC-J92K: Missing environment variable
@@ -124,37 +165,104 @@ contract DeployScriptZeroAddressTest is Test {
     // SC-J92K: USDC_ADDRESS set to zero address
     function test_revertsWhenUsdcIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "USDC_ADDRESS"));
-        script.deploy(address(0), exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+        script.deploy(
+            address(0),
+            exchange,
+            conditionalTokens,
+            admin,
+            oracleAddr,
+            operatorAddr,
+            SAFE_FACTORY,
+            SAFE_PROXY_BYTECODE_HASH
+        );
     }
 
     // SC-J92K: EXCHANGE_ADDRESS set to zero address
     function test_revertsWhenExchangeIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "EXCHANGE_ADDRESS"));
-        script.deploy(usdc, address(0), conditionalTokens, admin, oracleAddr, operatorAddr);
+        script.deploy(
+            usdc, address(0), conditionalTokens, admin, oracleAddr, operatorAddr, SAFE_FACTORY, SAFE_PROXY_BYTECODE_HASH
+        );
     }
 
     // SC-J92K: CTF_ADDRESS set to zero address
     function test_revertsWhenConditionalTokensIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "CTF_ADDRESS"));
-        script.deploy(usdc, exchange, address(0), admin, oracleAddr, operatorAddr);
+        script.deploy(
+            usdc, exchange, address(0), admin, oracleAddr, operatorAddr, SAFE_FACTORY, SAFE_PROXY_BYTECODE_HASH
+        );
     }
 
     // SC-J92K: ADMIN_ADDRESS set to zero address
     function test_revertsWhenAdminIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "ADMIN_ADDRESS"));
-        script.deploy(usdc, exchange, conditionalTokens, address(0), oracleAddr, operatorAddr);
+        script.deploy(
+            usdc,
+            exchange,
+            conditionalTokens,
+            address(0),
+            oracleAddr,
+            operatorAddr,
+            SAFE_FACTORY,
+            SAFE_PROXY_BYTECODE_HASH
+        );
     }
 
     // SC-J92K: ORACLE_ADDRESS set to zero address
     function test_revertsWhenOracleIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "ORACLE_ADDRESS"));
-        script.deploy(usdc, exchange, conditionalTokens, admin, address(0), operatorAddr);
+        script.deploy(
+            usdc, exchange, conditionalTokens, admin, address(0), operatorAddr, SAFE_FACTORY, SAFE_PROXY_BYTECODE_HASH
+        );
     }
 
     // SC-J92K: OPERATOR_ADDRESS set to zero address
     function test_revertsWhenOperatorIsZero() public {
         vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "OPERATOR_ADDRESS"));
-        script.deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, address(0));
+        script.deploy(
+            usdc, exchange, conditionalTokens, admin, oracleAddr, address(0), SAFE_FACTORY, SAFE_PROXY_BYTECODE_HASH
+        );
+    }
+
+    // SC-J92K: SAFE_FACTORY_ADDRESS set to zero address
+    function test_revertsWhenSafeFactoryIsZero() public {
+        vm.expectRevert(abi.encodeWithSelector(DeployScript.ZeroAddress.selector, "SAFE_FACTORY_ADDRESS"));
+        script.deploy(
+            usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr, address(0), SAFE_PROXY_BYTECODE_HASH
+        );
+    }
+
+    // SC-9OY8: a zero hash never reaches the factory
+    function test_revertsWhenSafeProxyBytecodeHashIsZero() public {
+        vm.expectRevert(DeployScript.ZeroBytecodeHash.selector);
+        script.deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr, SAFE_FACTORY, bytes32(0));
+    }
+}
+
+// SC-9OY8: The hash is read from the Safe factory on chain
+// What: readSafeProxyBytecodeHash(safeFactory) returns keccak256 of whatever
+//       bytes the factory's getContractBytecode() returns.
+// Why:  The hash the LP vault factory needs comes from the live Safe factory,
+//       never from a typed value (FR-J92P). Tests never call run(), so the
+//       chain read has its own public view driver.
+// Example: stub returns 0xdeadbeef → hash == keccak256(0xdeadbeef).
+contract DeployScriptReadsSafeProxyBytecodeHashTest is Test {
+    // SC-9OY8: the returned hash equals the hash computed from the same bytes
+    function test_readSafeProxyBytecodeHashHashesTheFactoryBytecode() public {
+        DeployScript script = new DeployScript();
+        bytes memory proxyCode = hex"deadbeef0102030405";
+        StubSafeFactory stub = new StubSafeFactory(proxyCode, makeAddr("masterCopy"));
+
+        bytes32 hash = script.readSafeProxyBytecodeHash(address(stub));
+
+        assertEq(hash, keccak256(proxyCode), "hash should be keccak256 of getContractBytecode()");
+    }
+
+    // SC-9OY8: the stub also answers masterCopy(), which run() logs
+    function test_stubExposesMasterCopy() public {
+        address master = makeAddr("masterCopy");
+        StubSafeFactory stub = new StubSafeFactory(hex"01", master);
+        assertEq(stub.masterCopy(), master, "masterCopy should be readable");
     }
 }
 
@@ -174,7 +282,14 @@ contract DeployScriptRoleSeparationTest is Test {
 
         vm.expectRevert(LPVaultFactory.RoleSeparation.selector);
         script.deploy(
-            makeAddr("usdc"), makeAddr("exchange"), makeAddr("conditionalTokens"), makeAddr("admin"), sameAddr, sameAddr
+            makeAddr("usdc"),
+            makeAddr("exchange"),
+            makeAddr("conditionalTokens"),
+            makeAddr("admin"),
+            sameAddr,
+            sameAddr,
+            SAFE_FACTORY,
+            SAFE_PROXY_BYTECODE_HASH
         );
     }
 }
@@ -196,8 +311,9 @@ contract DeployScriptVerificationTest is Test {
         address oracleAddr = makeAddr("oracle");
         address operatorAddr = makeAddr("operator");
 
-        (LPVault lpVault, LPVaultFactory factory) =
-            script.deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+        (LPVault lpVault, LPVaultFactory factory) = script.deploy(
+            usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr, SAFE_FACTORY, SAFE_PROXY_BYTECODE_HASH
+        );
 
         assertTrue(address(lpVault) != address(0), "LPVault impl should be deployed");
         assertTrue(address(factory) != address(0), "Factory should be deployed");
@@ -219,7 +335,7 @@ contract DeployScriptVerificationTest is Test {
 //       they can leak via shell history, process listings, and CI logs.
 //       Cast wallets (encrypted keystores) and hardware wallets eliminate
 //       this attack surface.
-// Example: deploy(usdc, exchange, ct, admin, oracle, operator) — no key param.
+// Example: deploy(usdc, exchange, ct, admin, oracle, operator, safeFactory, hash) — no key param.
 contract DeployScriptNoPrivateKeyTest is Test {
     // SC-K49S: deploy() accepts only address parameters, no private key
     function test_deployAcceptsOnlyAddressParams() public {
@@ -231,8 +347,9 @@ contract DeployScriptNoPrivateKeyTest is Test {
         address oracleAddr = makeAddr("oracle");
         address operatorAddr = makeAddr("operator");
 
-        (LPVault lpVault, LPVaultFactory factory) =
-            script.deploy(usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr);
+        (LPVault lpVault, LPVaultFactory factory) = script.deploy(
+            usdc, exchange, conditionalTokens, admin, oracleAddr, operatorAddr, SAFE_FACTORY, SAFE_PROXY_BYTECODE_HASH
+        );
 
         assertTrue(address(lpVault) != address(0), "deploy() should work without a private key parameter");
         assertTrue(address(factory) != address(0), "deploy() should work without a private key parameter");

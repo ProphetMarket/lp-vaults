@@ -8,7 +8,7 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
@@ -16,7 +16,7 @@ import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 // Base test contract for emergency cancel scenarios.
 // Deploys factory + vault, mints a position for LP-A, distributes fees.
 // ──────────────────────────────────────────────
-contract EmergencyCancelTestBase is ConditionalTokensFixture {
+contract EmergencyCancelTestBase is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -39,11 +39,6 @@ contract EmergencyCancelTestBase is ConditionalTokensFixture {
     uint256 constant LIQUIDITY_PRECISION = 1e18;
     uint256 constant Q128 = 2 ** 128;
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     // Events declared for expectEmit
     event EmergencyCancelExecuted(address indexed caller);
     event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
@@ -52,13 +47,13 @@ contract EmergencyCancelTestBase is ConditionalTokensFixture {
     uint256 positionIdA;
 
     function setUp() public virtual {
-        lpA = vm.addr(LP_A_PK);
-        lpB = vm.addr(LP_B_PK);
+        lpA = _safeOf(vm.addr(LP_A_PK));
+        lpB = _safeOf(vm.addr(LP_B_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
@@ -69,35 +64,12 @@ contract EmergencyCancelTestBase is ConditionalTokensFixture {
         vm.prank(lpA);
         mockUsdc.approve(address(vault), type(uint256).max);
 
-        bytes memory sigA = _signMintIntent(LP_A_PK, lpA, int24(0), int24(100), 1000, keccak256("mint-a-1"));
-        vm.prank(operatorAddr);
-        positionIdA = vault.mintPositionFor(lpA, int24(0), int24(100), 1000, keccak256("mint-a-1"), sigA);
+        positionIdA = _escrowAndMint(vault, operatorAddr, LP_A_PK, int24(0), int24(100), 1000, keccak256("mint-a-1"));
 
         // Distribute fees so position has accrued fees
         mockUsdc.mint(address(vault), 500);
         vm.prank(operatorAddr);
         vault.notifyFees(500);
-    }
-
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
     }
 
     /// @dev Warps block.timestamp past the emergency cancel timelock.
@@ -256,18 +228,14 @@ contract MultiLPDistributionTest is EmergencyCancelTestBase {
         super.setUp();
 
         // Mint a second position for LP-A: range [0, 50) with 500 USDC
-        bytes memory sigA2 = _signMintIntent(LP_A_PK, lpA, int24(0), int24(50), 500, keccak256("mint-a-2"));
-        vm.prank(operatorAddr);
-        positionIdA2 = vault.mintPositionFor(lpA, int24(0), int24(50), 500, keccak256("mint-a-2"), sigA2);
+        positionIdA2 = _escrowAndMint(vault, operatorAddr, LP_A_PK, int24(0), int24(50), 500, keccak256("mint-a-2"));
 
         // Mint a position for LP-B: range [0, 100) with 2000 USDC
         mockUsdc.mint(lpB, 1_000_000);
         vm.prank(lpB);
         mockUsdc.approve(address(vault), type(uint256).max);
 
-        bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 2000, keccak256("mint-b-1"));
-        vm.prank(operatorAddr);
-        positionIdB = vault.mintPositionFor(lpB, int24(0), int24(100), 2000, keccak256("mint-b-1"), sigB);
+        positionIdB = _escrowAndMint(vault, operatorAddr, LP_B_PK, int24(0), int24(100), 2000, keccak256("mint-b-1"));
 
         // Distribute more fees
         mockUsdc.mint(address(vault), 1000);
@@ -353,11 +321,58 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
     // SC-JXR1: mintPositionFor reverts with VaultNotActive
     function test_mintPositionForReverts() public {
         bytes32 intentId = keccak256("post-cancel-mint");
-        bytes memory sig = _signMintIntent(LP_A_PK, lpA, int24(0), int24(100), 500, intentId);
 
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.VaultNotActive.selector);
-        vault.mintPositionFor(lpA, int24(0), int24(100), 500, intentId, sig);
+        vault.mintPositionFor(lpA, int24(0), int24(100), 500, intentId, FAR_DEADLINE);
+    }
+
+    // SC-JXR1, FR-JXQT: depositForIntent reverts with VaultNotActive
+    function test_depositForIntentReverts() public {
+        bytes32 intentId = keccak256("post-cancel-deposit");
+        bytes memory sig =
+            _signMintIntent(address(vault), LP_A_PK, lpA, int24(0), int24(100), 500, intentId, FAR_DEADLINE);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.VaultNotActive.selector);
+        vault.depositForIntent(lpA, int24(0), int24(100), 500, intentId, FAR_DEADLINE, sig);
+    }
+
+    // FR-JXQT: reclaimDeposit is the one exception — it succeeds in Cancelled
+    function test_reclaimDepositSucceedsInCancelled() public {
+        bytes32 escrowIntent = keccak256("cancelled-escrow");
+        // This vault is already Cancelled, so build the escrow on a fresh vault, cancel it, then reclaim
+        LPVault fresh = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(2)), vaultTickSpacing, minFirstLiq));
+        _escrowAndMint(fresh, operatorAddr, LP_B_PK, int24(0), int24(100), 1000, keccak256("holder"));
+        _fundSafe(mockUsdc, lpA, address(fresh), 500);
+        _escrow(fresh, operatorAddr, LP_A_PK, lpA, int24(0), int24(100), 500, escrowIntent, FAR_DEADLINE);
+        _warpPastTimelock();
+        vm.prank(lpB);
+        fresh.emergencyCancelAll();
+        assertEq(fresh.phase(), 3, "precondition: Cancelled");
+
+        uint256 before_ = mockUsdc.balanceOf(lpA);
+        vm.prank(lpA);
+        fresh.reclaimDeposit(escrowIntent);
+        assertEq(mockUsdc.balanceOf(lpA) - before_, 500, "the Safe reclaims its escrow after the cancel");
+    }
+
+    // FR-JXQT: reclaimDepositFor also succeeds in Cancelled
+    function test_reclaimDepositForSucceedsInCancelled() public {
+        bytes32 escrowIntent = keccak256("cancelled-escrow-relayed");
+        LPVault fresh = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(3)), vaultTickSpacing, minFirstLiq));
+        _escrowAndMint(fresh, operatorAddr, LP_B_PK, int24(0), int24(100), 1000, keccak256("holder"));
+        _fundSafe(mockUsdc, lpA, address(fresh), 500);
+        _escrow(fresh, operatorAddr, LP_A_PK, lpA, int24(0), int24(100), 500, escrowIntent, FAR_DEADLINE);
+        _warpPastTimelock();
+        vm.prank(lpB);
+        fresh.emergencyCancelAll();
+
+        bytes memory sig = _signReclaimIntent(address(fresh), LP_A_PK, lpA, escrowIntent, FAR_DEADLINE);
+        uint256 before_ = mockUsdc.balanceOf(lpA);
+        vm.prank(operatorAddr);
+        fresh.reclaimDepositFor(lpA, escrowIntent, FAR_DEADLINE, sig);
+        assertEq(mockUsdc.balanceOf(lpA) - before_, 500, "the relayed reclaim pays after the cancel");
     }
 
     // SC-JXR1: collect reverts with VaultCancelled
@@ -566,9 +581,7 @@ contract MintAndMergeResetTimelockTest is EmergencyCancelTestBase {
         vm.prank(lpB);
         mockUsdc.approve(address(vault), type(uint256).max);
 
-        bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-live"));
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lpB, int24(0), int24(100), 1000, keccak256("mint-b-live"), sigB);
+        _escrowAndMint(vault, operatorAddr, LP_B_PK, int24(0), int24(100), 1000, keccak256("mint-b-live"));
 
         assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "mint should refresh the silence timer");
     }
@@ -579,9 +592,7 @@ contract MintAndMergeResetTimelockTest is EmergencyCancelTestBase {
         vm.prank(lpB);
         mockUsdc.approve(address(vault), type(uint256).max);
 
-        bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-defer"));
-        vm.prank(operatorAddr);
-        vault.mintPositionFor(lpB, int24(0), int24(100), 1000, keccak256("mint-b-defer"), sigB);
+        _escrowAndMint(vault, operatorAddr, LP_B_PK, int24(0), int24(100), 1000, keccak256("mint-b-defer"));
 
         vm.prank(lpA);
         vm.expectRevert(LPVault.TimelockNotElapsed.selector);
@@ -591,9 +602,8 @@ contract MintAndMergeResetTimelockTest is EmergencyCancelTestBase {
     // SC-3XU0: merging same-range positions is likewise proof of life
     function test_mergePositionsRefreshesSilenceTimer() public {
         // Give LP-A a second position on the identical range so the two can be merged
-        bytes memory sigA2 = _signMintIntent(LP_A_PK, lpA, int24(0), int24(100), 1000, keccak256("mint-a-2"));
-        vm.prank(operatorAddr);
-        uint256 positionIdA2 = vault.mintPositionFor(lpA, int24(0), int24(100), 1000, keccak256("mint-a-2"), sigA2);
+        uint256 positionIdA2 =
+            _escrowAndMint(vault, operatorAddr, LP_A_PK, int24(0), int24(100), 1000, keccak256("mint-a-2"));
 
         // Let the timelock lapse again so the merge has something to push back
         _warpPastTimelock();
@@ -666,10 +676,16 @@ contract HeartbeatAccessAndPhaseTest is EmergencyCancelTestBase {
         vm.expectRevert(LPVault.TradingIsPaused.selector);
         vault.notifyFees(100);
 
-        bytes memory sigB = _signMintIntent(LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("mint-b-paused"));
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.TradingIsPaused.selector);
-        vault.mintPositionFor(lpB, int24(0), int24(100), 1000, keccak256("mint-b-paused"), sigB);
+        vault.mintPositionFor(lpB, int24(0), int24(100), 1000, keccak256("mint-b-paused"), FAR_DEADLINE);
+
+        bytes memory sigB = _signMintIntent(
+            address(vault), LP_B_PK, lpB, int24(0), int24(100), 1000, keccak256("deposit-b-paused"), FAR_DEADLINE
+        );
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.TradingIsPaused.selector);
+        vault.depositForIntent(lpB, int24(0), int24(100), 1000, keccak256("deposit-b-paused"), FAR_DEADLINE, sigB);
 
         uint256[] memory ids = new uint256[](2);
         ids[0] = positionIdA;
@@ -752,7 +768,7 @@ contract HeartbeatAccessAndPhaseTest is EmergencyCancelTestBase {
 // pinning FR-JXQP's contract precisely: "the payout loop must not revert
 // regardless of how the stored snapshot arrived at that value."
 // ──────────────────────────────────────────────
-contract EmergencyCancelWraparoundTestBase is ConditionalTokensFixture {
+contract EmergencyCancelWraparoundTestBase is LPVaultFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
@@ -769,21 +785,16 @@ contract EmergencyCancelWraparoundTestBase is ConditionalTokensFixture {
     int24 vaultTickSpacing = int24(10);
     uint128 minFirstLiq = uint128(1e18);
 
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
     uint256 posOrdinary;
     uint256 posWrapped;
 
     function setUp() public virtual {
-        lp = vm.addr(LP_PK);
+        lp = _safeOf(vm.addr(LP_PK));
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
         _deployConditionalTokens();
-        factory = new LPVaultFactory(
+        factory = _deployFactory(
             address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
@@ -794,34 +805,11 @@ contract EmergencyCancelWraparoundTestBase is ConditionalTokensFixture {
         mockUsdc.approve(address(vault), type(uint256).max);
     }
 
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
-    }
-
     function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId)
         internal
         returns (uint256)
     {
-        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
-        vm.prank(operatorAddr);
-        return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+        return _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
     }
 
     function _notifyFees(uint256 amount) internal {
