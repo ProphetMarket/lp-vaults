@@ -23,6 +23,12 @@
 
 **Concentrated Liquidity** -- The Uniswap v3-style model where each LP allocates capital to a chosen sub-range of the price curve. Tighter ranges earn more fees per dollar but take on more inventory risk.
 
+**Condition ID** -- The `bytes32` identifier of a question on the Gnosis ConditionalTokens contract, `keccak256(oracle, questionId, outcomeSlotCount)`. Each vault stores the condition ID of its market.
+
+**Index Set** -- A bit mask that selects outcomes of a condition. In a binary Prophet market, index set 1 is YES and index set 2 is NO.
+
+**Outcome Token ID** -- The ERC-1155 token ID of one outcome, derived by the ConditionalTokens contract from the collateral (USDC), the condition ID, and the index set. A vault stores `yesTokenId` (index set 1) and `noTokenId` (index set 2).
+
 **CTF Exchange** -- The ProphetCTFExchange contract (a Polymarket fork). A CLOB where orders are matched off-chain by an operator and settled atomically on-chain. The exchange pulls maker capital from pre-approved contracts at fill time.
 
 **Intent** -- An off-chain record representing an LP's desire to open a position. The LP creates an intent, sends USDC to the vault address, and the operator calls `mintPositionFor` after verifying the deposit matches the intent.

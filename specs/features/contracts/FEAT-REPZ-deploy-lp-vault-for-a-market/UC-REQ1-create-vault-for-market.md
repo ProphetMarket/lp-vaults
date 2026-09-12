@@ -3,7 +3,7 @@ id: UC-REQ1
 name: Create Vault for Market
 feature: FEAT-REPZ
 status: implemented
-version: 5
+version: 6
 actor: Oracle
 ---
 
@@ -17,7 +17,7 @@ actor: Oracle
 
 ## Trigger
 
-Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the LPVaultFactory, or calls `setMinimumFirstLiquidity(newMin)` on an existing vault to adjust its first-LP floor.
+Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` on the LPVaultFactory, or calls `setMinimumFirstLiquidity(newMin)` on an existing vault to adjust its first-LP floor.
 
 ---
 
@@ -27,24 +27,29 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 - marketId has no existing vault in the registry
 - tickSpacing > 0
 - minimumFirstLiquidity > 0
+- conditionId is a prepared 2-outcome condition on the ConditionalTokens contract
+- yesTokenId is the index set 1 position ID and noTokenId is the index set 2 position ID of `(usdc, conditionId)`
 
 **Steps:**
-1. Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the factory
-2. System deploys an EIP-1167 minimal-proxy clone of the implementation contract
-3. System calls `initialize(marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity)` on the clone
-4. Clone stores all config in storage (not immutable -- EIP-1167 constraint), sets `phase = Active`, sets `activeLiquidity = 0`, sets `minimumFirstLiquidity` to the passed value
-5. Clone approves CTF Exchange for unlimited USDC spending and calls `setApprovalForAll` on ConditionalTokens for the exchange
-6. System registers `vaultForMarket[marketId] = cloneAddress`
+1. Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` on the factory
+2. System checks the identity: non-zero values, distinct IDs, outcome slot count 2, and the index set 1 and index set 2 position IDs
+3. System deploys an EIP-1167 minimal-proxy clone of the implementation contract
+4. System calls `initialize(marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity, version, conditionId, yesTokenId, noTokenId)` on the clone
+5. Clone stores all config in storage (not immutable -- EIP-1167 constraint), sets `phase = Active`, sets `activeLiquidity = 0`, sets `minimumFirstLiquidity` to the passed value, and records `conditionId`, `yesTokenId`, and `noTokenId`
+6. Clone approves CTF Exchange for unlimited USDC spending and calls `setApprovalForAll` on ConditionalTokens for the exchange
+7. System registers `vaultForMarket[marketId] = cloneAddress`
 
 **Outcomes:**
 - A new vault clone exists and is registered in the factory
 - The vault is in Active phase with `activeLiquidity == 0`, ready for the Operator to credit the first position
 - The vault delegates operator, oracle, and admin authorization to the factory contract -- no local role state is stored
 - The minimum-first-liquidity floor is set to the Oracle-supplied value
-- The vault can receive ERC-1155 outcome tokens from its ConditionalTokens contract (SC-3WLL, SC-3WLM)
+- `conditionId`, `yesTokenId`, and `noTokenId` are readable on the vault
+- The vault can receive its two ERC-1155 outcome tokens from its ConditionalTokens contract and rejects every other token ID (SC-3WLL, SC-3WLM, SC-6HBY)
 
 **Side Effects:**
 - `VaultCreated(marketId, vaultAddress, minimumFirstLiquidity)` event emitted by the factory
+- One `getOutcomeSlotCount`, two `getCollectionId`, and two `getPositionId` view calls made by the factory against the ConditionalTokens contract -- no state written on that contract
 - No `PositionMinted` event -- no position is minted at vault creation
 - No USDC transferred
 - ERC-20 approval set: vault -> exchange for USDC
@@ -58,7 +63,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 - marketId M already has a registered vault (SC-REQ6 completed for M)
 
 **Steps:**
-1. Oracle calls `createVault(M, tickSpacing)`
+1. Oracle calls `createVault(M, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)`
 2. System checks `vaultForMarket[M]`
 
 **Outcomes:**
@@ -77,7 +82,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 - Caller is an Operator, Admin, or any non-Oracle address
 
 **Steps:**
-1. Non-Oracle address calls `createVault(marketId, tickSpacing)`
+1. Non-Oracle address calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)`
 2. System checks the `onlyOracle` modifier
 
 **Outcomes:**
@@ -130,7 +135,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 - Oracle passes `minimumFirstLiquidity = 0`
 
 **Steps:**
-1. Oracle calls `createVault(marketId, tickSpacing, 0)`
+1. Oracle calls `createVault(marketId, tickSpacing, 0, conditionId, yesTokenId, noTokenId)`
 2. System validates the floor parameter
 
 **Outcomes:**
@@ -139,6 +144,77 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 **Side Effects:**
 - No clone deployed
 - No state changes
+- No events emitted
+
+---
+
+### SC-6HBV: createVault reverts on a malformed outcome-token identity
+
+**Given:**
+- marketId has no existing vault in the registry
+- tickSpacing > 0 and minimumFirstLiquidity > 0
+- The Oracle passes one of: `conditionId = bytes32(0)`, `yesTokenId = 0`, `noTokenId = 0`, or `yesTokenId == noTokenId`
+
+**Steps:**
+1. Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)`
+2. System checks the identity values before it deploys a clone and before it calls the ConditionalTokens contract
+
+**Outcomes:**
+- The call reverts with `ZeroConditionId` for a zero condition ID, `ZeroTokenId` for either zero token ID, and `DuplicateTokenId` for equal IDs
+- No vault exists for that marketId, so the Oracle can call again with the correct identity
+
+**Side Effects:**
+- No clone deployed
+- Nothing registered in `vaultForMarket`
+- No approvals granted
+- No events emitted
+- No call to the ConditionalTokens contract
+
+---
+
+### SC-6HBW: createVault reverts when the condition is not a prepared binary condition
+
+**Given:**
+- marketId has no existing vault in the registry
+- conditionId, yesTokenId, and noTokenId are non-zero and the IDs are distinct
+- `getOutcomeSlotCount(conditionId)` on the ConditionalTokens contract returns 0 (condition not prepared) or 3 (a 3-outcome condition)
+
+**Steps:**
+1. Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)`
+2. System reads the outcome slot count of `conditionId`
+
+**Outcomes:**
+- The call reverts with `NotBinaryCondition` in both cases
+
+**Side Effects:**
+- No clone deployed
+- Nothing registered in `vaultForMarket`
+- No approvals granted
+- No events emitted
+
+---
+
+### SC-6HBX: createVault reverts when the token IDs do not match the condition's index sets
+
+**Given:**
+- marketId has no existing vault in the registry
+- conditionId is a prepared 2-outcome condition
+- Case A: yesTokenId and noTokenId are the valid pair of a different condition
+- Case B: yesTokenId is the index set 2 ID and noTokenId is the index set 1 ID of `conditionId` (the correct pair, swapped)
+
+**Steps:**
+1. Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)`
+2. System derives the index set 1 and index set 2 position IDs from USDC and `conditionId`
+3. System compares `yesTokenId` with the index set 1 ID and `noTokenId` with the index set 2 ID
+
+**Outcomes:**
+- Both cases revert with `TokenIdMismatch`
+- No vault can be created that names one market's condition and another market's tokens, or that labels NO as YES
+
+**Side Effects:**
+- No clone deployed
+- Nothing registered in `vaultForMarket`
+- No approvals granted
 - No events emitted
 
 ---
@@ -209,22 +285,25 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 
 **Given:**
 - A vault has been created and initialized (SC-REQ6 completed)
-- The ConditionalTokens contract holds outcome tokens for the vault's market on behalf of some holder
+- The ConditionalTokens contract holds the vault market's YES and NO tokens on behalf of some holder
 
 **Steps:**
-1. The holder calls `safeTransferFrom(holder, vault, tokenId, amount, "")` on the ConditionalTokens contract
+1. The holder calls `safeTransferFrom(holder, vault, yesTokenId, amount, "")` on the ConditionalTokens contract
 2. ConditionalTokens credits the vault's balance and invokes `onERC1155Received` on the vault
 3. The vault checks that `msg.sender` is its configured `conditionalTokens` address
-4. The vault returns the ERC-1155 single-transfer acknowledgement value
+4. The vault checks that the ID is its own `yesTokenId` or `noTokenId`
+5. The vault returns the ERC-1155 single-transfer acknowledgement value
 
 **Outcomes:**
 - The transfer completes without reverting
 - `onERC1155Received` returns `0xf23a6e61`
-- The vault's ERC-1155 balance for `tokenId` increased by `amount`
+- The vault's ERC-1155 balance for `yesTokenId` increased by `amount`
+- The same holds for a transfer of `noTokenId`
 
 **Side Effects:**
 - No change to `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, or any position or tick record
 - No USDC transferred
+- No merge
 - No vault events emitted -- only the ConditionalTokens `TransferSingle` event
 
 ---
@@ -233,13 +312,14 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 
 **Given:**
 - A vault has been created and initialized (SC-REQ6 completed)
-- The ConditionalTokens contract holds YES and NO outcome tokens for the vault's market on behalf of some holder
+- The ConditionalTokens contract holds the vault market's YES and NO tokens on behalf of some holder
 
 **Steps:**
-1. The holder calls `safeBatchTransferFrom(holder, vault, [yesId, noId], [amountA, amountB], "")` on the ConditionalTokens contract
+1. The holder calls `safeBatchTransferFrom(holder, vault, [yesTokenId, noTokenId], [amountA, amountB], "")` on the ConditionalTokens contract
 2. ConditionalTokens credits the vault's balances and invokes `onERC1155BatchReceived` on the vault
 3. The vault checks that `msg.sender` is its configured `conditionalTokens` address
-4. The vault returns the ERC-1155 batch-transfer acknowledgement value
+4. The vault checks every ID in the batch against its own `yesTokenId` and `noTokenId`
+5. The vault returns the ERC-1155 batch-transfer acknowledgement value
 
 **Outcomes:**
 - The transfer completes without reverting
@@ -249,6 +329,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 **Side Effects:**
 - No change to `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, or any position or tick record
 - No USDC transferred
+- No merge
 - No vault events emitted -- only the ConditionalTokens `TransferBatch` event
 
 ---
@@ -271,6 +352,31 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity)` on the 
 **Side Effects:**
 - No state changes on the vault
 - No events emitted
+
+---
+
+### SC-6HBY: Receiver hook rejects a token ID outside the vault's market
+
+**Given:**
+- A vault has been created and initialized (SC-REQ6 completed)
+- The caller is the vault's own configured `conditionalTokens` contract, so the caller check of SC-3WLN passes
+- The holder owns tokens of a second condition on the same ConditionalTokens contract
+
+**Steps:**
+1. The holder calls `safeTransferFrom(holder, vault, foreignTokenId, amount, "")`
+2. ConditionalTokens invokes `onERC1155Received` on the vault
+3. The vault compares the ID with `yesTokenId` and `noTokenId`
+4. The holder calls `safeBatchTransferFrom(holder, vault, [yesTokenId, foreignTokenId], [amountA, amountB], "")`
+
+**Outcomes:**
+- Both the single and the batch transfer revert with `UnknownTokenId`
+- The batch reverts although one of its two IDs is valid
+- The vault's balance of the foreign ID stays zero and its balances of its own two IDs do not change
+
+**Side Effects:**
+- No state changes on the vault
+- No vault events
+- No ERC-1155 `TransferSingle` or `TransferBatch` event, because the transfer reverts
 
 ---
 

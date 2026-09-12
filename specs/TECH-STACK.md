@@ -51,6 +51,6 @@ N/A — pure contract project with no runtime services.
 ## Conventions
 - All contracts use exact Solidity compiler version `pragma solidity 0.8.20;`
 - Interface-only imports from OpenZeppelin; all implementations inlined (see CLAUDE.md pattern policy)
-- Integration tests: one file per use case at `test/features/{FEAT-dir}/{UC-dir}.t.sol`; invariant tests keep `{Subject}.t.sol` naming in `test/invariants/`
+- Integration tests: one file per use case at `test/features/{FEAT-dir}/{UC-dir}.t.sol`; invariant tests keep `{Subject}.t.sol` naming in `test/invariants/`; shared test fixtures live in `test/fixtures/` (the real Conditional Tokens deployer, the one ERC-20 mock, and the vault storage helpers), which test files import and `src/` never does
 - Deploy scripts follow `{Name}.s.sol` naming in `script/`
 - Fixed-point math uses Q128 (2^128 scaling) for fee accumulators

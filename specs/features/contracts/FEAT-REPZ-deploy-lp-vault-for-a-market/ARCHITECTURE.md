@@ -2,7 +2,7 @@
 id: FEAT-REPZ
 name: Deploy LP Vault for a Market
 use_cases: [UC-REQ0, UC-REQ1, UC-REQ2]
-scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5, SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN, SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR]
+scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5, SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN, SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR, SC-6HBV, SC-6HBW, SC-6HBX, SC-6HBY]
 last_update: 2026-09-12
 ---
 
@@ -29,6 +29,7 @@ C4Context
     Rel(factory, vault, "deploys clone + initialize()", "EIP-1167")
     Rel(vault, usdc, "approve(exchange)", "ERC-20")
     Rel(vault, conditionalTokens, "setApprovalForAll(exchange)", "ERC-1155")
+    Rel(factory, conditionalTokens, "getOutcomeSlotCount/getCollectionId/getPositionId", "view call")
 ```
 
 ## Container View (C4 L2)
@@ -53,6 +54,7 @@ C4Container
     Rel(factory, registry, "writes", "storage")
     Rel(vault, usdc, "approve", "ERC-20")
     Rel(vault, ctf, "setApprovalForAll", "ERC-1155")
+    Rel(factory, ctf, "verify outcome-token identity", "view call")
 ```
 
 ## Data Model
@@ -80,6 +82,9 @@ erDiagram
         address usdc "storage"
         address exchange "storage"
         address conditionalTokens "storage"
+        bytes32 conditionId "storage, non-zero, prepared 2-outcome condition"
+        uint256 yesTokenId "storage, index set 1 position ID of (usdc, conditionId)"
+        uint256 noTokenId "storage, index set 2 position ID of (usdc, conditionId)"
         address factory "storage, onlyFactory guard + auth delegation"
         int24 tickSpacing "storage"
         uint128 minimumFirstLiquidity "storage, set by Oracle via createVault, updatable via setMinimumFirstLiquidity"
@@ -119,11 +124,14 @@ erDiagram
 - `initialized` flips from false to true exactly once per clone -- never resets
 - All position-creation entry points on the vault are gated by `onlyOperator` -- no direct LP mint path exists
 - When `activeLiquidity == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` or revert -- the first position is always materially large
-- `minimumFirstLiquidity > 0` always -- enforced at `initialize()` and on every `setMinimumFirstLiquidity()` call; the floor cannot be disabled
+- `minimumFirstLiquidity > 0` always -- enforced at `createVault()` and on every `setMinimumFirstLiquidity()` call; the floor cannot be disabled
 - Every successful ERC-1155 receiver-hook invocation on a vault has `msg.sender == conditionalTokens` -- the vault never acknowledges tokens from any other ERC-1155 contract
 - The receiver hooks are pure with respect to vault state -- no position, tick, or fee-accumulator storage is written by an inbound transfer
 - `adminCount` equals the number of addresses with `admins[x] == 1` on the factory
 - A removed or renounced address cannot regain the admin role without a new `transferAdmin` or `addAdmin` call by a current Admin
+- `conditionId != 0`, `yesTokenId != 0`, `noTokenId != 0`, and `yesTokenId != noTokenId` on every initialized vault
+- `yesTokenId` is the index set 1 position ID and `noTokenId` is the index set 2 position ID of `(usdc, conditionId)`, checked once at `createVault`, and none of the three values is written again
+- Every successful receiver-hook call carries only IDs in `{yesTokenId, noTokenId}`
 
 ## Component Inventory
 
@@ -131,11 +139,14 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVaultFactory.sol` | Clone deployer + market registry + factory-level Auth | `createVault()`, `vaultForMarket`, admin/operator/oracle management |
-| `src/LPVault.sol` | Per-market vault implementation (clone target) | `initialize()`, position/tick/fee state, vault-level Auth |
+| `src/LPVaultFactory.sol` | Clone deployer + market registry + factory-level Auth + outcome-token identity check before clone deployment | `createVault()`, `_validateOutcomeIdentity()`, `vaultForMarket`, admin/operator/oracle management, `ZeroConditionId`, `ZeroTokenId`, `DuplicateTokenId`, `NotBinaryCondition`, `TokenIdMismatch` |
+| `src/LPVault.sol` | Per-market vault implementation (clone target), with the token ID restriction in the receiver hooks | `initialize()`, `conditionId`, `yesTokenId`, `noTokenId`, `_requireOwnTokenId()`, `UnknownTokenId`, inline `IConditionalTokens`, position/tick/fee state, vault-level Auth |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ0-deploy-factory.t.sol` | Integration tests for Deploy Factory | Factory deployment, role-separation revert, implementation-not-initializable and clone-initializable scenarios, factory and vault modifier checks |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ1-create-vault-for-market.t.sol` | Integration tests for Create Vault for Market | Vault creation, duplicate-market and non-oracle reverts, initialization guards, minimum-first-liquidity floor, ERC-1155 receiver hooks |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ2-manage-roles-on-factory.t.sol` | Integration tests for Manage Roles on Factory | Operator, oracle, and admin role management scenarios, and role propagation to vaults |
+| `test/fixtures/ConditionalTokensFixture.sol` | Test fixture -- real ConditionalTokens bytecode, binary condition setup, vault creation with a verified identity, complete-set minting for holders | `ITestConditionalTokens`, `_deployConditionalTokens()`, `_prepareBinaryCondition()`, `_createVault()`, `_mintCompleteSets()`, `_binaryPartition()` |
+| `test/fixtures/MockERC20.sol` | Test fixture -- the one USDC mock of the suite | `MockERC20` |
+| `test/fixtures/VaultStorage.sol` | Test fixture -- vault storage writes through forge-std `stdStorage`, with no slot numbers | `setFeeGrowthInsideLast()`, `setFeeGrowthOutside()` |
 
 ## Event Topology
 
@@ -154,6 +165,8 @@ erDiagram
 **Non-events (explicit):**
 - Constructor deployment: no custom events emitted (only standard EVM creation receipt)
 - Failed `createVault` (duplicate, wrong caller): no events emitted
+- Failed `createVault` on a malformed, non-binary, or mismatched outcome-token identity: no events emitted
+- `VaultCreated` does not carry the outcome-token identity -- the vault exposes `conditionId`, `yesTokenId`, and `noTokenId` as public getters
 - `createVault` does not emit `PositionMinted` -- no position is minted at vault creation under the operator-executes-all model
 
 ## API Surface
@@ -162,7 +175,7 @@ erDiagram
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| call | `LPVaultFactory.createVault(bytes32,int24,uint128)` | `createVault` | onlyOracle | `marketId, tickSpacing, minimumFirstLiquidity` | `address vault` | DuplicateMarket, NotOracle, ZeroFloor |
+| call | `LPVaultFactory.createVault(bytes32,int24,uint128,bytes32,uint256,uint256)` | `createVault` | onlyOracle | `marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId` | `address vault` | DuplicateMarket, NotOracle, ZeroFloor, ZeroConditionId, ZeroTokenId, DuplicateTokenId, NotBinaryCondition, TokenIdMismatch |
 | call | `LPVault.setMinimumFirstLiquidity(uint128)` | `setMinimumFirstLiquidity` | onlyOracle | `newMin` | void | NotOracle, ZeroFloor |
 | call | `LPVaultFactory.addOperator(address)` | `addOperator` | onlyAdmin | `operator_` | void | NotAdmin, RoleSeparation |
 | call | `LPVaultFactory.removeOperator(address)` | `removeOperator` | onlyAdmin | `operator` | void | NotAdmin |
@@ -172,9 +185,9 @@ erDiagram
 | call | `LPVaultFactory.addAdmin(address)` | `addAdmin` | onlyAdmin | `admin_` | void | NotAdmin, ZeroAddress |
 | call | `LPVaultFactory.removeAdmin(address)` | `removeAdmin` | onlyAdmin | `admin` | void | NotAdmin, CannotRemoveLastAdmin |
 | call | `LPVaultFactory.renounceAdminRole()` | `renounceAdminRole` | onlyAdmin | none | void | NotAdmin, CannotRemoveLastAdmin |
-| call | `LPVault.initialize(...)` | `initialize` | onlyFactory | `marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity` | void | AlreadyInitialized, NotFactory, ZeroFloor |
-| call | `LPVault.onERC1155Received(address,address,uint256,uint256,bytes)` | `onERC1155Received` | onlyConditionalTokens | `operator, from, id, value, data` | `bytes4` (`0xf23a6e61`) | NotConditionalTokens |
-| call | `LPVault.onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)` | `onERC1155BatchReceived` | onlyConditionalTokens | `operator, from, ids, values, data` | `bytes4` (`0xbc197c81`) | NotConditionalTokens |
+| call | `LPVault.initialize(...)` | `initialize` | onlyFactory | `marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity, version, conditionId, yesTokenId, noTokenId` | void | AlreadyInitialized, NotFactory |
+| call | `LPVault.onERC1155Received(address,address,uint256,uint256,bytes)` | `onERC1155Received` | onlyConditionalTokens | `operator, from, id, value, data` | `bytes4` (`0xf23a6e61`) | NotConditionalTokens, UnknownTokenId |
+| call | `LPVault.onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)` | `onERC1155BatchReceived` | onlyConditionalTokens | `operator, from, ids, values, data` | `bytes4` (`0xbc197c81`) | NotConditionalTokens, UnknownTokenId |
 | call | `LPVault.supportsInterface(bytes4)` | `supportsInterface` | public view | `interfaceId` | `bool` | none |
 
 ## Integration Points
@@ -185,7 +198,8 @@ erDiagram
 |--------|----------|-----------|---------|
 | USDC (ERC-20) | ERC-20 `approve` | outbound (approval only) | Vault approves exchange for unlimited USDC spending at fill time |
 | ConditionalTokens (Gnosis CTF) | ERC-1155 `setApprovalForAll` | outbound | Vault approves exchange to pull YES/NO outcome tokens |
-| ConditionalTokens (Gnosis CTF) | ERC-1155 receiver hooks | inbound | Vault acknowledges `safeTransferFrom` / `safeBatchTransferFrom` of outcome tokens; rejects hook calls from any other address |
+| ConditionalTokens (Gnosis CTF) | ERC-1155 receiver hooks | inbound | Vault acknowledges `safeTransferFrom` / `safeBatchTransferFrom` of its own two outcome tokens; rejects hook calls from any other address and any other token ID |
+| ConditionalTokens (Gnosis CTF) | `getOutcomeSlotCount`, `getCollectionId`, `getPositionId` view calls | outbound, read-only | The factory checks the Oracle-supplied identity at `createVault` |
 | ProphetCTFExchange | ERC-20/ERC-1155 allowances | outbound (approval only) | Pre-approved by vault to atomically pull capital at fill time |
 
 ## State Transitions
@@ -223,10 +237,14 @@ stateDiagram-v2
 | SC-RG75 | Oracle updates minimumFirstLiquidity | `src/LPVault.sol:setMinimumFirstLiquidity()` |
 | SC-RG76 | Non-Oracle setMinimumFirstLiquidity revert | `src/LPVault.sol:setMinimumFirstLiquidity()` |
 | SC-RG77 | setMinimumFirstLiquidity zero revert | `src/LPVault.sol:setMinimumFirstLiquidity()` |
-| SC-3WLL | Vault accepts single ERC-1155 transfer | `src/LPVault.sol:onERC1155Received()` |
-| SC-3WLM | Vault accepts batch ERC-1155 transfer | `src/LPVault.sol:onERC1155BatchReceived()` |
+| SC-3WLL | Vault accepts single ERC-1155 transfer | `src/LPVault.sol:onERC1155Received()`, `src/LPVault.sol:_requireOwnTokenId()` |
+| SC-3WLM | Vault accepts batch ERC-1155 transfer | `src/LPVault.sol:onERC1155BatchReceived()`, `src/LPVault.sol:_requireOwnTokenId()` |
 | SC-3WLN | Receiver hook from non-ConditionalTokens reverts | `src/LPVault.sol:onERC1155Received()`, `src/LPVault.sol:onERC1155BatchReceived()`, `src/LPVault.sol:onlyConditionalTokens` |
 | SC-3WLO | Vault reports IERC1155Receiver support | `src/LPVault.sol:supportsInterface()` |
+| SC-6HBV | createVault reverts on a malformed outcome-token identity | `src/LPVaultFactory.sol:createVault()`, `src/LPVaultFactory.sol:_validateOutcomeIdentity()` |
+| SC-6HBW | createVault reverts when the condition is not a prepared binary condition | `src/LPVaultFactory.sol:createVault()`, `src/LPVaultFactory.sol:_validateOutcomeIdentity()` |
+| SC-6HBX | createVault reverts when the token IDs do not match the condition's index sets | `src/LPVaultFactory.sol:createVault()`, `src/LPVaultFactory.sol:_validateOutcomeIdentity()` |
+| SC-6HBY | Receiver hook rejects a token ID outside the vault's market | `src/LPVault.sol:onERC1155Received()`, `src/LPVault.sol:onERC1155BatchReceived()`, `src/LPVault.sol:_requireOwnTokenId()` |
 | UC-REQ2 | Manage Roles on Factory | `src/LPVaultFactory.sol:addOperator()`, `src/LPVaultFactory.sol:removeOperator()`, `src/LPVaultFactory.sol:setOracle()`, `src/LPVaultFactory.sol:transferAdmin()`, `src/LPVaultFactory.sol:acceptAdmin()`, `src/LPVaultFactory.sol:addAdmin()`, `src/LPVaultFactory.sol:removeAdmin()`, `src/LPVaultFactory.sol:renounceAdminRole()` |
 | SC-REQB | Add operator successfully | `src/LPVaultFactory.sol:addOperator()` |
 | SC-REQC | Add operator revert (oracle) | `src/LPVaultFactory.sol:addOperator()` |
@@ -264,6 +282,7 @@ In the context of first-LP protection, facing the risk that a tiny first positio
 
 **ADR-3WLP:** Stateless ERC-1155 receiver hooks gated on the vault's own ConditionalTokens address
 In the context of the vault holding ERC-1155 outcome tokens acquired through exchange fills, facing the fact that ERC-1155 `safeTransferFrom` and `safeBatchTransferFrom` revert when the contract recipient does not return the receiver acknowledgement values, we decided to implement `onERC1155Received` and `onERC1155BatchReceived` as stateless hooks that return `0xf23a6e61` and `0xbc197c81`, gated by an `onlyConditionalTokens` modifier, plus an ERC-165 `supportsInterface`. This achieves the vault's core ability to receive outcome tokens -- without the hooks every normal trade settling tokens into the vault reverts, a permanent denial of the vault's purpose -- while turning the existing "no entry point exists for foreign token IDs" comment into an enforced on-chain check at near-zero marginal cost. We accept that the hooks perform no accounting: position, tick, and fee state stay driven by mint, burn, collect, and `notifyFees`, so an inbound transfer is invisible to vault bookkeeping by design, and any reconciliation between token balances and position accounting remains the Operator's off-chain responsibility.
+Note (2026-09-12, outcome-token identity): The hooks also revert on any token ID other than `yesTokenId` and `noTokenId` (FR-6HBT, ADR-6HBU). They still write no state and never merge, because a hook runs inside the exchange's settlement transaction and a revert there reverts the match. Position, tick, and fee state stay driven by `mintPositionFor`, `collect`, and `notifyFees`.
 
 **Rejected alternative -- unguarded receiver hooks:** The plain `pure` receiver returning the magic value to any caller is the common pattern and is what the ERC-1155 spec requires at minimum. Rejected because it lets any ERC-1155 contract push arbitrary token IDs into the vault, weakening the assumption documented at the `setApprovalForAll` call site that the vault holds outcome tokens for exactly one market. The guard costs one SLOAD and one comparison.
 
@@ -276,11 +295,24 @@ In the context of porting `addAdmin`, `removeAdmin`, and `renounceAdminRole` fro
 
 **Rejected alternative -- clear `pendingAdmin` in `addAdmin`:** This also closes the reinstatement path. Rejected because a proposed-only address would still be able to accept the role after an Admin calls `removeAdmin` on it.
 
+**ADR-6HBU:** Outcome-token identity supplied at createVault, verified by the factory against the ConditionalTokens contract, then frozen
+In the context of a vault that must accept only its own two token IDs today and merge (R9) and redeem (Part 6) them later, facing the fact that `marketId` and the `conditionalTokens` address name a market but not its tokens, we decided that the Oracle passes `conditionId`, `yesTokenId`, and `noTokenId` to `createVault`. `createVault` rejects zero and equal values, rejects a condition whose outcome slot count is not 2, and derives the index set 1 and index set 2 position IDs from `(usdc, conditionId)` through `getCollectionId` and `getPositionId`. It reverts unless `yesTokenId` is the index set 1 ID and `noTokenId` is the index set 2 ID. The factory runs these checks before it deploys the clone, next to its `ZeroFloor` and `DuplicateMarket` checks. `initialize()` stores the three values without a check of its own, because only the factory can call it. All three live in storage with the EIP-1167 comment and are never written again. The three zero-and-equality checks are redundant for safety, because the two contract checks also reject those inputs. They stay because each names the wrong argument and reverts before any external call. This achieves an identity that the receiver hooks, the merge, and the redemption can trust without a check of their own, and it turns a mislabelled or foreign identity, which a clone can never correct, into an impossible state. We accept 78,000 to 145,000 extra execution gas at creation, which varies because `getCollectionId` searches for a curve point, and the assumption of a binary market with `parentCollectionId == bytes32(0)` and USDC collateral, which is the only market shape Prophet's `Resolution.sol` prepares.
+
+**Rejected alternative -- conditionId only, with both IDs derived on-chain:** fewer parameters and no mismatch possible. Rejected in the E3 exploration interview, where the user chose explicit IDs.
+
+**Rejected alternative -- either argument order:** rejected because index set 1 is YES in `Resolution.sol` and in the Prophet server, and one swapped call would mislabel the vault forever.
+
+**Rejected alternative -- zero and distinctness checks only:** rejected because it accepts the valid pair of another market's condition.
+
+**Rejected alternative -- check the exchange's token registry (`getConditionId`, `getComplement` in `lib/ctf-exchange/src/exchange/mixins/Registry.sol`):** it is cheaper and proves that the exchange trades the IDs, but it trusts IDs that an exchange admin entered and requires registration before `createVault`.
+
+**Rejected alternative -- run the checks inside `initialize()`:** it keeps the check in the clone, but it splits `createVault`'s input checks across two contracts and needs a helper function to stay within the EVM stack. The escrow attempt (bb065e5) did this, and R2 replaced it.
+
 ## Testing Decisions
 
 | Service/Pattern | Decision | Reason |
 |-----------------|----------|--------|
-| USDC (ERC-20) | e2e with mock token | Deploy a minimal ERC-20 mock in test setup; no external dependency |
-| ConditionalTokens (ERC-1155) | e2e with mock | Deploy a minimal ERC-1155 mock; vault only calls `setApprovalForAll` |
+| USDC (ERC-20) | e2e with mock token | The one shared `MockERC20` in `test/fixtures/MockERC20.sol`, because the vault only needs `approve`, `allowance`, `balanceOf`, `transfer`, and `transferFrom` from USDC |
+| ConditionalTokens (ERC-1155) | e2e | Deploy the real Gnosis bytecode from `lib/ctf-exchange/artifacts/ConditionalTokens.json` through `test/fixtures/ConditionalTokensFixture.sol`. The factory calls `getOutcomeSlotCount`, `getCollectionId`, and `getPositionId`, and the vault calls `setApprovalForAll`, so a mock would test the mock. |
 | ProphetCTFExchange | e2e with mock address | Vault only sets approvals; no exchange logic invoked in this feature |
 | EIP-1167 clone deployment | e2e | Foundry natively supports clone deployment and testing |

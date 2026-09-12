@@ -3,7 +3,7 @@ id: UC-KX5O
 name: Schedule and Apply Implementation Upgrade
 feature: FEAT-KX5N
 status: implemented
-version: 1
+version: 2
 actor: Admin
 ---
 
@@ -67,7 +67,7 @@ Admin calls `scheduleImplementation(newImpl)`, `applyImplementation()`, or `canc
 - Implementation was just updated via `applyImplementation()`
 
 **Steps:**
-1. Oracle calls `createVault(marketId, tickSpacing, minFirstLiq)`
+1. Oracle calls `createVault(marketId, tickSpacing, minFirstLiq, conditionId, yesTokenId, noTokenId)`
 2. Factory deploys an EIP-1167 clone of the current `implementation`
 3. Factory calls `initialize()` on the clone, passing the current `implementationVersion`
 

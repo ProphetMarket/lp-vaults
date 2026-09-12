@@ -4,17 +4,17 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 4
+version: 5
 refs: []
 ---
 
 # Deploy LP Vault for a Market
 
-> Provides the factory pattern and role registry for deploying per-market LP vaults as EIP-1167 clones, with established role gating (Admin, Operator, Oracle) and a ghost position to prevent first-LP inflation griefing.
+> Provides the factory pattern and role registry for deploying per-market LP vaults as EIP-1167 clones, with established role gating (Admin, Operator, Oracle).
 
 ## Non-Goals
 
-- Does not handle LP position minting beyond the factory-seeded ghost position -- see feature 2
+- Does not handle LP position minting -- see feature 2
 - Does not handle fee distribution, tick updates, or fee collection -- see features 3-5
 - Does not handle position burning or deposit-then-credit orchestration -- see features 6-7
 - Does not handle vault wind-down or emergency cancel -- see feature 8
@@ -25,7 +25,7 @@ refs: []
 | Actor | Role | Notes |
 |-------|------|-------|
 | Factory Owner | Deploys LPVaultFactory with implementation address and initial role assignments | One-time deployment; after deployment, role management passes to Admin |
-| Oracle | Calls `createVault(marketId, tickSpacing)` to deploy per-market vaults | Single wallet (`address public oracle`); MUST be separate from Operator |
+| Oracle | Calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` to deploy per-market vaults | Single wallet (`address public oracle`); MUST be separate from Operator |
 | Admin | Manages role registry on factory: add/remove operators, set oracle, two-step admin transfer, add/remove/renounce admins, pause | Registry-only; cannot call user-facing vault functions |
 | Operator | Registered in role registry for transactional use by later features | Not invoked in this feature; gated by `onlyOperator` modifier |
 
@@ -43,22 +43,34 @@ Linked to: UC-REQ0
 
 ### Vault Creation
 
-**FR-REQK** `When the Oracle calls createVault with a marketId and tickSpacing, the system shall deploy an EIP-1167 minimal-proxy clone of the implementation contract, call initialize() on the clone, and register the clone address in the marketId-to-vault mapping.`
-Fit Criterion: Given a valid unregistered marketId, `vaultForMarket[marketId]` returns the clone address, a `VaultCreated` event is emitted, and the clone's storage matches initialization parameters.
+**FR-REQK** `When the Oracle calls createVault with a marketId, a tickSpacing, a minimumFirstLiquidity, and the market's outcome-token identity (conditionId, yesTokenId, noTokenId), the system shall verify the identity, deploy an EIP-1167 minimal-proxy clone of the implementation contract, call initialize() on the clone with those values, and register the clone address in the marketId-to-vault mapping.`
+Fit Criterion: Given a valid unregistered marketId and a valid identity, `vaultForMarket[marketId]` returns the clone address, a `VaultCreated` event is emitted, and the clone's storage matches the initialization parameters, including `conditionId`, `yesTokenId`, and `noTokenId`.
 Linked to: UC-REQ1
 
 **FR-REQL** `If the Oracle calls createVault with a marketId that already has a registered vault, then the system shall revert.`
-Fit Criterion: Given marketId M already has a vault, `createVault(M, tickSpacing)` reverts.
+Fit Criterion: Given marketId M already has a vault, `createVault(M, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` reverts.
 Linked to: UC-REQ1
 
 **FR-REQM** `If a non-Oracle address calls createVault, then the system shall revert.`
 Fit Criterion: Given a non-Oracle address, `createVault(...)` reverts with an access control error.
 Linked to: UC-REQ1
 
+**FR-6HBQ** `If the Oracle calls createVault with a zero conditionId, a zero yesTokenId, a zero noTokenId, or a yesTokenId equal to noTokenId, then the system shall revert.`
+Fit Criterion: A zero `conditionId` reverts with `ZeroConditionId`. A zero token ID reverts with `ZeroTokenId`. Equal token IDs revert with `DuplicateTokenId`. No clone is deployed and `vaultForMarket[marketId]` stays zero. These three checks are redundant for safety: a zero condition also fails `NotBinaryCondition` (FR-6HBR), and a zero or duplicated ID also fails `TokenIdMismatch` (FR-6HBS). They exist so that an operator error reverts before any external call and with a name that points at the wrong argument.
+Linked to: UC-REQ1
+
+**FR-6HBR** `If the Oracle calls createVault with a conditionId whose outcome slot count on the ConditionalTokens contract is not 2, then the system shall revert.`
+Fit Criterion: `getOutcomeSlotCount(conditionId) != 2` reverts with `NotBinaryCondition`. This covers an unprepared condition, which returns 0, and a condition with 3 or more outcomes. No clone is deployed. The complete-set merge and the redemption use the partition `[1, 2]`, and on a 3-outcome condition `mergePositions` with that partition mints a third token instead of paying USDC. Prophet's `Resolution.sol` prepares only 2-outcome conditions.
+Linked to: UC-REQ1
+
+**FR-6HBS** `When the Oracle calls createVault, the system shall derive the position IDs of index set 1 and index set 2 from the USDC address and conditionId through the ConditionalTokens contract, and shall revert unless yesTokenId equals the index set 1 position ID and noTokenId equals the index set 2 position ID.`
+Fit Criterion: The expected YES ID is `getPositionId(usdc, getCollectionId(bytes32(0), conditionId, 1))` and the expected NO ID uses index set 2. A pair that belongs to another condition reverts with `TokenIdMismatch`. The correct pair in swapped order also reverts with `TokenIdMismatch`. The derivation assumes a binary market with `parentCollectionId == bytes32(0)` and USDC as collateral. Index set 1 means YES in Prophet's `Resolution.sol` (payout `[1,0]` means YES wins) and in the Prophet server (`indexSetYES = 1`).
+Linked to: UC-REQ1
+
 ### Vault Initialization
 
-**FR-REQN** `When initialize() is called on a new vault clone, the system shall store marketId, USDC address, CTF Exchange address, ConditionalTokens address, tickSpacing, and factory address in storage, and set the vault phase to Active.`
-Fit Criterion: Given a freshly initialized clone, all storage variables match factory-provided values, `phase == Active`, and the vault's `factory` address matches the deploying factory.
+**FR-REQN** `When initialize() is called on a new vault clone, the system shall store marketId, USDC address, CTF Exchange address, ConditionalTokens address, conditionId, yesTokenId, noTokenId, tickSpacing, and factory address in storage, and set the vault phase to Active.`
+Fit Criterion: Given a freshly initialized clone, all storage variables match factory-provided values, `phase == Active`, and the vault's `factory` address matches the deploying factory. `conditionId`, `yesTokenId`, and `noTokenId` are public, and each is storage, never `immutable`, because EIP-1167 clones share the implementation's bytecode. `initialize()` does not verify the identity: only the factory can call it (FR-REQQ), and the factory verifies the identity before it deploys the clone.
 Linked to: UC-REQ1
 
 **FR-REQO** `When initialize() is called on a new vault clone, the system shall grant the CTF Exchange unlimited ERC-20 approval for USDC and call setApprovalForAll on the ConditionalTokens contract for the CTF Exchange.`
@@ -75,12 +87,16 @@ Linked to: UC-REQ1
 
 ### ERC-1155 Receiver Compatibility
 
-**FR-3WLI** `When the vault's configured ConditionalTokens contract transfers outcome tokens to the vault via safeTransferFrom or safeBatchTransferFrom, the system shall accept the transfer by returning the ERC-1155 receiver acknowledgement values.`
-Fit Criterion: Given an initialized vault, `onERC1155Received(...)` called by `conditionalTokens` returns `0xf23a6e61` and `onERC1155BatchReceived(...)` called by `conditionalTokens` returns `0xbc197c81`. A `safeTransferFrom` and a `safeBatchTransferFrom` from the ConditionalTokens contract to the vault both complete without reverting, and the vault's token balances reflect the transferred amounts. Neither hook mutates position, tick, or fee-accumulator state -- vault bookkeeping is driven by mint, burn, and collect, not by inbound transfers.
+**FR-3WLI** `When the vault's configured ConditionalTokens contract transfers the vault's own outcome tokens (yesTokenId or noTokenId) to the vault via safeTransferFrom or safeBatchTransferFrom, the system shall accept the transfer by returning the ERC-1155 receiver acknowledgement values.`
+Fit Criterion: Given an initialized vault, `onERC1155Received(...)` called by `conditionalTokens` for `yesTokenId` or `noTokenId` returns `0xf23a6e61`, and `onERC1155BatchReceived(...)` called by `conditionalTokens` for a batch drawn from those two IDs returns `0xbc197c81`. A `safeTransferFrom` and a `safeBatchTransferFrom` of those IDs from the ConditionalTokens contract to the vault both complete without reverting, and the vault's token balances reflect the transferred amounts. Neither hook mutates position, tick, or fee-accumulator state, and neither hook merges tokens -- vault bookkeeping is driven by mint, collect, and notifyFees, not by inbound transfers, and a hook runs inside the exchange's settlement transaction, so a revert there reverts the match.
 Linked to: UC-REQ1
 
 **FR-3WLJ** `If any address other than the vault's configured ConditionalTokens contract calls onERC1155Received or onERC1155BatchReceived, then the system shall revert.`
 Fit Criterion: Given an initialized vault and any caller address != `conditionalTokens`, both `onERC1155Received(...)` and `onERC1155BatchReceived(...)` revert. Inside an ERC-1155 receiver hook `msg.sender` is the token contract, so this enforces on-chain that the vault only ever acknowledges tokens from its own market's ConditionalTokens contract, rather than relying on the documented no-other-entry-point assumption alone.
+Linked to: UC-REQ1
+
+**FR-6HBT** `If a receiver hook is invoked for any token ID other than the vault's yesTokenId or noTokenId, then the system shall revert.`
+Fit Criterion: `onERC1155Received(...)` called by `conditionalTokens` with an ID outside `{yesTokenId, noTokenId}` reverts with `UnknownTokenId`, so the originating `safeTransferFrom` reverts and the token never reaches the vault. `onERC1155BatchReceived(...)` reverts when any element of `ids` is outside that set, including a batch whose other elements are valid. With FR-3WLJ, this turns the one-market assumption behind the unscoped `setApprovalForAll` into an on-chain check on both the token contract and the token ID.
 Linked to: UC-REQ1
 
 **FR-3WLK** `When supportsInterface is called on a vault with the IERC1155Receiver or ERC-165 interface identifier, the system shall return true, and false for any other identifier.`
@@ -112,7 +128,7 @@ Fit Criterion: Given a non-Operator caller (including LPs directly, Admin, Oracl
 Linked to: UC-REQ1
 
 **FR-RFS7** `When a position is minted on a vault while activeLiquidity == 0, the system shall reject the mint if the resulting liquidity is below the vault's current minimumFirstLiquidity.`
-Fit Criterion: Given a vault with `activeLiquidity == 0` and `minimumFirstLiquidity == M`, a mint that would produce `liquidity < M` reverts; a mint that would produce `liquidity >= M` succeeds and `activeLiquidity > 0` thereafter. `minimumFirstLiquidity` is supplied by the Oracle as a parameter to `createVault(marketId, tickSpacing, minimumFirstLiquidity)` and stored on the vault clone at `initialize()` time. The check applies whenever `activeLiquidity == 0` -- both the very first mint and any subsequent mint after every position has been burned.
+Fit Criterion: Given a vault with `activeLiquidity == 0` and `minimumFirstLiquidity == M`, a mint that would produce `liquidity < M` reverts; a mint that would produce `liquidity >= M` succeeds and `activeLiquidity > 0` thereafter. `minimumFirstLiquidity` is supplied by the Oracle as a parameter to `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` and stored on the vault clone at `initialize()` time. The check applies whenever `activeLiquidity == 0` -- both the very first mint and any subsequent mint after every position has been burned.
 Linked to: UC-REQ1
 
 **FR-RG4W** `When the Oracle calls setMinimumFirstLiquidity(uint128 newMin) on a vault, the system shall update the vault's minimumFirstLiquidity to newMin.`
@@ -123,7 +139,7 @@ Linked to: UC-REQ1
 Fit Criterion: Given a non-Oracle caller, `setMinimumFirstLiquidity(newMin)` reverts with an access control error.
 Linked to: UC-REQ1
 
-**FR-RG4Y** `If initialize() is called with minimumFirstLiquidity == 0, or setMinimumFirstLiquidity is called with newMin == 0, then the system shall revert.`
+**FR-RG4Y** `If the Oracle calls createVault with minimumFirstLiquidity == 0, or setMinimumFirstLiquidity is called with newMin == 0, then the system shall revert.`
 Fit Criterion: Given `minimumFirstLiquidity == 0` in `createVault`, the call reverts. Given `newMin == 0` in `setMinimumFirstLiquidity`, the call reverts. The vault's `minimumFirstLiquidity` is never zero in any reachable state.
 Linked to: UC-REQ1
 
@@ -191,7 +207,7 @@ Linked to: UC-REQ2
 
 ## Non-Functional Requirements
 
-**NFR-RER0** Gas: `When the Oracle creates a vault, the total gas cost for clone deployment + initialization + ghost position minting shall remain below 500,000 gas on Polygon.`
+**NFR-RER0** Gas: `When the Oracle creates a vault, the execution gas of createVault, covering the identity check, clone deployment, and initialization, shall remain below 650,000 gas.` A Polygon transaction adds 21,000 base gas plus calldata gas to this figure. A fuzz test over condition IDs checks the limit, because the ConditionalTokens `getCollectionId` call searches for a curve point in a loop and costs a different amount for each condition. The E3 exploration measured 398,718 gas for `createVault` with the optimizer off and at most 145,055 more gas for the identity check over 64 conditions, which gives 546,773 gas with a 3,000 gas calldata allowance. With the optimizer at 200 runs, `createVault` cost 393,262 gas before the identity check.
 
 **NFR-RER1** Security: `The system shall enforce that the same address cannot simultaneously hold the Operator role and the Oracle role on any single contract instance.`
 
@@ -209,7 +225,8 @@ Linked to: UC-REQ2
 - Mints below `MINIMUM_FIRST_LIQUIDITY` revert when `activeLiquidity == 0` (verified by fuzz test)
 - EIP-1167 clones use storage for all per-vault config (no `immutable` usage in LPVault)
 - Implementation contract cannot be initialized directly
-- The vault accepts inbound ERC-1155 transfers from its own ConditionalTokens contract and rejects receiver-hook calls from every other address
+- The vault accepts inbound ERC-1155 transfers of its own two outcome-token IDs from its own ConditionalTokens contract, and rejects receiver-hook calls from every other address and every other token ID
+- A vault cannot be created with a zero conditionId, a zero or duplicated outcome-token ID, a condition whose outcome slot count is not 2, or a token pair that differs from the condition's index set 1 and index set 2 position IDs
 - Forge fmt passes; no console.log in production code
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
 - Factory role rotation (addOperator, removeOperator, setOracle, transferAdmin/acceptAdmin, addAdmin, removeAdmin, renounceAdminRole) propagates immediately to all existing vaults deployed by that factory
