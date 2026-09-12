@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-T7AG: Operator Mint Position for LP
 // Integration tests for every scenario in this use case.
-// Covers: SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AR, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AQ
+// Covers: SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AR, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AQ, SC-8L1C
 
 import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
@@ -390,6 +390,107 @@ contract MintPositionExistingTickTest is MintPositionTestBase {
 
         (,, uint256 fgOutAfter) = vault.ticks(int24(20));
         assertEq(fgOutAfter, fgOutBefore, "feeGrowthOutside should be preserved, not re-initialized");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-8L1C: Mint over a stale shared tick succeeds
+// What: A new position [50, 100) shares tick 100 with an older position. Tick
+//       100 was crossed after fees arrived, so its feeGrowthOutsideX128 (G1)
+//       is stale against the fresh tick 50, which initializes to the current
+//       global (G2). _computeFeeGrowthInside(50, 100) = G2 - G2 - (G2 - G1)
+//       wraps mod 2^256, and the mint stores that wrapped value as the
+//       position's snapshot instead of reverting.
+// Why:  This is the exact trigger of audit NM-0986-Prophet issue 6.5. Before
+//       the unchecked fix every mint over a stale shared tick reverted with an
+//       arithmetic panic. The wrapped snapshot is what makes a later collect
+//       pay only growth since the mint (SC-8L1D, SC-8L1E in UC-U07A).
+// Example: P1 = [0, 300) and P2 = [100, 200) minted at tick 0. 1000 USDC of
+//          fees -> G1. updateTick(150) flips ticks[100] to G1. 500 more USDC
+//          -> G2. Mint [50, 100): snapshot = 2^256 - (G2 - G1).
+// ──────────────────────────────────────────────
+contract MintOverStaleSharedTickTest is MintPositionTestBase {
+    uint256 constant Q128 = 2 ** 128;
+
+    uint256 posP1;
+    uint256 posP2;
+    uint256 g1;
+    uint256 g2;
+
+    function setUp() public override {
+        super.setUp();
+        _buildStaleTickState();
+    }
+
+    function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId)
+        internal
+        returns (uint256)
+    {
+        bytes memory sig = _signMintIntent(LP_PK, lp, tickLower, tickUpper, usdcAmount, intentId);
+        vm.prank(operatorAddr);
+        return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
+    }
+
+    /// @dev notifyFees moves no USDC, so funding the vault is enough for the
+    ///      accumulator to advance.
+    function _notifyFees(uint256 amount) internal {
+        mockUsdc.mint(address(vault), amount);
+        vm.prank(operatorAddr);
+        vault.notifyFees(amount);
+    }
+
+    /// @dev Builds the staleness condition described in the class comment.
+    ///      Every position gives exactly 10e18 liquidity, which meets the
+    ///      fixture's minimumFirstLiquidity.
+    function _buildStaleTickState() internal {
+        posP1 = _mintPosition(int24(0), int24(300), 3000, keccak256("wide"));
+        posP2 = _mintPosition(int24(100), int24(200), 1000, keccak256("pre-init"));
+
+        _notifyFees(1000);
+        g1 = vault.feeGrowthGlobalX128();
+
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(150));
+
+        _notifyFees(500);
+        g2 = vault.feeGrowthGlobalX128();
+        assertGt(g2, g1, "precondition: the second notifyFees must advance the global");
+    }
+
+    // SC-8L1C: the mint does not revert, the position exists, and it is out of range
+    function test_mintSucceedsDespiteStaleSharedTick() public {
+        uint128 activeBefore = vault.activeLiquidity();
+
+        uint256 posId = _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
+
+        (address owner,,, uint128 liquidity,,) = vault.positions(posId);
+        assertEq(owner, lp, "position should be minted to the LP");
+        assertGt(liquidity, 0, "minted position should have nonzero liquidity");
+        assertEq(vault.activeLiquidity(), activeBefore, "activeLiquidity unchanged: currentTick 150 >= tickUpper 100");
+    }
+
+    // SC-8L1C: the snapshot holds the wrapped value 2^256 - (G2 - G1), which
+    // proves the subtraction wrapped instead of merely not reverting
+    function test_snapshotStoresWrappedFeeGrowthInside() public {
+        uint256 posId = _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
+
+        (,,,, uint256 feeGrowthInsideLast,) = vault.positions(posId);
+        uint256 expectedWrapped = type(uint256).max - (g2 - g1) + 1;
+        assertEq(feeGrowthInsideLast, expectedWrapped, "snapshot should be 2^256 - (G2 - G1)");
+    }
+
+    // SC-8L1C: tick 50 initializes to the current global, tick 100 keeps its
+    // stale G1 and only accumulates liquidityGross
+    function test_freshTickTakesGlobalAndSharedTickKeepsStaleOutside() public {
+        (uint128 gross100Before,,) = vault.ticks(int24(100));
+
+        _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
+
+        (,, uint256 outside50) = vault.ticks(int24(50));
+        (uint128 gross100After,, uint256 outside100) = vault.ticks(int24(100));
+        assertEq(outside50, g2, "tick 50 feeGrowthOutside should equal the current global G2");
+        assertEq(outside100, g1, "tick 100 feeGrowthOutside should stay at the stale G1");
+        assertEq(gross100After, gross100Before + uint128(10e18), "tick 100 liquidityGross should accumulate");
     }
 }
 

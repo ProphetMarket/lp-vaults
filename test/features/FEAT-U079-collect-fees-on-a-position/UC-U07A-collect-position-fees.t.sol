@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-U07A: Collect Position Fees
 // Integration tests for every scenario in this use case.
-// Covers: SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G
+// Covers: SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E
 
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -87,6 +87,21 @@ contract CollectFeesTestBase is Test {
     uint128 positionLiquidity;
 
     function setUp() public virtual {
+        _deploy();
+
+        // Mint a position: range [0, 100) with 1000 USDC.
+        // currentTick defaults to 0, so [0, 100) is in-range.
+        // liquidity = 1000 * 1e18 / 100 = 10e18.
+        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 1000, keccak256("setup-mint"));
+        vm.prank(operatorAddr);
+        positionId = vault.mintPositionFor(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
+
+        positionLiquidity = 10e18;
+    }
+
+    /// @dev Deploys the factory and the vault clone, funds the LP, and approves
+    ///      the vault. Mints no position, so a subclass can build its own state.
+    function _deploy() internal {
         lp = vm.addr(LP_PK);
 
         LPVault impl = new LPVault();
@@ -99,18 +114,9 @@ contract CollectFeesTestBase is Test {
         vm.prank(oracleAddr);
         vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
 
-        // Mint a position: range [0, 100) with 1000 USDC.
-        // currentTick defaults to 0, so [0, 100) is in-range.
-        // liquidity = 1000 * 1e18 / 100 = 10e18.
         mockUsdc.mint(lp, 1_000_000);
         vm.prank(lp);
         mockUsdc.approve(address(vault), type(uint256).max);
-
-        bytes memory sig = _signMintIntent(LP_PK, lp, int24(0), int24(100), 1000, keccak256("setup-mint"));
-        vm.prank(operatorAddr);
-        positionId = vault.mintPositionFor(lp, int24(0), int24(100), 1000, keccak256("setup-mint"), sig);
-
-        positionLiquidity = 10e18;
     }
 
     function _domainSeparator() internal view returns (bytes32) {
@@ -547,74 +553,20 @@ contract CollectCEIOrderingTest is CollectFeesTestBase {
 //   6. Mint a NEW position [50, 100) at currentTick = 150. Tick 50 is fresh
 //      (initializes to the CURRENT global G2), tick 100 is the stale shared
 //      tick (G1). _computeFeeGrowthInside(50, 100) computes
-//      (G2 - G2) - (G2 - G1) = 0 - (G2 - G1), which underflows.
+//      (G2 - G2) - (G2 - G1) = 0 - (G2 - G1), which wraps mod 2^256.
+//
+// The mint itself is SC-8L1C in UC-T7AG's test file. This base reuses the
+// collect fixture's deployment and helpers, and skips its seed mint so the
+// three positions above get IDs 0, 1, and 2. Every position gives exactly
+// 10e18 liquidity, which meets the fixture's minimumFirstLiquidity.
 // ──────────────────────────────────────────────
-contract FeeGrowthWraparoundTestBase is Test {
-    LPVaultFactory factory;
-    LPVault vault;
-    MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
-
-    address admin = makeAddr("admin");
-    address oracleAddr = makeAddr("oracle");
-    address operatorAddr = makeAddr("operator");
-    address exchangeAddr = makeAddr("exchange");
-
-    uint256 constant LP_PK = 0xA11CE;
-    address lp;
-
-    bytes32 marketId = bytes32(uint256(1));
-    int24 vaultTickSpacing = int24(10);
-    uint128 minFirstLiq = uint128(1e18);
-
-    uint256 constant Q128 = 2 ** 128;
-
-    bytes32 constant MINT_INTENT_TYPEHASH =
-        keccak256("MintIntent(address lp,int24 tickLower,int24 tickUpper,uint256 usdcAmount,bytes32 intentId)");
-    bytes32 constant DOMAIN_TYPEHASH =
-        keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
-
+contract FeeGrowthWraparoundTestBase is CollectFeesTestBase {
     // Position IDs assigned during _buildStaleTickState(): P1 = 0, P2 = 1.
     uint256 posP1;
     uint256 posP2;
 
-    function setUp() public virtual {
-        lp = vm.addr(LP_PK);
-
-        LPVault impl = new LPVault();
-        mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
-        factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
-        );
-
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
-
-        mockUsdc.mint(lp, 1_000_000e18);
-        vm.prank(lp);
-        mockUsdc.approve(address(vault), type(uint256).max);
-    }
-
-    function _domainSeparator() internal view returns (bytes32) {
-        return
-            keccak256(abi.encode(DOMAIN_TYPEHASH, keccak256("LPVault"), keccak256("1"), block.chainid, address(vault)));
-    }
-
-    function _signMintIntent(
-        uint256 pk,
-        address lpAddr,
-        int24 tickLower,
-        int24 tickUpper,
-        uint256 usdcAmount,
-        bytes32 intentId
-    ) internal view returns (bytes memory) {
-        bytes32 structHash = keccak256(
-            abi.encode(MINT_INTENT_TYPEHASH, lpAddr, tickLower, tickUpper, usdcAmount, intentId)
-        );
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pk, digest);
-        return abi.encodePacked(r, s, v);
+    function setUp() public virtual override {
+        _deploy();
     }
 
     function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId)
@@ -626,55 +578,40 @@ contract FeeGrowthWraparoundTestBase is Test {
         return vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, sig);
     }
 
-    function _notifyFees(uint256 amount) internal {
-        mockUsdc.mint(address(vault), amount);
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
-    }
-
     /// @dev Builds the staleness condition described in the class comment above.
     function _buildStaleTickState() internal {
         posP1 = _mintPosition(int24(0), int24(300), 3000, keccak256("wide"));
         posP2 = _mintPosition(int24(100), int24(200), 1000, keccak256("pre-init"));
 
-        _notifyFees(1000);
+        _distributeFees(1000);
 
         vm.prank(operatorAddr);
         vault.updateTick(int24(150));
 
-        _notifyFees(500);
+        _distributeFees(500);
     }
 }
 
 // ──────────────────────────────────────────────
-// FR-U07H, FR-U07I: feeGrowthInside/owed computation succeeds under wraparound
-// What: minting a NEW position sharing an already-initialized (but now stale)
-//       tick triggers the exact underflow audit NM-0986-Prophet describes.
-//       Before the fix, _computeFeeGrowthInside's final subtraction
-//       (0 - (G2 - G1)) reverts. After the fix, it wraps mod 2^256 and the
-//       mint succeeds; a later collect() on the resulting position still
-//       resolves to the correct owed amount because the delta computation
-//       cancels the wraparound out.
-// Why:  This is the exact trigger from the audit: "minting a position sharing
-//       an already-initialized tick can trigger it immediately."
+// SC-8L1D, SC-8L1E, FR-U07H, FR-U07I: collect on a wrapped snapshot
+// What: a position minted over a stale shared tick stores a wrapped
+//       feeGrowthInsideLastX128 (SC-8L1C). A collect right after the mint
+//       owes zero (SC-8L1D). After the price re-enters the range and new fees
+//       arrive, a collect pays exactly the growth since the mint (SC-8L1E),
+//       because both operands of the owed delta wrapped by the same offset and
+//       the unchecked subtraction cancels it.
+// Why:  These are the two states audit NM-0986-Prophet describes after the
+//       wraparound: "the wrapped negative value will naturally cross back over
+//       the 256-bit boundary." Each test pins the exact payout, not only the
+//       absence of a revert.
 // ──────────────────────────────────────────────
-contract FeeGrowthWraparoundMintTest is FeeGrowthWraparoundTestBase {
+contract FeeGrowthWraparoundCollectTest is FeeGrowthWraparoundTestBase {
     function setUp() public override {
         super.setUp();
         _buildStaleTickState();
     }
 
-    // FR-U07H: minting a position sharing the stale tick 100 (as tickUpper)
-    // with a fresh tick 50 (as tickLower) no longer reverts.
-    function test_mintSucceedsDespiteStaleSharedTick() public {
-        uint256 posId = _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
-
-        (address owner,,, uint128 liquidity,,) = vault.positions(posId);
-        assertEq(owner, lp, "position should be minted to the LP");
-        assertGt(liquidity, 0, "minted position should have nonzero liquidity");
-    }
-
-    // FR-U07I: collecting immediately after the wraparound mint (no new fee
+    // SC-8L1D: collecting immediately after the wraparound mint (no new fee
     // growth in this position's range yet) returns exactly zero -- proving
     // the wrapped snapshot does not fabricate phantom fees.
     function test_collectImmediatelyAfterWraparoundMintReturnsZero() public {
@@ -687,7 +624,7 @@ contract FeeGrowthWraparoundMintTest is FeeGrowthWraparoundTestBase {
         assertEq(mockUsdc.balanceOf(lp), lpBalBefore, "no fees should be owed with zero elapsed growth");
     }
 
-    // FR-U07I: after the wraparound mint, moving price back into the new
+    // SC-8L1E: after the wraparound mint, moving price back into the new
     // position's range and distributing fresh fees produces a correct,
     // precisely-matching nonzero owed amount on collect -- proving the
     // wrapped feeGrowthInsideLastX128 snapshot correctly cancels against a
@@ -697,14 +634,16 @@ contract FeeGrowthWraparoundMintTest is FeeGrowthWraparoundTestBase {
         uint256 posId = _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
 
         // Move price down into [50, 100) so the new position becomes active,
-        // then distribute fees while it is the sole in-range position.
+        // then distribute fees. P1 = [0, 300) is also in range at tick 75, so
+        // the new position receives its liquidity-weighted share of the
+        // growth, which the expectedOwed formula below reads off the global.
         vm.prank(operatorAddr);
         vault.updateTick(int24(75));
 
         (,,, uint128 posLiquidity,,) = vault.positions(posId);
         uint256 feeGrowthBefore = vault.feeGrowthGlobalX128();
 
-        _notifyFees(200);
+        _distributeFees(200);
 
         uint256 feeGrowthAfter = vault.feeGrowthGlobalX128();
         uint256 expectedOwed = uint256(posLiquidity) * (feeGrowthAfter - feeGrowthBefore) / Q128;
@@ -743,30 +682,31 @@ contract FeeGrowthWraparoundMintTest is FeeGrowthWraparoundTestBase {
 }
 
 // ──────────────────────────────────────────────
-// FR-U07H, FR-U07I: fuzz coverage across the wraparound input space
+// SC-8L1D, FR-U07H, FR-U07I: fuzz coverage across the wraparound input space
 // What: _computeFeeGrowthInside and collect's owed computation never revert,
-//       and owed is always bounded by total fees distributed, across a wide
-//       range of fee amounts and tick-crossing sequences that can produce a
-//       stale-vs-fresh tick mismatch.
+//       and an immediate collect on the wrapped snapshot owes exactly zero,
+//       across a wide range of fee amounts that produce a stale-vs-fresh
+//       tick mismatch.
 // Why:  A single hand-built reproduction proves the fix works for one input;
 //       the fuzz proves it holds across the input space, not just the
-//       hand-picked numbers above.
+//       hand-picked numbers above. The vault balance holds the principal of
+//       three positions, so a bound by that balance would accept a payout of
+//       the whole vault. The exact expectation on this path is zero.
 // ──────────────────────────────────────────────
 contract FeeGrowthWraparoundFuzzTest is FeeGrowthWraparoundTestBase {
-    // FR-U07H, FR-U07I: fuzzed fee amounts never cause a revert, and the
-    // resulting owed amount on the wraparound-shared position never exceeds
-    // the vault's total USDC balance (the CLAUDE.md fee-bound invariant).
-    function testFuzz_wraparoundNeverRevertsAndOwedIsBounded(uint96 firstFees, uint96 secondFees) public {
+    // SC-8L1D: fuzzed fee amounts never cause a revert, and the immediate
+    // collect on the wraparound-shared position pays nothing.
+    function testFuzz_wraparoundNeverRevertsAndImmediateCollectOwesZero(uint96 firstFees, uint96 secondFees) public {
         firstFees = uint96(bound(firstFees, 1, 1_000_000e18));
         secondFees = uint96(bound(secondFees, 1, 1_000_000e18));
 
         posP1 = _mintPosition(int24(0), int24(300), 3000, keccak256("wide"));
         posP2 = _mintPosition(int24(100), int24(200), 1000, keccak256("pre-init"));
 
-        _notifyFees(firstFees);
+        _distributeFees(firstFees);
         vm.prank(operatorAddr);
         vault.updateTick(int24(150));
-        _notifyFees(secondFees);
+        _distributeFees(secondFees);
 
         // This mint reverts before the fix whenever secondFees > 0 makes
         // ticks[100].feeGrowthOutsideX128 stale relative to the fresh tick 50.
@@ -777,6 +717,6 @@ contract FeeGrowthWraparoundFuzzTest is FeeGrowthWraparoundTestBase {
         vault.collect(posId);
         uint256 owed = vaultBalBefore - mockUsdc.balanceOf(address(vault));
 
-        assertLe(owed, vaultBalBefore, "owed must never exceed the vault's available fee balance");
+        assertEq(owed, 0, "an immediate collect on a wrapped snapshot must owe nothing");
     }
 }

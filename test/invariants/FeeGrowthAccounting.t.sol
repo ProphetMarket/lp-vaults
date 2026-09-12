@@ -4,11 +4,13 @@ pragma solidity 0.8.20;
 // Invariant required by CLAUDE.md security checklist item 9 and by
 // audit NM-0986-Prophet's fee-growth-arithmetic fix (T-001, extended by T-004):
 // no position can ever claim more in fees, across its lifetime, than the
-// vault has actually distributed via notifyFees (bounded by Q128 truncation
-// dust). Randomized sequences of mint/notifyFees/updateTick/collect drive the
-// vault through states that require the unchecked wraparound fixed in
-// _computeFeeGrowthInside, collect(), and _crossTick() to hold without ever
-// reverting or fabricating/destroying fees.
+// vault has actually distributed via notifyFees. The bound is exact, with no
+// slack: notifyFees rounds the global increment down, and every payout rounds
+// down, so no step can create a fee. Randomized sequences of
+// mint/notifyFees/updateTick/collect drive the vault through states that
+// require the unchecked wraparound fixed in _computeFeeGrowthInside,
+// collect(), and _crossTick() to hold without ever reverting or
+// fabricating/destroying fees.
 
 import {Test} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
@@ -189,12 +191,12 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, Test {
     // CLAUDE.md security checklist item 9, stated as a conservation law: the
     // sum of every position's currently-claimable (uncollected) fees, plus
     // every fee already paid out via collect(), can never exceed the total
-    // fees ever distributed via notifyFees (bounded by Q128 truncation dust
-    // per call). This is the precise, position-entry/exit-safe form of the
-    // per-instant "feeGrowthGlobalX128 * activeLiquidity / 2^128" bound in
-    // CLAUDE.md -- that per-instant form only holds when every position is
-    // currently in range, which a randomized mint/updateTick sequence does
-    // not guarantee. The conservation form is what the wraparound fix must
+    // fees ever distributed via notifyFees. This is the conservation form of
+    // the fee invariant in CLAUDE.md's Foundry conventions. The per-instant
+    // form, "feeGrowthGlobalX128 * activeLiquidity / 2^128", only holds when
+    // every position has been in range since its mint and nothing was
+    // collected, which a randomized mint/updateTick sequence does not
+    // guarantee. The conservation form is what the wraparound fix must
     // actually protect: no arithmetic bug may fabricate or destroy fees.
     function invariant_claimableFeesNeverExceedTotalDistributed() public view {
         uint256 totalClaimable = 0;
@@ -222,13 +224,13 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, Test {
             totalClaimable += claimable + tokensOwed;
         }
 
-        // Dust tolerance: every notifyFees call truncates downward by up to
-        // 1 wei (mulDiv floor division); a long random run of many calls can
-        // accumulate a small, bounded amount of slack.
+        // No slack: notifyFees rounds the global increment down (mulDiv floor
+        // division), and every payout rounds down, so the sum of what positions
+        // can claim never rises above what was notified. Any excess is a bug.
         assertLe(
             totalClaimable + handler.totalFeesPaidOut(),
-            handler.totalFeesNotified() + 1e6,
-            "claimable + already-paid-out fees must not exceed total fees ever notified (+ dust)"
+            handler.totalFeesNotified(),
+            "claimable + already-paid-out fees must not exceed total fees ever notified"
         );
     }
 
