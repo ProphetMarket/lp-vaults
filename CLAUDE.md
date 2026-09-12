@@ -80,7 +80,8 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 
 ## Foundry conventions
 
-- Compiler: `pragma solidity 0.8.20;` (exact, not `^0.8.20`).
+- Compiler: `pragma solidity 0.8.20;` (exact, not `^0.8.20`). The optimizer is on with `optimizer_runs = 200` in `foundry.toml`, chosen for contract size (the compiler optimizer decision, ADR-9FOM in `specs/features/contracts/FEAT-J92H-deploy-contracts/ARCHITECTURE.md`). Do not change either value without a new decision record.
+- Size check, in the completion check of every step: run `forge build --sizes --skip test --skip script`. It must exit 0. The report states the runtime size and the room of `LPVault` and `LPVaultFactory`. The check skips test and script files because `forge test` does not enforce the 24,576-byte limit, so a test harness may exceed it. A harness over the limit never blocks a step. `forge test` alone never proves that a contract deploys.
 - `forge fmt` on every commit. Set up a pre-commit hook.
 - Tests:
   - `test/features/{FEAT-dir}/{UC-dir}.t.sol` — integration tests, **one file per use case**. The path is derived from `specs/MODULES.md` (`Tests` column) and the spec tree; it is never chosen ad hoc. Every task and fix that touches a UC appends to that UC's single file — never a new numbered file.

@@ -8,6 +8,12 @@ libs = ["lib"]
 # unreached test line is already reported by the suite itself.
 no_match_coverage = "(script|test)/"
 
+# The optimizer is on for contract size, not for gas. See the compiler optimizer
+# decision (ADR-9FOM) in
+# specs/features/contracts/FEAT-J92H-deploy-contracts/ARCHITECTURE.md.
+optimizer = true
+optimizer_runs = 200
+
 # forge's own defaults (runs=256, depth=500 -> 128k calls/run) are sized for
 # large multi-contract protocols. This vault's invariant handler is a single
 # contract with a handful of actions; depth=500 mostly re-exercises the same

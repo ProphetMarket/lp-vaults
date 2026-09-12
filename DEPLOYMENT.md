@@ -74,6 +74,10 @@ Expected output ends with:
 Compiler run successful!
 ```
 
+### Compiler settings
+
+`foundry.toml` turns the optimizer on with `optimizer_runs = 200`, chosen for contract size. Before a deploy, run `forge build --sizes --skip test --skip script`. It prints the runtime size of each `src/` contract and must exit 0. `forge verify-contract` reads the optimizer settings from `foundry.toml`, so verification needs no extra flag. Artifacts under `broadcast/` made before this setting hold different bytecode.
+
 If you see compilation errors, ensure you are on the exact compiler version:
 
 ```bash
