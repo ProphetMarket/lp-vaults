@@ -4,7 +4,7 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 5
+version: 6
 refs: []
 ---
 
@@ -33,8 +33,8 @@ refs: []
 
 ### Factory Deployment
 
-**FR-REQI** `When the Factory Owner deploys the LPVaultFactory, the system shall initialize the role registry with the provided Admin, Oracle, and Operator wallets, store the implementation contract address, USDC address, CTF Exchange address, and ConditionalTokens address, and set adminCount to 1.`
-Fit Criterion: Given valid constructor arguments, `admins[initialAdmin] == 1`, `oracle == initialOracle`, `operators[initialOperator] == 1`, `adminCount == 1`, and all address storage variables match.
+**FR-REQI** `When the Factory Owner deploys the LPVaultFactory, the system shall initialize the role registry with the provided Admin, Oracle, and Operator wallets, store the implementation contract address, USDC address, CTF Exchange address, ConditionalTokens address, Safe factory address, and Safe proxy bytecode hash, and set adminCount to 1.`
+Fit Criterion: Given valid constructor arguments, `admins[initialAdmin] == 1`, `oracle == initialOracle`, `operators[initialOperator] == 1`, `adminCount == 1`, and all address storage variables match. `safeFactory` and `safeProxyBytecodeHash` are `immutable`, and no function changes them. A zero `safeFactory` reverts with `ZeroAddress`, and a zero hash reverts with `ZeroBytecodeHash`.
 Linked to: UC-REQ0
 
 **FR-REQJ** `When the Factory Owner deploys the LPVaultFactory, the system shall call _disableInitializers() in the implementation contract's constructor to prevent direct initialization of the implementation.`
@@ -120,6 +120,10 @@ Linked to: UC-REQ2
 **FR-FKD3** `The vault shall not store operator, oracle, or admin registry state in its own storage.`
 Fit Criterion: Given a freshly initialized vault clone, no storage is written for `operators`, `oracle`, `admins`, `pendingAdmin`, or `adminCount`. All role authorization is resolved by querying the factory contract at call time.
 Linked to: UC-REQ1
+
+**FR-9OYI** `When any vault function verifies an LP's owner-key signature, the system shall read the Safe factory address and the Safe proxy bytecode hash from the factory contract at call time.`
+Fit Criterion: Given a vault with factory F, the Safe that the vault derives for an owner key equals `keccak256(0xff ++ F.safeFactory() ++ keccak256(abi.encode(ownerKey)) ++ F.safeProxyBytecodeHash())` truncated to 20 bytes. The vault stores neither value. `initialize` with 13 parameters does not compile, and the factory already serves the roles this way (FR-FKD0 to FR-FKD3), so the vault extends the same pattern (ADR-9OYP in FEAT-T7AF).
+Linked to: UC-3Z92
 
 ### First-LP Inflation Protection
 

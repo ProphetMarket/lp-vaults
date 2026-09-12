@@ -3,7 +3,7 @@ id: UC-REQ0
 name: Deploy Factory
 feature: FEAT-REPZ
 status: implemented
-version: 1
+version: 2
 actor: Factory Owner
 ---
 
@@ -16,6 +16,7 @@ actor: Factory Owner
 - Factory Owner has the compiled LPVault implementation bytecode
 - USDC, CTF Exchange, and ConditionalTokens contracts are deployed on the target chain
 - Initial Admin, Oracle, and Operator wallet addresses are known
+- The Poly Safe factory address on the target chain is known, and its combined proxy bytecode hash was read from it
 
 ## Trigger
 
@@ -26,12 +27,12 @@ Factory Owner sends the LPVaultFactory deployment transaction.
 ### SC-REQ3: Successful deployment with valid parameters
 
 **Given:**
-- All addresses are non-zero
+- All addresses are non-zero, and the Safe proxy bytecode hash is non-zero
 - initialOracle != initialOperator (role separation satisfied)
 
 **Steps:**
-1. Factory Owner deploys LPVaultFactory with (implementation, usdc, exchange, conditionalTokens, initialAdmin, initialOracle, initialOperator)
-2. System stores implementation, usdc, exchange, and conditionalTokens addresses
+1. Factory Owner deploys LPVaultFactory with (implementation, usdc, exchange, conditionalTokens, initialAdmin, initialOracle, initialOperator, safeFactory, safeProxyBytecodeHash)
+2. System stores implementation, usdc, exchange, conditionalTokens, safeFactory, and safeProxyBytecodeHash
 3. System sets `admins[initialAdmin] = 1` and `adminCount = 1`
 4. System sets `oracle = initialOracle`
 5. System sets `operators[initialOperator] = 1`
@@ -39,10 +40,30 @@ Factory Owner sends the LPVaultFactory deployment transaction.
 **Outcomes:**
 - Factory contract exists at a deployed address with all configuration stored
 - Role registry is initialized: one admin, one oracle, one operator
+- `safeFactory()` and `safeProxyBytecodeHash()` return the constructor values
 
 **Side Effects:**
 - No events emitted (constructor-only; standard EVM creation receipt)
 - No USDC transferred
+
+---
+
+### SC-9OY7: Zero Safe derivation input reverts
+
+**Given:**
+- Every other constructor argument is valid
+
+**Steps:**
+1. Factory Owner deploys LPVaultFactory with `safeFactory == address(0)`, or with `safeProxyBytecodeHash == bytes32(0)`
+2. System validates the two derivation inputs
+
+**Outcomes:**
+- The deployment reverts with `ZeroAddress` for the zero factory and with `ZeroBytecodeHash` for the zero hash
+- A zero input would make every derived Safe wrong on every vault the factory creates, and an `immutable` can never be corrected
+
+**Side Effects:**
+- No contract deployed
+- No state changes on chain
 
 ---
 

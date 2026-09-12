@@ -3,7 +3,7 @@ id: UC-JXQW
 name: Emergency Cancel All
 feature: FEAT-JXQO
 status: implemented
-version: 3
+version: 4
 actor: LP
 ---
 

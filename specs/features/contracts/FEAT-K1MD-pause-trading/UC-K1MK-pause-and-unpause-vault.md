@@ -3,7 +3,7 @@ id: UC-K1MK
 name: Pause and Unpause Vault
 feature: FEAT-K1MD
 status: implemented
-version: 1
+version: 2
 actor: Admin
 ---
 
@@ -103,17 +103,18 @@ Admin calls `pauseTrading()` or `unpauseTrading()` on the vault.
 
 **Given:**
 - Vault is paused
-- LP has a valid unfulfilled mint intent past `RECLAIM_TIMELOCK`
+- The Operator escrowed the Safe's USDC against an intent that was not minted
 
 **Steps:**
-1. LP calls `reclaimDeposit(...)` with valid signatures
+1. The Safe calls `reclaimDeposit(intentId)`
 
 **Outcomes:**
-- USDC transferred to LP successfully
+- USDC transferred to the Safe successfully
 
 **Side Effects:**
-- USDC transferred to LP
+- USDC transferred to the Safe
 - `intentId` marked as used
+- Escrow deleted
 - No revert
 
 ---

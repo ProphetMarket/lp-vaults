@@ -1,0 +1,4 @@
+TODO:
+
+DONE:
+- 20260912T200447 [implemented] command:spec plan:20260912T200119-per-intent-escrow-safe-signatures-r5 — Add the relayed reclaim (audit NM-0986 issues 6.1 and 6.13, decisions C1 and C23, step R5). The Operator calls reclaimDepositFor with the owner key's ReclaimIntent (lp, intentId, deadline), a type distinct from MintIntent (ADR-4029). The vault checks the deadline, requires that the Safe derived from the signer equals lp, requires the recorded Safe, and refunds the recorded amount to that Safe in one call, in every phase and while paused. The IDs UC-3Z93, SC-3Z9D, SC-3Z9F, SC-3Z9G, SC-3Z9H, SC-3Z9I, SC-45IH, FR-3ZVO to FR-3ZVR, and ADR-4029 are reused from branch escrow; SC-3Z9C (phase 1) and SC-3Z9E (timelock) from that branch are not carried. New: SC-9OYF, SC-9OYG, SC-9OYH.

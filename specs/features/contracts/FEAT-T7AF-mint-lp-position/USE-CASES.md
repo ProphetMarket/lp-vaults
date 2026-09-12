@@ -6,4 +6,4 @@
 
 | ID | Name | Status | Description | File |
 |----|------|--------|-------------|------|
-| UC-T7AG | Operator Mint Position for LP | implemented | Operator executes an LP's signed EIP-712 mint intent to create a concentrated-liquidity position with tick initialization and fee snapshot | [UC-T7AG-operator-mint-position-for-lp.md](UC-T7AG-operator-mint-position-for-lp.md) |
+| UC-T7AG | Operator Mint Position for LP | implemented | Operator mints the concentrated-liquidity position that an escrowed mint intent authorizes, with tick initialization and fee snapshot, and no USDC or signature | [UC-T7AG-operator-mint-position-for-lp.md](UC-T7AG-operator-mint-position-for-lp.md) |

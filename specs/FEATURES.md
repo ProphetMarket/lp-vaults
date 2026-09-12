@@ -14,8 +14,8 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
-| FEAT-REPZ | Deploy LP Vault for a Market | Factory pattern and role registry for deploying per-market LP vaults as EIP-1167 clones with factory-delegated authorization | implemented |
-| FEAT-J92H | Deploy Contracts | Foundry deploy script that deploys LPVault implementation and LPVaultFactory with env-var-driven configuration for Polygon Amoy and mainnet | implemented |
+| FEAT-REPZ | Deploy LP Vault for a Market | Factory pattern and role registry for deploying per-market LP vaults as EIP-1167 clones with factory-delegated authorization, holding the Safe derivation inputs as immutables | implemented |
+| FEAT-J92H | Deploy Contracts | Foundry deploy script that deploys LPVault implementation and LPVaultFactory with env-var-driven configuration for Polygon Amoy and mainnet, reading the Safe proxy bytecode hash from the live Safe factory | implemented |
 | FEAT-JGE7 | Vault Wind-Down Lifecycle | Oracle-driven phase transition from Active to WindDown that gates off new mints while keeping exit paths open for existing LPs | implemented |
 | FEAT-JXQO | Emergency Cancel All Positions | Position-holder-triggered force-close of all positions after operator-silence timelock, distributing principal + fees and entering terminal Cancelled state | implemented |
 | FEAT-K1MD | Pause Trading | Admin-callable circuit breaker that halts trading entry points while keeping LP exit paths live | implemented |
@@ -25,9 +25,10 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
-| FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation with EIP-712 signed intents, v3-style tick initialization, and fee-snapshot anchoring | implemented |
+| FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation that consumes a per-intent escrow, with v3-style tick initialization and fee-snapshot anchoring | implemented |
 | FEAT-U079 | Collect Fees on a Position | LP withdraws accumulated trading fees from a position using the v3 feeGrowthInside accumulator with snapshot-based double-counting prevention | implemented |
-| FEAT-JAIJ | LP Escape Hatch | LP-initiated USDC recovery when the Operator fails to fulfill a signed mint intent within RECLAIM_TIMELOCK | pending |
+| FEAT-JAIJ | LP Escape Hatch | LP-initiated recovery of the USDC escrowed against a mint intent that the Operator did not mint, in one call by the LP's Safe or one relayed call with the owner key's signature, in every vault phase | implemented |
+| FEAT-3ZRI | Escrow Deposit for Mint Intent | Operator-gated escrow of an LP's USDC from the LP's Safe against a signed mint intent, recorded per intentId with the Safe, the amount, and the intent hash, so the mint and the reclaim spend exactly what was recorded | implemented |
 | FEAT-K1M2 | Merge Positions | Operator-called housekeeping to combine same-range same-owner positions into a single record preserving liquidity and fees | implemented |
 
 ## @fees

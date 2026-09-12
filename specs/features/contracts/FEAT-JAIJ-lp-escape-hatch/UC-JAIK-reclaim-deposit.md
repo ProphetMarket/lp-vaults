@@ -3,72 +3,91 @@ id: UC-JAIK
 name: Reclaim Deposit
 feature: FEAT-JAIJ
 status: implemented
-version: 1
+version: 2
 actor: LP
 ---
 
 # UC-JAIK: Reclaim Deposit
 
-> LP recovers USDC by presenting a signed mint intent after the Operator fails to fulfill it within RECLAIM_TIMELOCK.
+> The LP's Safe recovers the USDC that the Operator escrowed against a mint intent and did not mint, in one call.
 
 ## Preconditions
 
-- Vault is deployed and initialized (Active phase)
-- LP has previously signed an EIP-712 MintIntent and wired USDC to the vault as part of the deposit-then-credit flow
-- The Operator acknowledged the deposit by co-signing the intent
-- The intentId has NOT been fulfilled by mintPositionFor
+- Vault is deployed and initialized, in any phase, paused or not
+- The Operator escrowed the Safe's USDC against `intentId` through `depositForIntent` (FEAT-3ZRI UC-3Z92), so `pendingDeposits[intentId]` names the Safe and the amount
+- The intentId has NOT been consumed by `mintPositionFor` or by a reclaim (`usedIntents[intentId] == false`)
 
 ## Trigger
 
-LP calls `reclaimDeposit(intent, operatorSig)` on the vault.
+The Safe calls `reclaimDeposit(intentId)` on the vault, through a Safe transaction that the owner key signed.
 
 ---
 
-### SC-JAIL: Successful reclaim after timelock
+### SC-JAIL: Successful reclaim in one call
 
 **Given:**
-- LP signed a MintIntent with intentId X and wired usdcAmount to the vault
-- The Operator co-signed intent X (valid operator signature)
-- RECLAIM_TIMELOCK has elapsed since the intent was submitted
-- `usedIntents[X] == false` (not fulfilled, not reclaimed)
+- The Operator escrowed 600 USDC from Safe S against intentId X, so `pendingDeposits[X] = (S, 600, hash)`
+- `usedIntents[X] == false`
+- No Operator has acted since
 
 **Steps:**
-1. LP calls reclaimDeposit with the signed intent and operator signature
-2. System verifies the LP's EIP-712 signature over the MintIntent
-3. System verifies the operator's signature and confirms the signer is a registered operator
-4. System confirms RECLAIM_TIMELOCK has elapsed since intent submission
-5. System marks `usedIntents[X] = true`
-6. System transfers usdcAmount back to the LP
+1. Safe S calls `reclaimDeposit(X)`
+2. System checks `usedIntents[X]` is false, the escrow exists, and the recorded Safe equals msg.sender
+3. System marks `usedIntents[X] = true`, deletes the escrow, and subtracts 600 from totalEscrowed
+4. System transfers 600 USDC to S
 
 **Outcomes:**
-- LP's USDC balance increases by usdcAmount
+- S's USDC balance increases by 600 in the same block, with no wait
 - intentId X is permanently marked as used
 
 **Side Effects:**
 - `usedIntents[X]` set to `true` in storage
-- USDC transferred from vault to LP
-- `DepositReclaimed` event emitted with `intentId, lp, usdcAmount`
+- `pendingDeposits[X]` deleted
+- `totalEscrowed` decreased by 600
+- USDC transferred from vault to S
+- `DepositReclaimed(X, S, 600)` event emitted
 - No position created
+- No `lastOperatorActivityTimestamp` change
 
 ---
 
-### SC-JAIM: Revert before timelock elapses
+### SC-3Z9L: Revert when nothing is escrowed for the intent
 
 **Given:**
-- Valid intent and operator signature
-- RECLAIM_TIMELOCK has NOT elapsed since the intent was submitted
+- No escrow exists for intentId X and `usedIntents[X] == false`
 
 **Steps:**
-1. LP calls reclaimDeposit
-2. System checks elapsed time and finds it below RECLAIM_TIMELOCK
-3. System reverts with TimelockNotElapsed
+1. Any address calls `reclaimDeposit(X)`
+2. System reads the escrow and finds no recorded Safe
 
 **Outcomes:**
-- No USDC transferred
-- intentId remains unused
+- Call reverts with DepositNotEscrowed error
+- A caller who deposited nothing gets nothing, whatever it signed (audit issue 6.1 from the reclaim side)
 
 **Side Effects:**
 - No state changes
+- No USDC transferred
+- No events emitted
+
+---
+
+### SC-45IG: Revert when the caller is not the recorded Safe
+
+**Given:**
+- An escrow is recorded for Safe A under intentId X
+
+**Steps:**
+1. Safe B, the owner key of A, or any other address calls `reclaimDeposit(X)`
+2. System reads the escrow and finds it recorded for A, not the caller
+
+**Outcomes:**
+- Call reverts with NotIntentOwner error
+- A's escrow is untouched and A can still mint or reclaim it
+
+**Side Effects:**
+- No state changes
+- `pendingDeposits[X]` still `(A, amount, hash)`
+- No USDC transferred
 - No events emitted
 
 ---
@@ -76,15 +95,14 @@ LP calls `reclaimDeposit(intent, operatorSig)` on the vault.
 ### SC-JAIN: Revert when intent already fulfilled by mintPositionFor
 
 **Given:**
-- Operator already called mintPositionFor with intentId X
-- `usedIntents[X] == true`
+- Operator already called mintPositionFor with intentId X, which set `usedIntents[X] = true` and deleted the escrow
 
 **Steps:**
-1. LP calls reclaimDeposit with intentId X
+1. Safe S calls `reclaimDeposit(X)`
 2. System checks `usedIntents[X]` and finds it true
-3. System reverts with IntentAlreadyUsed
 
 **Outcomes:**
+- Call reverts with IntentAlreadyUsed error
 - No USDC transferred
 
 **Side Effects:**
@@ -92,42 +110,59 @@ LP calls `reclaimDeposit(intent, operatorSig)` on the vault.
 
 ---
 
-### SC-JAIO: Revert on invalid operator signature
+### SC-3ZA0: Reclaim succeeds with no registered operators
 
 **Given:**
-- LP provides a valid self-signed intent
-- The operator signature does not recover to a registered operator address
+- The Operator escrowed Safe S's USDC against intentId X
+- The Admin then removed every Operator from the factory
 
 **Steps:**
-1. LP calls reclaimDeposit with the invalid operator signature
-2. System recovers the signer from the operator signature
-3. System checks `operators[signer]` and finds it is not 1
-4. System reverts with InvalidSignature
+1. Safe S calls `reclaimDeposit(X)`
+2. System refunds the escrow as in SC-JAIL
 
 **Outcomes:**
-- No USDC transferred
-- intentId remains unused
+- S's USDC balance increases by the escrowed amount
+- The exit did not depend on the Operator registry (audit issue 6.13)
 
 **Side Effects:**
-- No state changes
+- Same as SC-JAIL
 
 ---
 
 ### SC-JAIP: Revert on replay (intentId already reclaimed)
 
 **Given:**
-- LP already reclaimed intentId X successfully
-- `usedIntents[X] == true`
+- Safe S already reclaimed intentId X
+- `usedIntents[X] == true` and the escrow is deleted
 
 **Steps:**
-1. LP calls reclaimDeposit with intentId X again
+1. S calls `reclaimDeposit(X)` again
 2. System checks `usedIntents[X]` and finds it true
-3. System reverts with IntentAlreadyUsed
 
 **Outcomes:**
+- Call reverts with IntentAlreadyUsed error
 - No USDC transferred
 
 **Side Effects:**
 - No state changes
+
+---
+
+### SC-9OYE: Reclaim works in every phase and while paused
+
+**Given:**
+- The Operator escrowed Safe S's USDC against intentId X
+
+**Steps:**
+1. The Admin pauses the vault, and S calls `reclaimDeposit(X)`
+2. On a second vault with an escrow, the Oracle calls `startWindDown`, and S calls `reclaimDeposit`
+3. On a third vault with an escrow, `emergencyCancelAll` runs and sets phase 3, and S calls `reclaimDeposit`
+
+**Outcomes:**
+- Every call refunds the escrow as in SC-JAIL
+- The Cancelled phase never locks a pending deposit (audit issue 6.7)
+
+**Side Effects:**
+- Same as SC-JAIL on each vault
 
 ---

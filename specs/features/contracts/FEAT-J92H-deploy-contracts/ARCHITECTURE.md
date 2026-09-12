@@ -2,7 +2,7 @@
 id: FEAT-J92H
 name: Deploy Contracts
 use_cases: [UC-J92I]
-scenarios: [SC-J92J, SC-J92K, SC-J92L, SC-J92M, SC-K49S]
+scenarios: [SC-J92J, SC-J92K, SC-J92L, SC-J92M, SC-K49S, SC-9OY8]
 last_update: 2026-09-12
 ---
 
@@ -18,8 +18,10 @@ C4Context
     Person(owner, "Factory Owner", "Deploys contracts via Foundry script")
     System(script, "Deploy Script", "Foundry Script that deploys LPVault + LPVaultFactory")
     System_Ext(chain, "Polygon Chain", "Amoy testnet or mainnet -- deployment target")
+    System_Ext(safefactory, "Poly Safe factory", "getContractBytecode() and masterCopy(), read before the broadcast")
     System_Ext(explorer, "Block Explorer", "Polygonscan -- contract verification")
     Rel(owner, script, "runs", "forge script")
+    Rel(script, safefactory, "reads the proxy bytecode and hashes it", "RPC view call")
     Rel(script, chain, "broadcasts txs", "RPC")
     Rel(script, explorer, "verifies contracts", "API")
 ```
@@ -53,7 +55,8 @@ C4Container
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `script/Deploy.s.sol` | deploy script | `DeployScript` (Foundry Script contract) |
+| `script/Deploy.s.sol` | deploy script | `DeployScript` (Foundry Script contract), `run()`, `deploy()`, `readSafeProxyBytecodeHash()`, inline `IPolySafeFactory`, `ZeroAddress`, `ZeroBytecodeHash` |
+| `.env.example` | deploy variable set | `SAFE_FACTORY_ADDRESS` with the Polygon and Amoy values |
 | `src/LPVault.sol` | implementation contract | `LPVault` (deployed as implementation) |
 | `src/LPVaultFactory.sol` | factory contract | `LPVaultFactory` (deployed with constructor args) |
 | `foundry.toml` | build configuration | `[profile.default]` `optimizer`, `optimizer_runs` (ADR-9FOM) |
@@ -71,7 +74,8 @@ C4Container
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| CLI | `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --account <name>` | `DeployScript.run()` | cast wallet (`--account`) or hardware wallet (`--ledger`/`--trezor`) | env vars: USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS | stdout: impl address, factory address | revert on zero address, revert on role separation |
+| CLI | `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadcast --account <name>` | `DeployScript.run()` | cast wallet (`--account`) or hardware wallet (`--ledger`/`--trezor`) | env vars: USDC_ADDRESS, EXCHANGE_ADDRESS, CTF_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS, SAFE_FACTORY_ADDRESS | stdout: Safe factory, master copy, proxy bytecode hash, impl address, factory address | revert on zero address, revert on zero hash, revert on role separation |
+| call | `DeployScript.readSafeProxyBytecodeHash(address)` | `readSafeProxyBytecodeHash` | public view | `safeFactory` | `bytes32` hash | none |
 
 ## Integration Points
 
@@ -80,6 +84,7 @@ C4Container
 | System | Protocol | Direction | Purpose |
 |--------|----------|-----------|---------|
 | Polygon RPC | JSON-RPC (HTTP) | outbound | Broadcast deployment transactions |
+| Poly Safe factory | `getContractBytecode()`, `masterCopy()` view calls | outbound, during simulation | The proxy bytecode hash the LP vault factory needs |
 | Polygonscan API | HTTP REST | outbound | Contract source verification (when --verify flag used) |
 
 ## Code Map
@@ -94,6 +99,7 @@ C4Container
 | SC-J92L | Oracle equals operator | `src/LPVaultFactory.sol:constructor()` (RoleSeparation revert) |
 | SC-J92M | Deployment with contract verification | `script/Deploy.s.sol:run()` (--verify flag handled by Foundry) |
 | SC-K49S | Script does not read raw private keys | `script/Deploy.s.sol:run()` |
+| SC-9OY8 | The hash is read from the Safe factory on chain | `script/Deploy.s.sol:readSafeProxyBytecodeHash()`, `script/Deploy.s.sol:deploy()` (ZeroBytecodeHash) |
 
 ## Architecture Decisions
 

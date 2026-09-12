@@ -3,7 +3,7 @@ id: UC-JGEE
 name: Start Wind Down
 feature: FEAT-JGE7
 status: implemented
-version: 1
+version: 3
 actor: Oracle
 ---
 
@@ -81,23 +81,24 @@ Oracle calls `startWindDown()` on the vault.
 
 ---
 
-### SC-JGEI: mintPosition reverts in WindDown
+### SC-JGEI: depositForIntent reverts in WindDown
 
 **Given:**
 - Vault phase is WindDown
+- The owner key signed a valid MintIntent, and the Safe holds and approved the USDC
 
 **Steps:**
-1. Operator calls `mintPosition(tickLower, tickUpper, usdcAmount)` on the vault
+1. Operator calls `depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId, deadline, signature)` on the vault
 2. System checks vault phase
 3. System reverts
 
 **Outcomes:**
-- Transaction reverts with phase error
+- Transaction reverts with VaultNotActive
 
 **Side Effects:**
-- No position created
-- No tick state modified
+- No escrow recorded
 - No USDC transferred
+- No position created
 
 ---
 
@@ -105,19 +106,20 @@ Oracle calls `startWindDown()` on the vault.
 
 **Given:**
 - Vault phase is WindDown
-- Operator has a valid LP-signed EIP-712 mint intent
+- The Operator escrowed an intent before the wind-down, so `pendingDeposits[intentId]` names the Safe
 
 **Steps:**
-1. Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, ...)` on the vault
+1. Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, deadline)` on the vault
 2. System checks vault phase
 3. System reverts
 
 **Outcomes:**
-- Transaction reverts with phase error
+- Transaction reverts with VaultNotActive
 
 **Side Effects:**
 - No position created
 - No intent consumed (`intentId` not marked as used)
+- The escrow stays in place, so the Safe can reclaim it (SC-JGEK)
 - No USDC transferred
 
 ---
@@ -142,7 +144,7 @@ Oracle calls `startWindDown()` on the vault.
 - Position `tokensOwed` zeroed after collect
 - Position liquidity removed from tick state after burn
 - USDC transferred to LP
-- `reclaimDeposit` also succeeds in WindDown (same phase-agnostic behavior)
+- `reclaimDeposit(intentId)` and `reclaimDepositFor` also succeed in WindDown, and `depositForIntent` reverts `VaultNotActive` (no new escrow after the wind-down)
 - No new positions created
 
 ---

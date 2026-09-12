@@ -4,7 +4,7 @@ name: Deploy Contracts
 module: contracts
 domain: "@vault"
 status: implemented
-version: 1
+version: 2
 refs: [FEAT-REPZ]
 ---
 
@@ -28,7 +28,7 @@ refs: [FEAT-REPZ]
 
 ### Environment Configuration
 
-**FR-J92N** `When the Factory Owner runs the deploy script, the system shall read the following addresses from environment variables: USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS.`
+**FR-J92N** `When the Factory Owner runs the deploy script, the system shall read the following addresses from environment variables: USDC_ADDRESS, EXCHANGE_ADDRESS, CTF_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS, SAFE_FACTORY_ADDRESS.`
 Fit Criterion: Given any of the required env vars is unset or zero-address, the script reverts before broadcasting any transaction.
 Linked to: UC-J92I
 
@@ -38,8 +38,8 @@ Linked to: UC-J92I
 
 ### Deployment Sequence
 
-**FR-J92P** `When the deploy script executes, the system shall first deploy the LPVault implementation contract, then deploy the LPVaultFactory with the implementation address and all env-var-sourced addresses as constructor arguments.`
-Fit Criterion: Given valid env vars and a funded deployer, two contracts are deployed in sequence; the factory's `implementation` storage matches the first contract's address; the factory's role registry matches the env-var addresses.
+**FR-J92P** `When the deploy script executes, the system shall read the Safe proxy bytecode hash as keccak256 of getContractBytecode() from the Safe factory on the target chain, log the Safe factory, its master copy, and the hash, then deploy the LPVault implementation contract, then deploy the LPVaultFactory with the implementation address, all env-var-sourced addresses, and the hash as constructor arguments.`
+Fit Criterion: Given valid env vars and a funded deployer, two contracts are deployed in sequence; the factory's `implementation` storage matches the first contract's address; the factory's role registry matches the env-var addresses; the factory's `safeFactory()` and `safeProxyBytecodeHash()` match the Safe factory and the hash read from it; and the logged hash equals the value in the `DEPLOYMENT.md` table for the target chain. A hash read from the live factory cannot be mistyped, and the deployer compares the printed value with the documented one.
 Linked to: UC-J92I
 
 **FR-J92Q** `When the deploy script executes, the system shall call _disableInitializers() in the LPVault implementation's constructor, preventing direct initialization.`
@@ -76,7 +76,7 @@ Linked to: UC-J92I
 
 - The deploy script successfully deploys LPVault implementation + LPVaultFactory to a local Anvil fork
 - All env vars are validated before any transaction is broadcast
-- The factory's on-chain state matches the env-var-provided addresses after deployment
+- The factory's on-chain state matches the env-var-provided addresses after deployment, and its Safe proxy bytecode hash matches the hash read from the Safe factory
 - The implementation contract rejects direct `initialize()` calls
 - The same script works for Polygon Amoy and mainnet by changing only `--rpc-url`
 - Contract verification succeeds on Polygonscan when `--verify` and `ETHERSCAN_API_KEY` are provided

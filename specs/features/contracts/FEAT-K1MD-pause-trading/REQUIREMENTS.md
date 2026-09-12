@@ -4,7 +4,7 @@ name: Pause Trading
 module: contracts
 domain: "@vault"
 status: implemented
-version: 1
+version: 2
 refs: [FEAT-REPZ]
 ---
 
@@ -50,8 +50,8 @@ Linked to: UC-K1MK
 
 ### LP Exit Paths
 
-**FR-K1MI** `While the vault is paused, when the position owner calls collect or reclaimDeposit, the system shall succeed.`
-Fit Criterion: Given paused vault with an existing position, `collect` and `reclaimDeposit` succeed.
+**FR-K1MI** `While the vault is paused, when the position owner calls collect, or the recorded Safe calls reclaimDeposit, or the Operator calls reclaimDepositFor, the system shall succeed.`
+Fit Criterion: Given a paused vault with an existing position and an escrow, `collect`, `reclaimDeposit`, and `reclaimDepositFor` succeed, while `depositForIntent` reverts `TradingIsPaused`.
 Linked to: UC-K1MK
 
 ## Non-Functional Requirements

@@ -3,7 +3,7 @@ id: UC-J92I
 name: Deploy Factory and Implementation
 feature: FEAT-J92H
 status: implemented
-version: 2
+version: 3
 actor: Factory Owner
 ---
 
@@ -14,7 +14,7 @@ actor: Factory Owner
 ## Preconditions
 
 - Factory Owner has a funded wallet on the target chain (Polygon Amoy or mainnet)
-- Environment variables are set: USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS
+- Environment variables are set: USDC_ADDRESS, EXCHANGE_ADDRESS, CTF_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS, SAFE_FACTORY_ADDRESS
 - Factory Owner has a signing method configured: either a `cast` wallet (`--account <name>`) or a hardware wallet (`--ledger` / `--trezor`)
 - RPC_URL points to the target chain
 - Foundry toolchain (forge) is installed
@@ -28,7 +28,8 @@ Factory Owner runs `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadc
 ### SC-J92J: Successful deployment with valid configuration
 
 **Given:**
-- All required env vars (USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS) are set to valid non-zero addresses
+- All required env vars (USDC_ADDRESS, EXCHANGE_ADDRESS, CTF_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS, SAFE_FACTORY_ADDRESS) are set to valid non-zero addresses
+- SAFE_FACTORY_ADDRESS is a deployed Poly Safe factory on the target chain
 - A signing method is provided via CLI flag (`--account`, `--ledger`, or `--trezor`)
 - ORACLE_ADDRESS and OPERATOR_ADDRESS are different addresses
 - The deployer wallet has sufficient native token (MATIC/POL) for gas
@@ -36,17 +37,19 @@ Factory Owner runs `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadc
 **Steps:**
 1. Factory Owner runs the deploy script with `--broadcast`
 2. Script reads and validates all address environment variables (signing is handled by Foundry CLI)
-3. Script deploys the LPVault implementation contract
-4. Script deploys the LPVaultFactory with the implementation address and all env-var addresses
-5. Script logs both deployed addresses to stdout
+3. Script reads `getContractBytecode()` and `masterCopy()` from the Safe factory, hashes the bytecode, and logs the factory, the master copy, and the hash
+4. Script deploys the LPVault implementation contract
+5. Script deploys the LPVaultFactory with the implementation address, all env-var addresses, and the hash
+6. Script logs both deployed addresses to stdout
 
 **Outcomes:**
 - LPVault implementation is deployed and its `initialize()` is permanently disabled
-- LPVaultFactory is deployed with correct role registry (admin, oracle, operator) and external addresses (USDC, exchange, conditionalTokens)
-- Both contract addresses are printed to console
+- LPVaultFactory is deployed with correct role registry (admin, oracle, operator), external addresses (USDC, exchange, conditionalTokens, safeFactory), and the Safe proxy bytecode hash
+- Both contract addresses and the hash are printed to console
 
 **Side Effects:**
 - Two contract creation transactions broadcast to the target chain
+- Two view calls to the Safe factory before the broadcast
 - Foundry broadcast artifacts written to `broadcast/` directory
 - No vault clones created (factory is deployed but no `createVault` is called)
 
@@ -55,7 +58,7 @@ Factory Owner runs `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadc
 ### SC-J92K: Missing environment variable
 
 **Given:**
-- One or more required address env vars (USDC_ADDRESS, EXCHANGE_ADDRESS, CONDITIONAL_TOKENS_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, or OPERATOR_ADDRESS) is unset or set to the zero address
+- One or more required address env vars (USDC_ADDRESS, EXCHANGE_ADDRESS, CTF_ADDRESS, ADMIN_ADDRESS, ORACLE_ADDRESS, OPERATOR_ADDRESS, or SAFE_FACTORY_ADDRESS) is unset or set to the zero address
 
 **Steps:**
 1. Factory Owner runs the deploy script
@@ -69,6 +72,26 @@ Factory Owner runs `forge script script/Deploy.s.sol --rpc-url $RPC_URL --broadc
 **Side Effects:**
 - No transactions broadcast to the chain
 - No broadcast artifacts written
+- No call to the Safe factory
+
+---
+
+### SC-9OY8: The hash is read from the Safe factory on chain
+
+**Given:**
+- A contract at SAFE_FACTORY_ADDRESS exposes `getContractBytecode()` and `masterCopy()`
+
+**Steps:**
+1. The test calls `readSafeProxyBytecodeHash(safeFactory)` on the script with a stub factory that returns known bytes
+2. The script returns `keccak256` of those bytes
+
+**Outcomes:**
+- The returned hash equals the hash the test computes from the same bytes
+- Given a zero hash passed to `deploy()`, the call reverts with `ZeroBytecodeHash`, so a zero hash never reaches the factory
+
+**Side Effects:**
+- One view call to the stub factory
+- No contract deployed on the zero-hash path
 
 ---
 

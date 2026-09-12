@@ -2,7 +2,7 @@
 id: FEAT-REPZ
 name: Deploy LP Vault for a Market
 use_cases: [UC-REQ0, UC-REQ1, UC-REQ2]
-scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5, SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN, SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR, SC-6HBV, SC-6HBW, SC-6HBX, SC-6HBY]
+scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5, SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN, SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR, SC-6HBV, SC-6HBW, SC-6HBX, SC-6HBY, SC-9OY7]
 last_update: 2026-09-12
 ---
 
@@ -68,6 +68,8 @@ erDiagram
         address usdc "immutable"
         address exchange "immutable"
         address conditionalTokens "immutable"
+        address safeFactory "immutable, the Poly Safe factory"
+        bytes32 safeProxyBytecodeHash "immutable, keccak256 of the proxy creation code plus the master copy"
         address oracle "single wallet, set by Admin"
         address pendingAdmin "two-step transfer"
         uint256 adminCount ">=1 always"
@@ -121,6 +123,7 @@ erDiagram
 - `oracle != operators[x]` for any x where `operators[x] == 1` on the factory -- role separation
 - Every vault clone's `factory` storage == the LPVaultFactory address that deployed it
 - Vaults hold no local role state (operators, oracle, admins, pendingAdmin, adminCount) -- all authorization reads delegated to factory
+- Vaults hold no Safe derivation input -- `safeFactory` and `safeProxyBytecodeHash` are read from the factory at call time, and no function on the factory changes them
 - `initialized` flips from false to true exactly once per clone -- never resets
 - All position-creation entry points on the vault are gated by `onlyOperator` -- no direct LP mint path exists
 - When `activeLiquidity == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` or revert -- the first position is always materially large
@@ -139,7 +142,7 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVaultFactory.sol` | Clone deployer + market registry + factory-level Auth + outcome-token identity check before clone deployment | `createVault()`, `_validateOutcomeIdentity()`, `vaultForMarket`, admin/operator/oracle management, `ZeroConditionId`, `ZeroTokenId`, `DuplicateTokenId`, `NotBinaryCondition`, `TokenIdMismatch` |
+| `src/LPVaultFactory.sol` | Clone deployer + market registry + factory-level Auth + outcome-token identity check before clone deployment + the two Safe derivation inputs | `createVault()`, `_validateOutcomeIdentity()`, `vaultForMarket`, `safeFactory`, `safeProxyBytecodeHash`, admin/operator/oracle management, `ZeroConditionId`, `ZeroTokenId`, `DuplicateTokenId`, `NotBinaryCondition`, `TokenIdMismatch`, `ZeroBytecodeHash` |
 | `src/LPVault.sol` | Per-market vault implementation (clone target), with the token ID restriction in the receiver hooks | `initialize()`, `conditionId`, `yesTokenId`, `noTokenId`, `_requireOwnTokenId()`, `UnknownTokenId`, inline `IConditionalTokens`, position/tick/fee state, vault-level Auth |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ0-deploy-factory.t.sol` | Integration tests for Deploy Factory | Factory deployment, role-separation revert, implementation-not-initializable and clone-initializable scenarios, factory and vault modifier checks |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ1-create-vault-for-market.t.sol` | Integration tests for Create Vault for Market | Vault creation, duplicate-market and non-oracle reverts, initialization guards, minimum-first-liquidity floor, ERC-1155 receiver hooks |
@@ -147,6 +150,7 @@ erDiagram
 | `test/fixtures/ConditionalTokensFixture.sol` | Test fixture -- real ConditionalTokens bytecode, binary condition setup, vault creation with a verified identity, complete-set minting for holders | `ITestConditionalTokens`, `_deployConditionalTokens()`, `_prepareBinaryCondition()`, `_createVault()`, `_mintCompleteSets()`, `_binaryPartition()` |
 | `test/fixtures/MockERC20.sol` | Test fixture -- the one USDC mock of the suite | `MockERC20` |
 | `test/fixtures/VaultStorage.sol` | Test fixture -- vault storage writes through forge-std `stdStorage`, with no slot numbers | `setFeeGrowthInsideLast()`, `setFeeGrowthOutside()` |
+| `test/fixtures/LPVaultFixture.sol` | Test fixture -- factory deployment with the made-up Safe derivation constants, signing helpers, Safe derivation, escrow-then-mint | `SAFE_FACTORY`, `SAFE_PROXY_BYTECODE_HASH`, `_deployFactory()`, `_safeOf()`, `_signMintIntent()`, `_signReclaimIntent()`, `_fundSafe()`, `_escrow()`, `_escrowAndMint()` |
 
 ## Event Topology
 
@@ -226,6 +230,7 @@ stateDiagram-v2
 | UC-REQ0 | Deploy Factory | `src/LPVaultFactory.sol:constructor()` |
 | SC-REQ3 | Successful deployment | `src/LPVaultFactory.sol:constructor()` |
 | SC-REQ4 | Oracle equals operator revert | `src/LPVaultFactory.sol:constructor()` |
+| SC-9OY7 | Zero Safe derivation input reverts | `src/LPVaultFactory.sol:constructor()` |
 | SC-REQ5 | Implementation not initializable | `src/LPVault.sol:constructor()` |
 | UC-REQ1 | Create Vault for Market | `src/LPVaultFactory.sol:createVault()`, `src/LPVault.sol:initialize()` |
 | SC-REQ6 | Successful vault creation | `src/LPVaultFactory.sol:createVault()`, `src/LPVault.sol:initialize()` |

@@ -31,4 +31,14 @@
 
 **CTF Exchange** -- The ProphetCTFExchange contract (a Polymarket fork). A CLOB where orders are matched off-chain by an operator and settled atomically on-chain. The exchange pulls maker capital from pre-approved contracts at fill time.
 
-**Intent** -- An off-chain record representing an LP's desire to open a position. The LP creates an intent, sends USDC to the vault address, and the operator calls `mintPositionFor` after verifying the deposit matches the intent.
+**Intent (mint intent)** -- An EIP-712 message that the LP's owner key signs: put `usdcAmount` USDC from this Safe into the range from `tickLower` to `tickUpper`, under a unique `intentId`, before a `deadline`. The Operator escrows the USDC against it with `depositForIntent`, then mints with `mintPositionFor`. The LP never sends USDC to the vault address.
+
+**Safe wallet** -- The Gnosis Safe that Prophet deploys for each user through the Poly Safe factory. The factory derives the Safe's address from its owner key with CREATE2, so any contract can compute a user's Safe from the owner key alone.
+
+**Owner key** -- The externally owned account that owns a user's Safe. It signs every EIP-712 message and every Safe transaction. The Safe itself has no private key.
+
+**Escrow** -- USDC that the vault holds for one mint intent until the Operator mints the position or the Safe reclaims the USDC. The record holds the Safe, the amount, and the intent hash.
+
+**Deadline** -- The last `block.timestamp` at which a signed LP message is valid.
+
+**Reclaim intent** -- An EIP-712 message that the owner key signs to have the Operator relay a reclaim: the Safe, the `intentId`, and a deadline.

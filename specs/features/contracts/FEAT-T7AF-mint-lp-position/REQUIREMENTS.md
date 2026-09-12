@@ -4,19 +4,20 @@ name: Mint LP Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 2
-refs: [FEAT-REPZ]
+version: 3
+refs: [FEAT-REPZ, FEAT-3ZRI, FEAT-JAIJ]
 ---
 
 # Mint LP Position
 
-> Enables operator-gated creation of concentrated-liquidity LP positions via EIP-712 signed intents, with v3-style tick initialization and fee-snapshot anchoring to prevent retroactive fee claims.
+> Enables operator-gated creation of concentrated-liquidity LP positions that consume a per-intent escrow, with v3-style tick initialization and fee-snapshot anchoring to prevent retroactive fee claims.
 
 ## Non-Goals
 
 - Does not handle fee collection -- see feature 5
 - Does not handle position burning -- see feature 6
-- Does not handle deposit-then-credit flow (USDC pre-sent to vault) or reclaimDeposit escape hatch -- see feature 7
+- Does not take USDC or verify a signature -- the escrow does both, see FEAT-3ZRI
+- Does not refund an escrow -- see FEAT-JAIJ
 - Does not handle tick crossing / updateTick -- see feature 4
 - Does not handle fee notification / notifyFees -- see feature 3
 - Does not handle vault wind-down or emergency cancel -- see feature 8
@@ -26,15 +27,27 @@ refs: [FEAT-REPZ]
 
 | Actor | Role | Notes |
 |-------|------|-------|
-| Operator | Executes the LP's signed mint intent on-chain | Gated by `onlyOperator` modifier; pulls USDC from LP's wallet via transferFrom |
-| LP | Signs EIP-712 mint intent off-chain | Their wallet is the USDC source; position ownership recorded as LP address |
+| Operator | Mints the position that an escrowed intent authorizes | Gated by `onlyOperator` modifier; moves no USDC and verifies no signature; the escrow (FEAT-3ZRI) did both |
+| LP | Owner of the Safe that the escrow names | The Safe is the position owner; the owner key signed the MintIntent at the deposit |
 
 ## Functional Requirements
 
 ### Position Creation
 
-**FR-T7AS** `When the Operator submits a valid EIP-712 mint intent signed by an LP, the system shall pull usdcAmount USDC from the LP's wallet via transferFrom, compute liquidity as usdcAmount * PRECISION / (tickUpper - tickLower), create a position record with feeGrowthInsideLastX128 snapshot, and emit a PositionMinted event.`
-Fit Criterion: Given a valid intent with matching signature, the LP's USDC balance decreases by usdcAmount, a position record exists at the assigned positionId with correct tickLower, tickUpper, liquidity, and feeGrowthInsideLastX128, and a PositionMinted event is emitted with the correct fields.
+**FR-T7AS** `When the Operator submits a mint intent whose escrow the vault holds for the named Safe, the system shall consume that escrow, subtract its amount from totalEscrowed, compute liquidity as usdcAmount * PRECISION / (tickUpper - tickLower), create a position record owned by the Safe with a feeGrowthInsideLastX128 snapshot, and emit a PositionMinted event.`
+Fit Criterion: Given an escrowed intent, the vault's USDC balance does not change, `pendingDeposits[intentId]` is deleted, `totalEscrowed` falls by the escrowed amount, a position record exists at the assigned positionId with owner = the Safe and correct tickLower, tickUpper, liquidity, and feeGrowthInsideLastX128, and a PositionMinted event is emitted with the correct fields.
+Linked to: UC-T7AG
+
+**FR-3Z9W** `If the Operator submits a mint intent whose recomputed struct hash (lp, tickLower, tickUpper, usdcAmount, intentId, deadline) does not equal the hash recorded in the intent's escrow, then the system shall revert.`
+Fit Criterion: Any changed range, amount, or deadline reverts with `IntentMismatch`. The mint verifies no signature and reads no clock: the deadline is an argument only because the hash needs it, so a deposit made near its deadline can still mint.
+Linked to: UC-T7AG
+
+**FR-45ID** `If the Operator submits a mint intent for a Safe that is not the escrow entry's recorded depositor, then the system shall revert.`
+Fit Criterion: Given `pendingDeposits[intentId].lp == A`, a mint naming Safe B reverts with `NotIntentOwner` before the hash compare, so a foreign claim reports ownership and not a mismatch. A valid signature does not prove who owns an intentId, and the mint checks no signature at all, so the recorded Safe is the only ownership proof.
+Linked to: UC-T7AG
+
+**FR-3ZVK** `When a mint consumes an intent's escrow, the system shall set usedIntents[intentId], delete pendingDeposits[intentId], and reduce totalEscrowed before it performs any external call.`
+Fit Criterion: The mint performs no external call at all. The escrow is deleted in the same call that reads it, so a reclaim of the same intentId after the mint reverts (ADR-JAIY).
 Linked to: UC-T7AG
 
 **FR-T7AT** `When a position is minted, the system shall set feeGrowthInsideLastX128 to the current feeGrowthInside computed for the position's [tickLower, tickUpper] range, preventing the position from claiming pre-existing fees.`
@@ -63,22 +76,26 @@ Linked to: UC-T7AG
 
 ### EIP-712 Intent Verification
 
-**FR-T7AY** `When the Operator submits a mint intent, the system shall verify the LP's EIP-712 signature over a MintIntent typed struct containing lp, tickLower, tickUpper, usdcAmount, and intentId, using the domain separator cached at initialize() and recomputed on chainId mismatch.`
-Fit Criterion: Given a valid signature from the LP's private key over the correct MintIntent struct and domain separator, the mint proceeds. Given any other signer or tampered fields, the call reverts.
-Linked to: UC-T7AG
+**FR-T7AY** `When the Operator escrows a mint intent, the system shall verify an EIP-712 signature over a MintIntent typed struct containing lp, tickLower, tickUpper, usdcAmount, intentId, and deadline, using the domain separator cached at initialize() and recomputed on chainId mismatch, and shall accept the signature only when the Safe address derived from the recovered signer equals lp.`
+Fit Criterion: Given a signature from the owner key of the Safe named as `lp`, over the correct MintIntent struct and domain separator, the deposit proceeds. Given a signer whose derived Safe is not `lp`, given `lp` equal to the signer's own address, or given tampered fields, the call reverts with `InvalidSignature`. The mint itself verifies no signature (FR-3Z9W).
+Linked to: UC-T7AG, UC-3Z92
+
+**FR-9OYJ** `When the vault verifies any LP-signed EIP-712 message (MintIntent, ReclaimIntent, and every later LP type), the system shall reject the message when block.timestamp is greater than the message's deadline.`
+Fit Criterion: A message with `deadline == block.timestamp` is accepted, and one with `deadline == block.timestamp - 1` reverts with `IntentExpired`. The check tolerates Polygon's ±15 second block timestamp variance, which the NatSpec at each check documents.
+Linked to: UC-3Z92, UC-3Z93
 
 **FR-T7AZ** `When verifying a signature, the system shall reject signatures with s values above secp256k1n/2 and v values outside {27, 28}.`
-Fit Criterion: Given a malleable signature (high-s or v != 27/28), the call reverts with an InvalidSignature error.
-Linked to: UC-T7AG
+Fit Criterion: Given a malleable signature (high-s or v != 27/28), the call reverts with an InvalidSignature error. One internal `_recoverSigner` applies the rule to every LP signature.
+Linked to: UC-3Z92, UC-3Z93
 
 **FR-T7B0** `When initialize() is called on a vault clone, the system shall compute and cache the EIP-712 domain separator and the chain ID. While block.chainid differs from the cached chain ID, the system shall recompute the domain separator dynamically.`
 Fit Criterion: Given a chain fork that changes chainId, signatures produced with the original chainId are rejected and signatures produced with the forked chainId are accepted.
-Linked to: UC-T7AG
+Linked to: UC-3Z92
 
 ### Replay Protection
 
 **FR-T7B1** `When a mint intent is executed, the system shall record the intentId in a used-intents mapping. If the same intentId has been used before, then the system shall revert.`
-Fit Criterion: Given an intentId that has already been used in a successful mint, a second call with the same intentId reverts with an IntentAlreadyUsed error.
+Fit Criterion: Given an intentId that has already been used in a successful mint or reclaim, a second call with the same intentId reverts with an IntentAlreadyUsed error, before the escrow is read.
 Linked to: UC-T7AG
 
 ### Validation
@@ -107,11 +124,11 @@ Linked to: UC-T7AG
 
 ## Non-Functional Requirements
 
-**NFR-T7B6** Gas: `When an Operator mints a position (including tick initialization and USDC transfer), the total gas cost shall remain below 300,000 gas on Polygon.`
+**NFR-T7B6** Gas: `When an Operator mints a position (including tick initialization), the total gas cost shall remain below 300,000 gas on Polygon.`
 
-**NFR-T7B7** Security: `The system shall apply an inline nonReentrant modifier to the mint function to prevent reentrancy via the USDC transferFrom callback.`
+**NFR-T7B7** Security: `The system shall apply an inline nonReentrant modifier to the mint function as defense in depth: the mint makes no external call, and the guard keeps position, tick, and activeLiquidity state closed to any guarded path that re-enters, so a later revision that adds an external call cannot inherit an unguarded function.`
 
-**NFR-T7B8** Security: `The system shall follow checks-effects-interactions ordering in the mint function: validate inputs and verify signature first, update position and tick state second, perform the external USDC transferFrom last.`
+**NFR-T7B8** Security: `The system shall follow checks-effects-interactions ordering in the mint function: validate inputs and confirm that the escrow names this Safe and this intent hash first; then set usedIntents, delete the escrow, reduce totalEscrowed, and update position, tick, and activeLiquidity state. The mint performs no external call.`
 
 ## Acceptance
 
@@ -122,7 +139,8 @@ Linked to: UC-T7AG
 - First mint below minimumFirstLiquidity reverts when activeLiquidity == 0 (FR-RFS7 from FEAT-REPZ verified in scenario SC-T7AO)
 - Positions minted at time T cannot claim fees from before T (fuzz test on feeGrowthInsideLastX128 snapshot)
 - Tick initialization is correct for both below-current and above-current ticks (fuzz test)
-- EIP-712 signature verification rejects malleability and wrong signers
+- The mint consumes exactly the recorded escrow and reverts `DepositNotEscrowed`, `NotIntentOwner`, and `IntentMismatch` in that order of precedence
+- The owner-key signature check at the deposit rejects malleability and a key that derives a different Safe
 - Replay protection prevents double-use of intentId
 - activeLiquidity updates only for in-range positions
 - Inline nonReentrant guard on mint function

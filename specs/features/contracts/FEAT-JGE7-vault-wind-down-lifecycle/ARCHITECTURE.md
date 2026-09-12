@@ -3,7 +3,7 @@ id: FEAT-JGE7
 name: Vault Wind-Down Lifecycle
 use_cases: [UC-JGEE]
 scenarios: [SC-JGEF, SC-JGEG, SC-JGEH, SC-JGEI, SC-JGEJ, SC-JGEK]
-last_update: 2026-07-02
+last_update: 2026-09-12
 ---
 
 # Architecture: Vault Wind-Down Lifecycle
@@ -22,7 +22,7 @@ C4Context
     System(factory, "LPVaultFactory", "Oracle authorization delegation")
     Rel(oracle, vault, "startWindDown()", "contract call")
     Rel(lp, vault, "collect/burnPosition/reclaimDeposit", "contract call")
-    Rel(operator, vault, "mintPositionFor (reverts in WindDown)", "contract call")
+    Rel(operator, vault, "depositForIntent and mintPositionFor (revert in WindDown)", "contract call")
     Rel(vault, factory, "onlyOracle check", "cross-contract call")
 ```
 
@@ -54,8 +54,8 @@ erDiagram
 
 **Invariants:**
 - `phase` transitions only from Active(1) to WindDown(2) -- never reverses
-- Once `phase == WindDown`, `mintPositionFor` always reverts (existing `VaultNotActive` guard; `mintPosition` does not exist as a function)
-- Once `phase == WindDown`, `collect` and `reclaimDeposit` continue to succeed (`burnPosition` is a future feature, not yet implemented)
+- Once `phase == WindDown`, `depositForIntent` and `mintPositionFor` always revert (the `VaultNotActive` guard at the top of each)
+- Once `phase == WindDown`, `collect`, `reclaimDeposit`, and `reclaimDepositFor` continue to succeed, and `depositForIntent` reverts (`burnPosition` is a future feature, not yet implemented)
 - `startWindDown()` is callable only by the Oracle and only when `phase == Active`
 
 ## Component Inventory
@@ -64,7 +64,7 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | Per-market vault with phase state machine | `startWindDown()`, `VaultWindDownStarted` event; existing phase check in `mintPositionFor` at line 429 |
+| `src/LPVault.sol` | Per-market vault with phase state machine | `startWindDown()`, `VaultWindDownStarted` event; the `phase != 1` guard in `depositForIntent` and `mintPositionFor` |
 | `src/LPVaultFactory.sol` | Oracle registry for auth delegation | `oracle()` (read by vault's `onlyOracle`) |
 | `test/LPVault.t.sol` | Unit + integration tests for wind-down | Wind-down transition, phase gating, exit path scenarios |
 
@@ -121,9 +121,9 @@ stateDiagram-v2
 | SC-JGEF | Successful wind-down transition | `src/LPVault.sol:startWindDown()` |
 | SC-JGEG | Revert when phase is not Active | `src/LPVault.sol:startWindDown()` |
 | SC-JGEH | Revert when non-Oracle calls | `src/LPVault.sol:startWindDown()`, `src/LPVaultFactory.sol:oracle()` |
-| SC-JGEI | mintPosition reverts in WindDown | `src/LPVault.sol:mintPositionFor()` (mintPosition does not exist; SC subsumed by SC-JGEJ) |
+| SC-JGEI | depositForIntent reverts in WindDown | `src/LPVault.sol:depositForIntent()` (phase guard) |
 | SC-JGEJ | mintPositionFor reverts in WindDown | `src/LPVault.sol:mintPositionFor()` |
-| SC-JGEK | Exit paths succeed in WindDown | `src/LPVault.sol:collect()`, `src/LPVault.sol:reclaimDeposit()` (burnPosition not yet implemented) |
+| SC-JGEK | Exit paths succeed in WindDown | `src/LPVault.sol:collect()`, `src/LPVault.sol:reclaimDeposit()`, `src/LPVault.sol:reclaimDepositFor()`, `src/LPVault.sol:depositForIntent()` (VaultNotActive; burnPosition not yet implemented) |
 
 ## Architecture Decisions
 

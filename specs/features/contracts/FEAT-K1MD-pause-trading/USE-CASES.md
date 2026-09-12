@@ -6,4 +6,4 @@
 
 | ID | Name | Status | Description | File |
 |----|------|--------|-------------|------|
-| UC-K1MK | Pause and Unpause Vault | pending | Admin toggles the pause flag to halt trading functions while keeping LP exit paths open | [UC-K1MK-pause-and-unpause-vault.md](UC-K1MK-pause-and-unpause-vault.md) |
+| UC-K1MK | Pause and Unpause Vault | implemented | Admin toggles the pause flag to halt trading functions while keeping LP exit paths open | [UC-K1MK-pause-and-unpause-vault.md](UC-K1MK-pause-and-unpause-vault.md) |

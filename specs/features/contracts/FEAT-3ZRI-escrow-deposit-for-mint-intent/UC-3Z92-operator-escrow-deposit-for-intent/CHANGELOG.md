@@ -1,0 +1,4 @@
+TODO:
+
+DONE:
+- 20260912T200447 [implemented] command:spec plan:20260912T200119-per-intent-escrow-safe-signatures-r5 — Add the per-intent escrow feature (audit NM-0986 issues 6.1 and 6.2, decisions C1, C23, and C25, step R5). The Operator calls depositForIntent with the owner key's MintIntent signature, which now carries a deadline. The vault requires that the Safe derived from the recovered signer through the factory's Safe derivation inputs equals lp, records the Safe, the amount, and the intent's struct hash under the intentId, adds the amount to totalEscrowed, and pulls the USDC from the Safe. The deposit checks the range and the alignment through the shared _requireValidRange. A plain USDC transfer is never a deposit. The IDs FEAT-3ZRI, UC-3Z92, SC-3Z94 to SC-3Z9B, SC-45IB, FR-3Z9M to FR-3Z9V, FR-45I9, FR-45IA, NFR-3Z9T, NFR-3Z9U, ADR-3Z9Y, ADR-45IC, and ADR-3Z9Z are reused from branch escrow. New: SC-9OY9 to SC-9OYD, FR-9OYK to FR-9OYN.

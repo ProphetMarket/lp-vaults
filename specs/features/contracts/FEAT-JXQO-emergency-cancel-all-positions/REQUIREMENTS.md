@@ -4,7 +4,7 @@ name: Emergency Cancel All Positions
 module: contracts
 domain: "@vault"
 status: implemented
-version: 3
+version: 4
 refs: [FEAT-REPZ, FEAT-JGE7, FEAT-TVS0]
 ---
 
@@ -61,8 +61,8 @@ Linked to: UC-JXQW
 
 ### Cancelled Phase Gating
 
-**FR-JXQT** `While the vault phase is Cancelled (3), when any address calls any state-changing function, the system shall revert.`
-Fit Criterion: Given `phase == 3`, calls to `mintPositionFor`, `collect`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat`, `startWindDown`, `reclaimDeposit`, and `emergencyCancelAll` all revert.
+**FR-JXQT** `While the vault phase is Cancelled (3), when any address calls any state-changing function other than a deposit reclaim, the system shall revert.`
+Fit Criterion: Given `phase == 3`, calls to `mintPositionFor`, `depositForIntent`, `collect`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat`, `startWindDown`, and `emergencyCancelAll` all revert. `reclaimDeposit` and `reclaimDepositFor` succeed (FEAT-JAIJ FR-9OYO), so the Cancelled phase never locks a pending deposit.
 Linked to: UC-JXQW
 
 ## Non-Functional Requirements
