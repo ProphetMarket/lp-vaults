@@ -35,9 +35,17 @@ interface IERC20 {
     function approve(address spender, uint256 amount) external returns (bool);
 }
 
-/// @dev Minimal ERC-1155 interface — only setApprovalForAll for exchange setup.
-interface IERC1155 {
+/// @dev Minimal Gnosis ConditionalTokens interface — only the calls this repo makes.
+///      Collateral is typed `address`, so it does not clash with the inline IERC20 above.
+///      LPVaultFactory imports it from this file.
+interface IConditionalTokens {
     function setApprovalForAll(address operator, bool approved) external;
+    function getOutcomeSlotCount(bytes32 conditionId) external view returns (uint256);
+    function getCollectionId(bytes32 parentCollectionId, bytes32 conditionId, uint256 indexSet)
+        external
+        view
+        returns (bytes32);
+    function getPositionId(address collateralToken, bytes32 collectionId) external pure returns (uint256);
 }
 
 /// @dev Minimal factory interface for auth delegation (FR-FKD0, FR-FKD1, FR-FKD2).
@@ -93,6 +101,18 @@ contract LPVault {
 
     // would be immutable in a non-clone contract; storage because EIP-1167.
     address public conditionalTokens;
+
+    // FR-REQN: condition ID of the market, verified by LPVaultFactory before the clone exists (ADR-6HBU)
+    // would be immutable in a non-clone contract; storage because EIP-1167.
+    bytes32 public conditionId;
+
+    // Index set 1 (YES) position ID of (usdc, conditionId)
+    // would be immutable in a non-clone contract; storage because EIP-1167.
+    uint256 public yesTokenId;
+
+    // Index set 2 (NO) position ID of (usdc, conditionId)
+    // would be immutable in a non-clone contract; storage because EIP-1167.
+    uint256 public noTokenId;
 
     // would be immutable in a non-clone contract; storage because EIP-1167.
     int24 public tickSpacing;
@@ -269,6 +289,7 @@ contract LPVault {
     error InsufficientPositions();
     error TradingIsPaused();
     error NotConditionalTokens();
+    error UnknownTokenId();
 
     // ──────────────────────────────────────────────
     // Events
@@ -410,9 +431,13 @@ contract LPVault {
     ///      must match msg.sender — defense-in-depth beyond the one-shot initializer.
     ///      Role state (operators, oracle, admins) is NOT copied from the factory.
     ///      The vault reads role state from the factory at call time via ILPVaultFactory.
+    ///      No identity check runs here: only the factory can call initialize(), and the
+    ///      factory verifies conditionId, yesTokenId, and noTokenId before it deploys the clone.
     ///      Approval scope: setApprovalForAll(exchange, true) on the ConditionalTokens
-    ///      is acceptable BECAUSE the vault holds outcome tokens for exactly one market —
-    ///      token IDs for other markets cannot enter the vault (no entry point exists).
+    ///      is acceptable BECAUSE the vault holds outcome tokens for exactly one market.
+    ///      The receiver hooks enforce this: they revert on every token ID other than
+    ///      yesTokenId and noTokenId, which the factory verified at createVault, so the
+    ///      unscoped approval covers this market's two tokens only.
     /// @param marketId_ Unique market identifier from the CTF Exchange
     /// @param usdc_ USDC ERC-20 address
     /// @param exchange_ ProphetCTFExchange address
@@ -421,6 +446,9 @@ contract LPVault {
     /// @param factory_ Factory contract address — must equal msg.sender
     /// @param minimumFirstLiquidity_ Floor for the first mint when activeLiquidity == 0
     /// @param version_ Implementation version from the factory's counter
+    /// @param conditionId_ ConditionalTokens condition ID of the market
+    /// @param yesTokenId_ Index set 1 (YES) position ID of (usdc, conditionId)
+    /// @param noTokenId_ Index set 2 (NO) position ID of (usdc, conditionId)
     function initialize(
         bytes32 marketId_,
         address usdc_,
@@ -429,7 +457,10 @@ contract LPVault {
         int24 tickSpacing_,
         address factory_,
         uint128 minimumFirstLiquidity_,
-        uint256 version_
+        uint256 version_,
+        bytes32 conditionId_,
+        uint256 yesTokenId_,
+        uint256 noTokenId_
     ) external initializer {
         // Factory guard: caller must be the factory that deployed this clone
         if (msg.sender != factory_) revert NotFactory();
@@ -442,6 +473,9 @@ contract LPVault {
         usdc = usdc_;
         exchange = exchange_;
         conditionalTokens = conditionalTokens_;
+        conditionId = conditionId_;
+        yesTokenId = yesTokenId_;
+        noTokenId = noTokenId_;
         tickSpacing = tickSpacing_;
         minimumFirstLiquidity = minimumFirstLiquidity_;
         implementationVersion = version_;
@@ -462,43 +496,60 @@ contract LPVault {
 
         // Pre-approve the exchange to spend USDC and outcome tokens on behalf of this vault
         IERC20(usdc_).approve(exchange_, type(uint256).max);
-        IERC1155(conditionalTokens_).setApprovalForAll(exchange_, true);
+        IConditionalTokens(conditionalTokens_).setApprovalForAll(exchange_, true);
     }
 
     // ──────────────────────────────────────────────
-    // ERC-1155 reception (FR-3WLI, FR-3WLJ, FR-3WLK)
+    // ERC-1155 reception (FR-3WLI, FR-3WLJ, FR-3WLK, FR-6HBT)
     // ──────────────────────────────────────────────
 
-    // SC-3WLL, SC-3WLN: acknowledge single outcome-token transfers from this vault's CTF
-    /// @notice Accepts a single ERC-1155 outcome token transfer into the vault.
+    // SC-3WLL, SC-3WLN, SC-6HBY: acknowledge single transfers of this vault's two outcome tokens from its CTF
+    /// @notice Accepts a single ERC-1155 transfer of the vault's YES or NO token.
     /// @dev Stateless by design. The vault's position, tick, and fee accounting is driven
-    ///      by mintPositionFor, burnPosition, collect, and notifyFees — never by observing
-    ///      an inbound transfer — so this hook deliberately records nothing. Reconciling
-    ///      raw token balances against position accounting is the Operator's off-chain job.
+    ///      by mintPositionFor, collect, and notifyFees — never by observing an inbound
+    ///      transfer — so this hook deliberately records nothing. Reconciling raw token
+    ///      balances against position accounting is the Operator's off-chain job.
     ///      No nonReentrant guard: the hook mutates nothing and makes no external call, and
     ///      guarding it would revert legitimate transfers that occur inside an already-
     ///      guarded vault call.
+    ///      Reverts UnknownTokenId for any ID other than yesTokenId and noTokenId. The hook never
+    ///      merges: it runs inside the exchange's settlement transaction, so a revert there
+    ///      reverts the match (ADR-3WLP).
     /// @return The ERC-1155 single-transfer acknowledgement value.
-    function onERC1155Received(address, address, uint256, uint256, bytes calldata)
+    function onERC1155Received(address, address, uint256 id, uint256, bytes calldata)
         external
         view
         onlyConditionalTokens
         returns (bytes4)
     {
+        _requireOwnTokenId(id, yesTokenId, noTokenId);
         return 0xf23a6e61;
     }
 
-    // SC-3WLM, SC-3WLN: acknowledge batch outcome-token transfers from this vault's CTF
-    /// @notice Accepts a batch ERC-1155 outcome token transfer into the vault.
-    /// @dev Stateless for the same reasons as onERC1155Received above.
+    // SC-3WLM, SC-3WLN, SC-6HBY: acknowledge batch transfers of this vault's two outcome tokens from its CTF
+    /// @notice Accepts a batch ERC-1155 transfer drawn from the vault's YES and NO tokens.
+    /// @dev Stateless for the same reasons as onERC1155Received above. Reverts UnknownTokenId
+    ///      when any element of `ids` is outside {yesTokenId, noTokenId}.
     /// @return The ERC-1155 batch-transfer acknowledgement value.
-    function onERC1155BatchReceived(address, address, uint256[] calldata, uint256[] calldata, bytes calldata)
+    function onERC1155BatchReceived(address, address, uint256[] calldata ids, uint256[] calldata, bytes calldata)
         external
         view
         onlyConditionalTokens
         returns (bytes4)
     {
+        // Both IDs are read once, outside the loop (CLAUDE.md priority 2). The loop has no
+        // length cap: the token contract sets the length, and the sender pays for it.
+        uint256 yesId = yesTokenId;
+        uint256 noId = noTokenId;
+        for (uint256 i = 0; i < ids.length; i++) {
+            _requireOwnTokenId(ids[i], yesId, noId);
+        }
         return 0xbc197c81;
+    }
+
+    /// @dev Reverts unless `id` is one of the vault's two outcome token IDs (FR-6HBT).
+    function _requireOwnTokenId(uint256 id, uint256 yesId, uint256 noId) internal pure {
+        if (id != yesId && id != noId) revert UnknownTokenId();
     }
 
     // SC-3WLO: ERC-165 reporting so callers that probe before transferring proceed

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
-import {LPVault} from "./LPVault.sol";
+import {LPVault, IConditionalTokens} from "./LPVault.sol";
 
 // FEAT-REPZ: Deploy LP Vault for a Market
 // UC-REQ0: Deploy Factory, UC-REQ1: Create Vault for Market, UC-REQ2: Manage Roles on Factory
@@ -97,6 +97,13 @@ contract LPVaultFactory {
     error ScheduleAlreadyPending();
     error TimelockNotElapsed();
 
+    // SC-6HBV, SC-6HBW, SC-6HBX: one error per outcome-token identity defect
+    error ZeroConditionId();
+    error ZeroTokenId();
+    error DuplicateTokenId();
+    error NotBinaryCondition();
+    error TokenIdMismatch();
+
     // ──────────────────────────────────────────────
     // Events
     // ──────────────────────────────────────────────
@@ -179,23 +186,34 @@ contract LPVaultFactory {
     // Vault lifecycle
     // ──────────────────────────────────────────────
 
-    // SC-REQ6, SC-REQ7, SC-REQ8, SC-RG74: create and initialize a new vault clone
+    // SC-REQ6, SC-REQ7, SC-REQ8, SC-RG74, SC-6HBV, SC-6HBW, SC-6HBX: create and initialize a new vault clone
     /// @notice Deploys an EIP-1167 minimal-proxy clone of the LPVault implementation,
     ///         initializes it for the given market, and registers it in vaultForMarket.
+    /// @dev The outcome-token identity is verified before the clone exists, because a clone can
+    ///      never correct its identity after initialize() (ADR-6HBU).
     /// @param marketId_ Unique market identifier — must not already have a vault
     /// @param tickSpacing_ Minimum tick increment for concentrated-liquidity positions
     /// @param minimumFirstLiquidity_ Floor for the first mint — must be > 0
+    /// @param conditionId_ ConditionalTokens condition ID of the market — a prepared 2-outcome condition
+    /// @param yesTokenId_ Index set 1 (YES) position ID of (usdc, conditionId_)
+    /// @param noTokenId_ Index set 2 (NO) position ID of (usdc, conditionId_)
     /// @return vault Address of the newly-deployed vault clone
-    function createVault(bytes32 marketId_, int24 tickSpacing_, uint128 minimumFirstLiquidity_)
-        external
-        onlyOracle
-        returns (address vault)
-    {
+    function createVault(
+        bytes32 marketId_,
+        int24 tickSpacing_,
+        uint128 minimumFirstLiquidity_,
+        bytes32 conditionId_,
+        uint256 yesTokenId_,
+        uint256 noTokenId_
+    ) external onlyOracle returns (address vault) {
         // Enforce minimum first liquidity > 0
         if (minimumFirstLiquidity_ == 0) revert ZeroFloor();
 
         // Prevent duplicate vaults for the same market
         if (vaultForMarket[marketId_] != address(0)) revert DuplicateMarket();
+
+        // Prove the identity names this market's two outcome tokens
+        _validateOutcomeIdentity(conditionId_, yesTokenId_, noTokenId_);
 
         // Deploy EIP-1167 minimal proxy clone
         vault = _createClone(implementation);
@@ -213,10 +231,37 @@ contract LPVaultFactory {
                 tickSpacing_,
                 address(this),
                 minimumFirstLiquidity_,
-                implementationVersion
+                implementationVersion,
+                conditionId_,
+                yesTokenId_,
+                noTokenId_
             );
 
         emit VaultCreated(marketId_, vault, minimumFirstLiquidity_);
+    }
+
+    // SC-6HBV, SC-6HBW, SC-6HBX: outcome-token identity check (FR-6HBQ, FR-6HBR, FR-6HBS)
+    /// @dev Reverts unless the identity names the two outcome tokens of a prepared binary condition
+    ///      with USDC collateral and parentCollectionId == bytes32(0), the only market shape Prophet's
+    ///      Resolution.sol prepares. Index set 1 is YES and index set 2 is NO, as in Resolution.sol
+    ///      (payout [1,0] means YES wins), so a swapped pair reverts. The three value checks are
+    ///      redundant for safety, because the two contract checks below also reject those inputs.
+    ///      They stay because each names the wrong argument and reverts before any external call.
+    function _validateOutcomeIdentity(bytes32 conditionId_, uint256 yesTokenId_, uint256 noTokenId_) private view {
+        if (conditionId_ == bytes32(0)) revert ZeroConditionId();
+        if (yesTokenId_ == 0 || noTokenId_ == 0) revert ZeroTokenId();
+        if (yesTokenId_ == noTokenId_) revert DuplicateTokenId();
+
+        IConditionalTokens ctf = IConditionalTokens(conditionalTokens);
+
+        // An unprepared condition returns 0. The complete-set merge and the redemption use the
+        // partition [1, 2], which mints a third token instead of paying USDC on a condition with
+        // 3 or more outcomes.
+        if (ctf.getOutcomeSlotCount(conditionId_) != 2) revert NotBinaryCondition();
+
+        uint256 expectedYes = ctf.getPositionId(usdc, ctf.getCollectionId(bytes32(0), conditionId_, 1));
+        uint256 expectedNo = ctf.getPositionId(usdc, ctf.getCollectionId(bytes32(0), conditionId_, 2));
+        if (yesTokenId_ != expectedYes || noTokenId_ != expectedNo) revert TokenIdMismatch();
     }
 
     // ──────────────────────────────────────────────
