@@ -258,7 +258,6 @@ contract LPVault {
     error SafeCastOverflow();
     error TransferFailed();
     error Reentrancy();
-    error SameTick();
     error TooManyTicksCrossed();
     error NotPositionOwner();
     error PositionNotFound();
@@ -928,13 +927,17 @@ contract LPVault {
     /// @dev OPERATOR TRUST ASSUMPTION: The Operator can call this indefinitely to keep
     ///      `emergencyCancelAll` out of reach without doing any real work. LPs trust the
     ///      Operator not to hold the vault hostage this way. This is the accepted residual
-    ///      risk recorded in ADR-3XU3; it is the inverse of the problem this function solves,
-    ///      which is a genuinely healthy Operator being unable to prove liveness at all on a
-    ///      quiet market, where `updateTick` reverts SameTick and `notifyFees` reverts ZeroAmount.
+    ///      risk recorded in ADR-3XU3.
     ///
-    ///      Deliberately not gated by `whenNotPaused`: a pause is an Admin decision about
-    ///      trading and says nothing about whether the Operator is alive, so a paused vault
-    ///      must not drift toward emergency cancellation while its Operator still responds.
+    ///      This is the refresh path while the vault is paused or wound down, where
+    ///      `updateTick` reverts, and for an Operator with no report to send. On an Active
+    ///      market the keeper's `updateTick` with the current tick refreshes the heartbeat
+    ///      itself (ADR-9J43 in FEAT-TVS0); `notifyFees` reverts ZeroAmount on a quiet market.
+    ///
+    ///      Deliberately not gated by `whenNotPaused` and not gated to the Active phase: a
+    ///      pause is an Admin decision about trading, and a wind-down is an Oracle decision
+    ///      about the market. Neither says whether the Operator is alive, so neither state
+    ///      must drift toward emergency cancellation while its Operator still responds.
     function heartbeat() external onlyOperator touchesHeartbeat {
         // Cancelled vaults have already distributed all funds — nothing left to protect
         if (phase == 3) revert VaultCancelled();
@@ -952,13 +955,21 @@ contract LPVault {
     ///      distribution between positions. This matches the ProphetCTFExchange trust model.
     ///      Crosses every initialized tick between currentTick and newTick, flipping
     ///      feeGrowthOutsideX128 and applying liquidityNet to activeLiquidity.
+    ///      A call with the current tick refreshes only the heartbeat and returns; while
+    ///      the vault is paused or wound down the keeper calls `heartbeat()` instead.
     /// @param newTick The new price tick to set
     function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
         // Phase check: only Active vaults accept tick updates
         if (phase != 1) revert VaultNotActive();
 
         int24 oldTick = currentTick;
-        if (newTick == oldTick) revert SameTick();
+
+        // Unchanged report: the keeper reports every 60 seconds and after fills, and
+        // most markets keep the same price, so this is the normal case. The
+        // touchesHeartbeat modifier has already refreshed the heartbeat. Return with
+        // no crossing, no bitmap read, no other storage write, and no event
+        // (ADR-9J43 in FEAT-TVS0, SC-TVS7).
+        if (newTick == oldTick) return;
 
         bool movingRight = newTick > oldTick;
         uint256 crossCount = 0;
