@@ -8,46 +8,8 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ──────────────────────────────────────────────
-// MockERC20 with transfer and transferFrom support for reclaim tests.
-// Tracks balances and allowances so tests can assert on USDC movement
-// in both directions: vault→LP (reclaim) and LP→vault (mintPositionFor).
-// ──────────────────────────────────────────────
-contract MockERC20 {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        balanceOf[msg.sender] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // ReentrantERC20: malicious ERC-20 that attempts to re-enter
@@ -105,11 +67,10 @@ contract ReentrantERC20 {
 // Deploys factory + vault, provides EIP-712 signing helpers for both
 // LP and operator, and simulates the deposit-then-credit USDC flow.
 // ──────────────────────────────────────────────
-contract ReclaimDepositTestBase is Test {
+contract ReclaimDepositTestBase is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -139,13 +100,12 @@ contract ReclaimDepositTestBase is Test {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
     }
 
     /// @dev Computes the EIP-712 domain separator for the vault.
@@ -557,11 +517,10 @@ contract ReclaimTimelockConstantTest is ReclaimDepositTestBase {
 //          entered) and reverts with Reentrancy. The outer call succeeds
 //          because the reentrant attempt is try-caught inside the token.
 // ──────────────────────────────────────────────
-contract ReclaimReentrancyTest is Test {
+contract ReclaimReentrancyTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     ReentrantERC20 reentrantUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -588,13 +547,12 @@ contract ReclaimReentrancyTest is Test {
 
         LPVault impl = new LPVault();
         reentrantUsdc = new ReentrantERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(reentrantUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(reentrantUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         // Fund vault with USDC (simulating LP deposit)
         reentrantUsdc.mint(address(vault), 2000);

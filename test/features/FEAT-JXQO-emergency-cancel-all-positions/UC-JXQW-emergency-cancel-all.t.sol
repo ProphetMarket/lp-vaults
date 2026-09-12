@@ -8,54 +8,18 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ──────────────────────────────────────────────
-// Minimal ERC-20 mock with transfer + transferFrom + balanceOf + approve.
-// ──────────────────────────────────────────────
-contract MockERC20 {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        balanceOf[msg.sender] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
+import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for emergency cancel scenarios.
 // Deploys factory + vault, mints a position for LP-A, distributes fees.
 // ──────────────────────────────────────────────
-contract EmergencyCancelTestBase is Test {
+contract EmergencyCancelTestBase is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -93,13 +57,12 @@ contract EmergencyCancelTestBase is Test {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         // Mint a position for LP-A: range [0, 100) with 1000 USDC
         mockUsdc.mint(lpA, 1_000_000);
@@ -785,15 +748,14 @@ contract HeartbeatAccessAndPhaseTest is EmergencyCancelTestBase {
 // that produces a wrapped snapshot naturally (already exercised end-to-end
 // in UC-U07A's fee-growth-wraparound regression section), this test
 // constructs the condition
-// directly via vm.store on the position's own feeGrowthInsideLastX128 slot --
+// directly, with a storage write on the position's own feeGrowthInsideLastX128 slot --
 // pinning FR-JXQP's contract precisely: "the payout loop must not revert
 // regardless of how the stored snapshot arrived at that value."
 // ──────────────────────────────────────────────
-contract EmergencyCancelWraparoundTestBase is Test {
+contract EmergencyCancelWraparoundTestBase is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -812,11 +774,6 @@ contract EmergencyCancelWraparoundTestBase is Test {
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
-    // `positions` mapping is storage slot 12 (see src/LPVault.sol's field
-    // order); feeGrowthInsideLastX128 is the struct's 3rd field (slot + 2).
-    uint256 constant POSITIONS_SLOT = 12;
-    uint256 constant FEE_GROWTH_INSIDE_LAST_OFFSET = 2;
-
     uint256 posOrdinary;
     uint256 posWrapped;
 
@@ -825,13 +782,12 @@ contract EmergencyCancelWraparoundTestBase is Test {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         mockUsdc.mint(lp, 1_000_000e18);
         vm.prank(lp);
@@ -877,8 +833,7 @@ contract EmergencyCancelWraparoundTestBase is Test {
     /// @dev Overwrites positions[id].feeGrowthInsideLastX128 directly, bypassing
     ///      the normal mint/collect/merge write paths.
     function _setFeeGrowthInsideLast(uint256 id, uint256 value) internal {
-        bytes32 baseSlot = keccak256(abi.encode(id, POSITIONS_SLOT));
-        vm.store(address(vault), bytes32(uint256(baseSlot) + FEE_GROWTH_INSIDE_LAST_OFFSET), bytes32(value));
+        VaultStorage.setFeeGrowthInsideLast(stdstore, address(vault), id, value);
     }
 
     function _warpPastTimelock() internal {

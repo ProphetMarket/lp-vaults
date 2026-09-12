@@ -9,52 +9,20 @@ import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ──────────────────────────────────────────────
-// Minimal ERC-20 mock with balanceOf, approve, transferFrom.
-// Reused from FEAT-T7AF test patterns.
-// ──────────────────────────────────────────────
-contract MockERC20 {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for notifyFees scenarios.
 // Deploys the full stack (factory + vault clone), mints an in-range position
 // to establish activeLiquidity > 0, and provides helpers for storage manipulation.
 // ──────────────────────────────────────────────
-contract NotifyFeesTestBase is Test {
+contract NotifyFeesTestBase is ConditionalTokensFixture {
     using stdStorage for StdStorage;
 
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -83,13 +51,12 @@ contract NotifyFeesTestBase is Test {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         // Mint a position to establish activeLiquidity > 0.
         // Range [0, 100] with 1000 USDC → liquidity = 1000 * 1e18 / 100 = 10e18.
@@ -305,13 +272,12 @@ contract NotifyFeesNoLiquidityTest is NotifyFeesTestBase {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
     }
 
     // SC-TOGV: reverts with NoActiveLiquidity when activeLiquidity == 0

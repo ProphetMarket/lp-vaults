@@ -9,51 +9,19 @@ import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ──────────────────────────────────────────────
-// MockERC20 with transferFrom support for mint tests.
-// Tracks balances and allowances so tests can assert on USDC movement.
-// ──────────────────────────────────────────────
-contract MockERC20ForMint {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract with shared setup for all mint scenarios.
 // Deploys factory, creates vault, funds LP, and provides EIP-712 signing helper.
 // ──────────────────────────────────────────────
-contract MintPositionTestBase is Test {
+contract MintPositionTestBase is ConditionalTokensFixture {
     using stdStorage for StdStorage;
 
     LPVaultFactory factory;
     LPVault vault;
-    MockERC20ForMint mockUsdc;
-    MockConditionalTokens mockCt;
+    MockERC20 mockUsdc;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -88,14 +56,13 @@ contract MintPositionTestBase is Test {
         lp = vm.addr(LP_PK);
 
         LPVault impl = new LPVault();
-        mockUsdc = new MockERC20ForMint();
-        mockCt = new MockConditionalTokens();
+        mockUsdc = new MockERC20();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         // Fund LP with USDC and approve vault for max spending
         mockUsdc.mint(lp, 100_000);
@@ -134,17 +101,6 @@ contract MintPositionTestBase is Test {
     /// @dev Sets the vault's feeGrowthGlobalX128 via storage manipulation (no notifyFees yet).
     function _setFeeGrowthGlobalX128(uint256 val) internal {
         stdstore.target(address(vault)).sig("feeGrowthGlobalX128()").checked_write(val);
-    }
-
-    /// @dev Sets the vault's phase via direct storage manipulation.
-    ///      phase is a uint8 at slot 5, byte offset 17 (bits 136-143), packed with
-    ///      minimumFirstLiquidity (bytes 0-15) and _initialized (byte 16).
-    function _setPhase(uint8 p) internal {
-        bytes32 slot = bytes32(uint256(5));
-        bytes32 current = vm.load(address(vault), slot);
-        bytes32 mask = ~bytes32(uint256(0xFF) << 136);
-        bytes32 updated = (current & mask) | bytes32(uint256(p) << 136);
-        vm.store(address(vault), slot, updated);
     }
 }
 
@@ -540,8 +496,9 @@ contract MintPositionValidationTest is MintPositionTestBase {
 
     // SC-T7AM: mint on a non-active vault reverts with VaultNotActive
     function test_revertsWhenVaultNotActive() public {
-        // Set phase to WindDown (2) via storage
-        _setPhase(2);
+        // Move the vault to WindDown (phase 2) through the Oracle
+        vm.prank(oracleAddr);
+        vault.startWindDown();
 
         bytes memory sig = _signMintIntent(LP_PK, lp, int24(20), int24(80), 600, keccak256("wd"));
         vm.prank(operatorAddr);

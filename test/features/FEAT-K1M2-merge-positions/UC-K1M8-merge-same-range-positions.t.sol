@@ -8,56 +8,19 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ──────────────────────────────────────────────
-// Minimal ERC-20 mock with balanceOf, approve, transfer, transferFrom.
-// transfer is needed because collect calls _safeTransfer (selector 0xa9059cbb).
-// ──────────────────────────────────────────────
-contract MockERC20 {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        balanceOf[msg.sender] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
+import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for mergePositions scenarios.
 // Deploys the full stack (factory + vault clone), mints two in-range positions
 // owned by the same LP on the same tick range [0, 100), and provides helpers.
 // ──────────────────────────────────────────────
-contract MergePositionsTestBase is Test {
+contract MergePositionsTestBase is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -90,13 +53,12 @@ contract MergePositionsTestBase is Test {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         mockUsdc.mint(lp, 1_000_000);
         vm.prank(lp);
@@ -300,13 +262,12 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         mockUsdc.mint(lp, 1_000_000);
         vm.prank(lp);
@@ -444,15 +405,14 @@ contract MergePositionsAccessControlTest is MergePositionsTestBase {
 // computes the SAME `fresh - snapshot` delta twice -- once for the survivor,
 // once per consumed position -- and each computation independently
 // underflows unless wrapped in unchecked. This test constructs the
-// condition directly via vm.store on the relevant position's
+// condition directly, with a storage write on the relevant position's
 // feeGrowthInsideLastX128 slot, exercising the survivor and the consumed
 // position in separate scenarios so both call sites are proven fixed.
 // ──────────────────────────────────────────────
-contract MergePositionsWraparoundTestBase is Test {
+contract MergePositionsWraparoundTestBase is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -471,21 +431,17 @@ contract MergePositionsWraparoundTestBase is Test {
     bytes32 constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
-    uint256 constant POSITIONS_SLOT = 12;
-    uint256 constant FEE_GROWTH_INSIDE_LAST_OFFSET = 2;
-
     function setUp() public virtual {
         lp = vm.addr(LP_PK);
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         mockUsdc.mint(lp, 1_000_000e18);
         vm.prank(lp);
@@ -531,8 +487,7 @@ contract MergePositionsWraparoundTestBase is Test {
 
     /// @dev Overwrites positions[id].feeGrowthInsideLastX128 directly.
     function _setFeeGrowthInsideLast(uint256 id, uint256 value) internal {
-        bytes32 baseSlot = keccak256(abi.encode(id, POSITIONS_SLOT));
-        vm.store(address(vault), bytes32(uint256(baseSlot) + FEE_GROWTH_INSIDE_LAST_OFFSET), bytes32(value));
+        VaultStorage.setFeeGrowthInsideLast(stdstore, address(vault), id, value);
     }
 }
 

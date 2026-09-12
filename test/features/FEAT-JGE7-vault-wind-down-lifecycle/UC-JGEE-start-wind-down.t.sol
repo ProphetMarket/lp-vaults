@@ -8,55 +8,18 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ──────────────────────────────────────────────
-// Minimal ERC-20 mock with transfer + transferFrom + balanceOf + approve.
-// ──────────────────────────────────────────────
-contract MockERC20 {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        balanceOf[msg.sender] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for wind-down scenarios.
 // Deploys factory + vault clone, mints an in-range position for the LP,
 // and distributes fees so there is a position with claimable fees.
 // ──────────────────────────────────────────────
-contract StartWindDownTestBase is Test {
+contract StartWindDownTestBase is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -90,13 +53,12 @@ contract StartWindDownTestBase is Test {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         // Mint a position: range [0, 100) with 1000 USDC so there's
         // something to collect and an existing position for exit-path tests.

@@ -8,24 +8,8 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ──────────────────────────────────────────────
-// Minimal mocks — stub the ERC-20 and ERC-1155 entry points that
-// LPVault.initialize() calls (approve, setApprovalForAll). The T-002
-// slice extended initialize() with those external calls, so any test
-// that initializes a clone must pass real contract addresses for usdc
-// and conditionalTokens.
-// ──────────────────────────────────────────────
-
-contract MockERC20 {
-    function approve(address, uint256) external pure returns (bool) {
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    function setApprovalForAll(address, bool) external {}
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Test harnesses — expose modifier-gated entry points so the modifier
@@ -163,7 +147,7 @@ contract DeployFactoryOracleEqualsOperatorTest is Test {
 //       (default storage) so the initializer modifier allows the first call.
 //       Also validates that factory is derived from msg.sender.
 // Example: create minimal proxy of impl → call initialize() → all storage set.
-contract CloneInitializeSuccessTest is Test {
+contract CloneInitializeSuccessTest is ConditionalTokensFixture {
     // SC-REQ5: clone initializes successfully (positive counterpart)
     function test_cloneCanBeInitialized() public {
         LPVault impl = new LPVault();
@@ -173,9 +157,10 @@ contract CloneInitializeSuccessTest is Test {
         bytes32 mktId = bytes32(uint256(42));
         address usdcAddr = address(new MockERC20());
         address exchangeAddr = makeAddr("exchange");
-        address ctAddr = address(new MockConditionalTokens());
+        address ctAddr = address(_deployConditionalTokens());
         int24 spacing = int24(10);
         uint128 minLiq = uint128(1000);
+        (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) = _prepareBinaryCondition(mktId, usdcAddr);
 
         // Deploy real factory so vault delegation works (FR-FKD0/1/2)
         LPVaultFactory realFactory = new LPVaultFactory(
@@ -183,7 +168,19 @@ contract CloneInitializeSuccessTest is Test {
         );
 
         vm.prank(address(realFactory));
-        vault.initialize(mktId, usdcAddr, exchangeAddr, ctAddr, spacing, address(realFactory), minLiq, 1);
+        vault.initialize(
+            mktId,
+            usdcAddr,
+            exchangeAddr,
+            ctAddr,
+            spacing,
+            address(realFactory),
+            minLiq,
+            1,
+            conditionId,
+            yesTokenId,
+            noTokenId
+        );
 
         assertEq(vault.factory(), address(realFactory), "factory should be the real factory");
         assertEq(vault.marketId(), mktId, "marketId should match");
@@ -193,6 +190,9 @@ contract CloneInitializeSuccessTest is Test {
         assertEq(vault.oracle(), makeAddr("oracle"), "oracle should delegate to factory");
         assertEq(vault.tickSpacing(), spacing, "tickSpacing should match");
         assertEq(vault.minimumFirstLiquidity(), minLiq, "minimumFirstLiquidity should match");
+        assertEq(vault.conditionId(), conditionId, "conditionId should match");
+        assertEq(vault.yesTokenId(), yesTokenId, "yesTokenId should match");
+        assertEq(vault.noTokenId(), noTokenId, "noTokenId should match");
     }
 
     // SC-REQ5: clone cannot be initialized twice
@@ -202,9 +202,11 @@ contract CloneInitializeSuccessTest is Test {
         LPVault vault = LPVault(clone);
 
         address usdc1 = address(new MockERC20());
-        address ct1 = address(new MockConditionalTokens());
+        address ct1 = address(_deployConditionalTokens());
         address usdc2 = address(new MockERC20());
-        address ct2 = address(new MockConditionalTokens());
+        address ct2 = address(_deployConditionalTokens());
+        (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) =
+            _prepareBinaryCondition(bytes32(uint256(1)), usdc1);
 
         // Deploy real factory so vault delegation works
         LPVaultFactory realFactory = new LPVaultFactory(
@@ -213,13 +215,33 @@ contract CloneInitializeSuccessTest is Test {
 
         vm.prank(address(realFactory));
         vault.initialize(
-            bytes32(uint256(1)), usdc1, makeAddr("exchange"), ct1, int24(10), address(realFactory), uint128(1000), 1
+            bytes32(uint256(1)),
+            usdc1,
+            makeAddr("exchange"),
+            ct1,
+            int24(10),
+            address(realFactory),
+            uint128(1000),
+            1,
+            conditionId,
+            yesTokenId,
+            noTokenId
         );
 
         vm.prank(address(realFactory));
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
         vault.initialize(
-            bytes32(uint256(2)), usdc2, makeAddr("exchange2"), ct2, int24(20), address(realFactory), uint128(2000), 1
+            bytes32(uint256(2)),
+            usdc2,
+            makeAddr("exchange2"),
+            ct2,
+            int24(20),
+            address(realFactory),
+            uint128(2000),
+            1,
+            conditionId,
+            yesTokenId,
+            noTokenId
         );
     }
 
@@ -262,7 +284,10 @@ contract ImplementationNotInitializableTest is Test {
             int24(10),
             address(this),
             uint128(1000),
-            1
+            1,
+            bytes32(uint256(1)),
+            1,
+            2
         );
     }
 }
@@ -333,7 +358,7 @@ contract FactoryModifierTest is Test {
 //       a clone so the vault is in initialized state with a known registry.
 // Why:  The vault's modifiers are also exported (provides). A clone starts
 //       with zero storage, so we initialize it first to set up the registry.
-contract VaultModifierTest is Test {
+contract VaultModifierTest is ConditionalTokensFixture {
     LPVaultHarness vault;
 
     address factoryAddr;
@@ -354,7 +379,9 @@ contract VaultModifierTest is Test {
 
         // Deploy real factory so vault modifier delegation works (FR-FKD0/1/2)
         address usdcAddr = address(new MockERC20());
-        address ctAddr = address(new MockConditionalTokens());
+        address ctAddr = address(_deployConditionalTokens());
+        (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) =
+            _prepareBinaryCondition(bytes32(uint256(1)), usdcAddr);
         realFactory = new LPVaultFactory(
             address(implHarness), usdcAddr, makeAddr("exchange"), ctAddr, admin, oracleAddr, operatorAddr
         );
@@ -370,7 +397,10 @@ contract VaultModifierTest is Test {
                 int24(10),
                 address(realFactory),
                 uint128(1000),
-                1
+                1,
+                conditionId,
+                yesTokenId,
+                noTokenId
             );
         factoryAddr = address(realFactory);
     }

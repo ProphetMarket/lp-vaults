@@ -8,38 +8,9 @@ pragma solidity 0.8.20;
 import {Test, Vm} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ──────────────────────────────────────────────
-// Minimal ERC-20 mock — balanceOf, approve, transferFrom.
-// ──────────────────────────────────────────────
-contract MockERC20 {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
+import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for updateTick scenarios.
@@ -52,11 +23,10 @@ contract MockConditionalTokens {
 //   tick 200: liquidityGross=20e18, liquidityNet=-20e18, feeGrowthOutside=0
 //   currentTick=0, activeLiquidity=10e18
 // ──────────────────────────────────────────────
-contract UpdateTickTestBase is Test {
+contract UpdateTickTestBase is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -83,13 +53,12 @@ contract UpdateTickTestBase is Test {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         // Fund LP and approve vault
         mockUsdc.mint(lp, 1_000_000e18);
@@ -348,11 +317,10 @@ contract UpdateTickNoTicksCrossedTest is UpdateTickTestBase {
 // Why:  Gas griefing prevention. Without the cap, a large price move could
 //       exhaust the block gas limit.
 // ──────────────────────────────────────────────
-contract UpdateTickTooManyTicksTest is Test {
+contract UpdateTickTooManyTicksTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -374,14 +342,13 @@ contract UpdateTickTooManyTicksTest is Test {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
         // Create vault with tickSpacing=1 for dense tick initialization
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(keccak256("many-ticks"), int24(1), uint128(1)));
+        vault = LPVault(_createVault(factory, oracleAddr, keccak256("many-ticks"), int24(1), uint128(1)));
 
         // Fund LP generously
         mockUsdc.mint(lp, 1_000_000e18);
@@ -571,13 +538,9 @@ contract UpdateTickSameTickTest is UpdateTickTestBase {
 contract UpdateTickNotActiveTest is UpdateTickTestBase {
     function setUp() public override {
         super.setUp();
-        // Set phase to 2 (WindDown) via direct storage write.
-        // phase is at slot 5, offset 17 (packed with minimumFirstLiquidity and _initialized).
-        bytes32 slot5 = vm.load(address(vault), bytes32(uint256(5)));
-        // Clear byte at offset 17 and set to 2
-        bytes32 mask = ~(bytes32(uint256(0xFF)) << (17 * 8));
-        bytes32 newVal = (slot5 & mask) | (bytes32(uint256(2)) << (17 * 8));
-        vm.store(address(vault), bytes32(uint256(5)), newVal);
+        // Move the vault to WindDown (phase 2) through the Oracle.
+        vm.prank(oracleAddr);
+        vault.startWindDown();
     }
 
     // SC-TVS8: reverts with VaultNotActive
@@ -661,16 +624,15 @@ contract TickBitmapTest is UpdateTickTestBase {
 // info.feeGrowthOutsideX128`) uses the identical mod-2^256 pattern as
 // _computeFeeGrowthInside, mirroring Uniswap v3's audited _crossTick exactly.
 // This test constructs a tick whose feeGrowthOutsideX128 exceeds the current
-// feeGrowthGlobalX128 directly via vm.store, pinning FR-TVSA's contract:
+// feeGrowthGlobalX128 directly with a storage write, pinning FR-TVSA's contract:
 // "the flip must not revert regardless of how the tick's outside snapshot
 // arrived at that value" -- the same defensive posture Uniswap v3 itself
 // applies to this exact line.
 // ──────────────────────────────────────────────
-contract CrossTickWraparoundTestBase is Test {
+contract CrossTickWraparoundTestBase is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -691,11 +653,6 @@ contract CrossTickWraparoundTestBase is Test {
 
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
-    // `ticks` mapping is storage slot 13; feeGrowthOutsideX128 is the
-    // struct's 2nd field (slot + 1) -- liquidityGross/liquidityNet share slot 0.
-    uint256 constant TICKS_SLOT = 13;
-    uint256 constant FEE_GROWTH_OUTSIDE_OFFSET = 1;
-
     uint256 posId;
 
     function setUp() public virtual {
@@ -703,13 +660,12 @@ contract CrossTickWraparoundTestBase is Test {
 
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, vaultTickSpacing, minFirstLiq));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
         mockUsdc.mint(lp, 1_000_000e18);
         vm.prank(lp);
@@ -752,8 +708,7 @@ contract CrossTickWraparoundTestBase is Test {
 
     /// @dev Overwrites ticks[tick].feeGrowthOutsideX128 directly.
     function _setFeeGrowthOutside(int24 tick, uint256 value) internal {
-        bytes32 baseSlot = keccak256(abi.encode(tick, TICKS_SLOT));
-        vm.store(address(vault), bytes32(uint256(baseSlot) + FEE_GROWTH_OUTSIDE_OFFSET), bytes32(value));
+        VaultStorage.setFeeGrowthOutside(stdstore, address(vault), tick, value);
     }
 }
 

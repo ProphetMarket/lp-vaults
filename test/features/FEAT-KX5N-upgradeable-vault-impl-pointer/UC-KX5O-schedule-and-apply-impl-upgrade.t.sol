@@ -8,20 +8,8 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// Minimal mocks — only the methods LPVault.initialize() calls are included.
-// This test never mints, transfers, or reads balances, so the full ERC-20
-// interface would be dead code.
-
-contract MockERC20 {
-    function approve(address, uint256) external pure returns (bool) {
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    function setApprovalForAll(address, bool) external {}
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for implementation upgrade scenarios.
@@ -29,11 +17,10 @@ contract MockConditionalTokens {
 // helpers for scheduling, warping past timelock, and deploying a
 // second implementation for upgrade tests.
 // ──────────────────────────────────────────────
-contract ImplUpgradeTestBase is Test {
+contract ImplUpgradeTestBase is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault implV1;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -49,9 +36,9 @@ contract ImplUpgradeTestBase is Test {
     function setUp() public virtual {
         implV1 = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(implV1), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(implV1), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
     }
 
@@ -201,8 +188,7 @@ contract ImplUpgradeNewVaultTest is ImplUpgradeTestBase {
     // SC-KX5R: new vault's implementationVersion matches factory counter
     function test_newVaultHasUpdatedVersion() public {
         // Create a vault at version 1 (pre-upgrade)
-        vm.prank(oracleAddr);
-        address vaultV1 = factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e18));
+        address vaultV1 = _createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1e18));
 
         // Upgrade implementation to version 2
         address newImpl = _deployNewImpl();
@@ -211,8 +197,7 @@ contract ImplUpgradeNewVaultTest is ImplUpgradeTestBase {
         factory.applyImplementation();
 
         // Create a vault at version 2 (post-upgrade)
-        vm.prank(oracleAddr);
-        address vaultV2 = factory.createVault(bytes32(uint256(2)), int24(10), uint128(1e18));
+        address vaultV2 = _createVault(factory, oracleAddr, bytes32(uint256(2)), int24(10), uint128(1e18));
 
         assertEq(LPVault(vaultV2).implementationVersion(), 2, "new vault should have version 2");
         assertEq(LPVault(vaultV1).implementationVersion(), 1, "old vault should stay at version 1");
@@ -221,8 +206,7 @@ contract ImplUpgradeNewVaultTest is ImplUpgradeTestBase {
     // SC-KX5R: old vault's version unchanged after upgrade
     function test_oldVaultVersionUnchanged() public {
         // Create vault before upgrade
-        vm.prank(oracleAddr);
-        address vaultV1 = factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e18));
+        address vaultV1 = _createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1e18));
         uint256 oldVersion = LPVault(vaultV1).implementationVersion();
 
         // Perform upgrade

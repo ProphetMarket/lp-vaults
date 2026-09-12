@@ -10,24 +10,8 @@ pragma solidity 0.8.20;
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ── Mocks ─────────────────────────────────────
-contract MockERC20 {
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-}
+import {ConditionalTokensFixture} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ── Shared fixtures ───────────────────────────
 /// @dev Shared base for all role-management tests. Deploys the factory
@@ -61,7 +45,7 @@ contract RoleManagementBase is Test {
 ///      creates one vault, so each test proves that a role change on the
 ///      factory reaches a vault that already exists.
 ///      Events are re-declared here for the same reason as above.
-contract VaultPropagationBase is Test {
+contract VaultPropagationBase is ConditionalTokensFixture {
     event NewOperator(address indexed newOperatorAddress, address indexed admin);
     event RemovedOperator(address indexed removedOperator, address indexed admin);
     event RemovedAdmin(address indexed removedAdmin, address indexed admin);
@@ -78,13 +62,12 @@ contract VaultPropagationBase is Test {
     function setUp() public virtual {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
     }
 }
 

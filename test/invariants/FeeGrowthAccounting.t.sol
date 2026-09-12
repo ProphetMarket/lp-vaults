@@ -16,41 +16,8 @@ import {Test} from "forge-std/Test.sol";
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {LPVaultFactory} from "../../src/LPVaultFactory.sol";
 import {LPVault} from "../../src/LPVault.sol";
-
-contract MockERC20 {
-    mapping(address => uint256) public balanceOf;
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function mint(address to, uint256 amount) external {
-        balanceOf[to] += amount;
-    }
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-
-    function transfer(address to, uint256 amount) external returns (bool) {
-        balanceOf[msg.sender] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-
-    function transferFrom(address from, address to, uint256 amount) external returns (bool) {
-        allowance[from][msg.sender] -= amount;
-        balanceOf[from] -= amount;
-        balanceOf[to] += amount;
-        return true;
-    }
-}
-
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-}
+import {ConditionalTokensFixture} from "../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Handler: bounded, valid-only action surface the invariant fuzzer drives.
@@ -159,11 +126,10 @@ contract FeeGrowthAccountingHandler is Test {
     uint256 public totalFeesPaidOut;
 }
 
-contract FeeGrowthAccountingInvariantTest is StdInvariant, Test {
+contract FeeGrowthAccountingInvariantTest is StdInvariant, ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
     FeeGrowthAccountingHandler handler;
 
     address admin = makeAddr("admin");
@@ -176,13 +142,12 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, Test {
     function setUp() public {
         LPVault impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
 
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1e15)));
+        vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1e15)));
 
         handler = new FeeGrowthAccountingHandler(vault, mockUsdc, operatorAddr);
         targetContract(address(handler));

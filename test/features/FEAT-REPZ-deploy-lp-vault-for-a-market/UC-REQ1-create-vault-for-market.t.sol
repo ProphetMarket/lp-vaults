@@ -3,25 +3,14 @@ pragma solidity 0.8.20;
 
 // UC-REQ1: Create Vault for Market
 // Integration tests for every scenario in this use case.
-// Covers: SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77
+// Covers: SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77,
+//         SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-6HBV, SC-6HBW, SC-6HBX, SC-6HBY, NFR-RER0
 
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
-
-// ──────────────────────────────────────────────
-// Minimal mocks — test-only contracts that stub the ERC-20 and ERC-1155
-// interfaces the vault's initialize() calls (approve, setApprovalForAll).
-// ──────────────────────────────────────────────
-
-contract MockERC20 {
-    mapping(address => mapping(address => uint256)) public allowance;
-
-    function approve(address spender, uint256 amount) external returns (bool) {
-        allowance[msg.sender][spender] = amount;
-        return true;
-    }
-}
+import {ConditionalTokensFixture, ITestConditionalTokens} from "../../fixtures/ConditionalTokensFixture.sol";
+import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 /// @dev The receiver surface under test. Declared here rather than reaching through
 ///      the LPVault type so these tests compile — and therefore run and fail at
@@ -32,50 +21,6 @@ interface IERC1155Receiver {
         external
         returns (bytes4);
     function supportsInterface(bytes4) external view returns (bool);
-}
-
-/// @dev Minimal but *real* ERC-1155. It tracks balances and, on a safe transfer to a
-///      contract, invokes the receiver hook and reverts unless the acknowledgement
-///      value comes back — the behavior that makes an unimplemented hook a hard DOS.
-///      A stub that skipped the callback would let these tests pass against a vault
-///      that cannot actually receive tokens.
-contract MockConditionalTokens {
-    mapping(address => mapping(address => bool)) public isApprovedForAll;
-    mapping(uint256 => mapping(address => uint256)) public balanceOf;
-
-    function setApprovalForAll(address operator, bool approved) external {
-        isApprovedForAll[msg.sender][operator] = approved;
-    }
-
-    function mint(address to, uint256 id, uint256 amount) external {
-        balanceOf[id][to] += amount;
-    }
-
-    function safeTransferFrom(address from, address to, uint256 id, uint256 amount, bytes calldata data) external {
-        balanceOf[id][from] -= amount;
-        balanceOf[id][to] += amount;
-        if (to.code.length > 0) {
-            bytes4 ack = IERC1155Receiver(to).onERC1155Received(msg.sender, from, id, amount, data);
-            require(ack == 0xf23a6e61, "ERC1155: receiver rejected");
-        }
-    }
-
-    function safeBatchTransferFrom(
-        address from,
-        address to,
-        uint256[] calldata ids,
-        uint256[] calldata amounts,
-        bytes calldata data
-    ) external {
-        for (uint256 i = 0; i < ids.length; i++) {
-            balanceOf[ids[i]][from] -= amounts[i];
-            balanceOf[ids[i]][to] += amounts[i];
-        }
-        if (to.code.length > 0) {
-            bytes4 ack = IERC1155Receiver(to).onERC1155BatchReceived(msg.sender, from, ids, amounts, data);
-            require(ack == 0xbc197c81, "ERC1155: receiver rejected");
-        }
-    }
 }
 
 /// @dev An unrelated ERC-1155 contract — stands in for any token contract that is not
@@ -97,15 +42,15 @@ contract ForeignERC1155 {
 // Why:  This is the primary entry point for the LP system — every market needs
 //       a vault, and the vault must be fully configured (storage, approvals,
 //       phase) before any LP can interact with it.
-// Example: oracle calls createVault(marketId=0x01, tickSpacing=10, minLiq=1000)
-//          → clone deployed at nonzero address, all storage set, USDC allowance
-//          = max, CT approvedForAll = true, VaultCreated event emitted.
+// Example: oracle calls createVault(marketId=0x01, tickSpacing=10, minLiq=1000,
+//          conditionId, yesTokenId, noTokenId) → clone deployed at nonzero address,
+//          all storage set including the identity, USDC allowance = max,
+//          CT approvedForAll = true, VaultCreated event emitted.
 // ──────────────────────────────────────────────
-contract CreateVaultSuccessTest is Test {
+contract CreateVaultSuccessTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault impl;
     MockERC20 mockUsdc;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -116,79 +61,91 @@ contract CreateVaultSuccessTest is Test {
     int24 tickSpacing = int24(10);
     uint128 minimumFirstLiquidity = uint128(1000);
 
+    // The verified identity of the market: a prepared 2-outcome condition and its two position IDs
+    bytes32 conditionId;
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     // Event re-declared so we can use vm.expectEmit on it
     event VaultCreated(bytes32 indexed marketId, address vault, uint128 minimumFirstLiquidity);
 
     function setUp() public {
         impl = new LPVault();
         mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
         );
+        (conditionId, yesTokenId, noTokenId) = _prepareBinaryCondition(marketId, address(mockUsdc));
+    }
+
+    /// @dev The Oracle creates the vault with the prepared identity.
+    function _create() internal returns (address vault) {
+        vm.prank(oracleAddr);
+        vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId);
     }
 
     // SC-REQ6: vaultForMarket returns non-zero clone address
     function test_vaultForMarketReturnsCloneAddress() public {
-        vm.prank(oracleAddr);
-        address vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity);
+        address vault = _create();
         assertTrue(vault != address(0), "vault address should be non-zero");
         assertEq(factory.vaultForMarket(marketId), vault, "registry should map marketId to vault");
     }
 
     // SC-REQ6: clone's marketId matches
     function test_cloneMarketIdMatches() public {
-        vm.prank(oracleAddr);
-        address vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity);
+        address vault = _create();
         assertEq(LPVault(vault).marketId(), marketId, "clone marketId should match");
     }
 
     // SC-REQ6: clone's usdc, exchange, conditionalTokens, oracle, tickSpacing, factory match factory values
     function test_cloneConfigMatchesFactoryValues() public {
-        vm.prank(oracleAddr);
-        address vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity);
+        address vault = _create();
         LPVault v = LPVault(vault);
         assertEq(v.usdc(), address(mockUsdc), "usdc should match factory");
         assertEq(v.exchange(), exchangeAddr, "exchange should match factory");
-        assertEq(v.conditionalTokens(), address(mockCt), "conditionalTokens should match factory");
+        assertEq(v.conditionalTokens(), address(ctf), "conditionalTokens should match factory");
         assertEq(v.oracle(), oracleAddr, "oracle should match factory");
         assertEq(v.tickSpacing(), tickSpacing, "tickSpacing should match passed value");
         assertEq(v.factory(), address(factory), "factory should be the deploying factory");
     }
 
+    // SC-REQ6: clone's conditionId, yesTokenId, and noTokenId match the verified identity
+    function test_cloneOutcomeTokenIdentityMatches() public {
+        LPVault v = LPVault(_create());
+        assertEq(v.conditionId(), conditionId, "conditionId should match the passed value");
+        assertEq(v.yesTokenId(), yesTokenId, "yesTokenId should be the index set 1 position ID");
+        assertEq(v.noTokenId(), noTokenId, "noTokenId should be the index set 2 position ID");
+    }
+
     // SC-REQ6: clone's minimumFirstLiquidity matches the passed value
     function test_cloneMinimumFirstLiquidityMatches() public {
-        vm.prank(oracleAddr);
-        address vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity);
+        address vault = _create();
         assertEq(LPVault(vault).minimumFirstLiquidity(), minimumFirstLiquidity, "minimumFirstLiquidity should match");
     }
 
     // SC-REQ6: clone's phase == Active (1)
     function test_clonePhaseIsActive() public {
-        vm.prank(oracleAddr);
-        address vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity);
+        address vault = _create();
         assertEq(LPVault(vault).phase(), uint8(1), "phase should be Active (1)");
     }
 
     // SC-REQ6: clone's activeLiquidity == 0
     function test_cloneActiveLiquidityIsZero() public {
-        vm.prank(oracleAddr);
-        address vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity);
+        address vault = _create();
         assertEq(LPVault(vault).activeLiquidity(), uint128(0), "activeLiquidity should start at 0");
     }
 
     // SC-REQ6: USDC.allowance(vault, exchange) == type(uint256).max
     function test_usdcApprovalIsMaxOnExchange() public {
-        vm.prank(oracleAddr);
-        address vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity);
+        address vault = _create();
         assertEq(mockUsdc.allowance(vault, exchangeAddr), type(uint256).max, "USDC allowance should be max");
     }
 
     // SC-REQ6: ConditionalTokens.isApprovedForAll(vault, exchange) == true
     function test_conditionalTokensApprovalOnExchange() public {
-        vm.prank(oracleAddr);
-        address vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity);
-        assertTrue(mockCt.isApprovedForAll(vault, exchangeAddr), "CT should be approvedForAll on exchange");
+        address vault = _create();
+        assertTrue(ctf.isApprovedForAll(vault, exchangeAddr), "CT should be approvedForAll on exchange");
     }
 
     // SC-REQ6: VaultCreated event is emitted with correct args
@@ -199,8 +156,7 @@ contract CreateVaultSuccessTest is Test {
         vm.expectEmit(true, false, false, true, address(factory));
         emit VaultCreated(marketId, expectedVault, minimumFirstLiquidity);
 
-        vm.prank(oracleAddr);
-        factory.createVault(marketId, tickSpacing, minimumFirstLiquidity);
+        _create();
     }
 }
 
@@ -214,7 +170,7 @@ contract CreateVaultSuccessTest is Test {
 // Example: oracle creates vault for marketId=0x01, then tries again →
 //          revert DuplicateMarket.
 // ──────────────────────────────────────────────
-contract CreateVaultDuplicateMarketTest is Test {
+contract CreateVaultDuplicateMarketTest is ConditionalTokensFixture {
     LPVaultFactory factory;
 
     address admin = makeAddr("admin");
@@ -226,20 +182,21 @@ contract CreateVaultDuplicateMarketTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
     }
 
     // SC-REQ7: second createVault with same marketId reverts DuplicateMarket
     function test_revertsOnDuplicateMarketId() public {
+        (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) = _prepareBinaryCondition(marketId, factory.usdc());
         vm.prank(oracleAddr);
-        factory.createVault(marketId, int24(10), uint128(1000));
+        factory.createVault(marketId, int24(10), uint128(1000), conditionId, yesTokenId, noTokenId);
 
         vm.prank(oracleAddr);
         vm.expectRevert(LPVaultFactory.DuplicateMarket.selector);
-        factory.createVault(marketId, int24(10), uint128(1000));
+        factory.createVault(marketId, int24(10), uint128(1000), conditionId, yesTokenId, noTokenId);
     }
 }
 
@@ -252,7 +209,7 @@ contract CreateVaultDuplicateMarketTest is Test {
 //       markets exist, Operators execute trading actions.
 // Example: operatorAddr calls createVault → revert NotOracle.
 // ──────────────────────────────────────────────
-contract CreateVaultAccessControlTest is Test {
+contract CreateVaultAccessControlTest is ConditionalTokensFixture {
     LPVaultFactory factory;
 
     address admin = makeAddr("admin");
@@ -260,34 +217,39 @@ contract CreateVaultAccessControlTest is Test {
     address operatorAddr = makeAddr("operator");
     address nobody = makeAddr("nobody");
 
+    bytes32 conditionId;
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
+        (conditionId, yesTokenId, noTokenId) = _prepareBinaryCondition(bytes32(uint256(1)), address(mockUsdc));
     }
 
     // SC-REQ8: operator calling createVault reverts NotOracle
     function test_revertsWhenOperatorCallsCreateVault() public {
         vm.prank(operatorAddr);
         vm.expectRevert(LPVaultFactory.NotOracle.selector);
-        factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000));
+        factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000), conditionId, yesTokenId, noTokenId);
     }
 
     // SC-REQ8: admin calling createVault reverts NotOracle
     function test_revertsWhenAdminCallsCreateVault() public {
         vm.prank(admin);
         vm.expectRevert(LPVaultFactory.NotOracle.selector);
-        factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000));
+        factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000), conditionId, yesTokenId, noTokenId);
     }
 
     // SC-REQ8: arbitrary address calling createVault reverts NotOracle
     function test_revertsWhenNobodyCallsCreateVault() public {
         vm.prank(nobody);
         vm.expectRevert(LPVaultFactory.NotOracle.selector);
-        factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000));
+        factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000), conditionId, yesTokenId, noTokenId);
     }
 }
 
@@ -300,7 +262,7 @@ contract CreateVaultAccessControlTest is Test {
 // Example: factory creates vault (clone initialized) → anyone calls
 //          initialize() again → revert AlreadyInitialized.
 // ──────────────────────────────────────────────
-contract VaultReInitializeTest is Test {
+contract VaultReInitializeTest is ConditionalTokensFixture {
     LPVaultFactory factory;
 
     address admin = makeAddr("admin");
@@ -310,16 +272,15 @@ contract VaultReInitializeTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
     }
 
     // SC-REQ9: calling initialize on an already-initialized clone reverts AlreadyInitialized
     function test_revertsOnDoubleInitialize() public {
-        vm.prank(oracleAddr);
-        address vault = factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000));
+        address vault = _createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000));
 
         // Any caller hitting initialize() on the already-initialized clone reverts
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
@@ -332,7 +293,10 @@ contract VaultReInitializeTest is Test {
                 int24(20),
                 address(this),
                 uint128(2000),
-                1
+                1,
+                bytes32(uint256(2)),
+                1,
+                2
             );
     }
 }
@@ -349,7 +313,7 @@ contract VaultReInitializeTest is Test {
 // Example: deploy clone via assembly → non-factory calls
 //          initialize(... factory_=realFactory ...) → revert NotFactory.
 // ──────────────────────────────────────────────
-contract VaultOnlyFactoryInitializeTest is Test {
+contract VaultOnlyFactoryInitializeTest is ConditionalTokensFixture {
     LPVault impl;
     LPVaultFactory factory;
     address nobody = makeAddr("nobody");
@@ -357,12 +321,12 @@ contract VaultOnlyFactoryInitializeTest is Test {
     function setUp() public {
         impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
             address(impl),
             address(mockUsdc),
             makeAddr("exchange"),
-            address(mockCt),
+            address(ctf),
             makeAddr("admin"),
             makeAddr("oracle"),
             makeAddr("operator")
@@ -386,7 +350,10 @@ contract VaultOnlyFactoryInitializeTest is Test {
                 int24(10),
                 address(factory), // declared factory address that msg.sender doesn't match
                 uint128(1000),
-                1
+                1,
+                bytes32(uint256(1)),
+                1,
+                2
             );
     }
 
@@ -413,7 +380,7 @@ contract VaultOnlyFactoryInitializeTest is Test {
 //       fee accumulator division when fees arrive with activeLiquidity == 0.
 // Example: oracle calls createVault(marketId, tickSpacing, 0) → revert ZeroFloor.
 // ──────────────────────────────────────────────
-contract CreateVaultZeroFloorTest is Test {
+contract CreateVaultZeroFloorTest is ConditionalTokensFixture {
     LPVaultFactory factory;
 
     address admin = makeAddr("admin");
@@ -423,17 +390,196 @@ contract CreateVaultZeroFloorTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
     }
 
     // SC-RG74: createVault with minimumFirstLiquidity == 0 reverts ZeroFloor
     function test_revertsOnZeroMinimumFirstLiquidity() public {
+        (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) =
+            _prepareBinaryCondition(bytes32(uint256(1)), factory.usdc());
         vm.prank(oracleAddr);
         vm.expectRevert(LPVaultFactory.ZeroFloor.selector);
-        factory.createVault(bytes32(uint256(1)), int24(10), uint128(0));
+        factory.createVault(bytes32(uint256(1)), int24(10), uint128(0), conditionId, yesTokenId, noTokenId);
+    }
+}
+
+// ──────────────────────────────────────────────
+// Shared setup for the outcome-token identity scenarios: a factory over the real
+// ConditionalTokens contract, and helpers that prepare conditions and call createVault
+// as the Oracle with an explicit identity.
+// ──────────────────────────────────────────────
+contract OutcomeIdentityTestBase is ConditionalTokensFixture {
+    LPVaultFactory factory;
+    MockERC20 mockUsdc;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    bytes32 marketId = bytes32(uint256(1));
+
+    // A valid identity for marketId, prepared in setUp
+    bytes32 conditionId;
+    uint256 yesTokenId;
+    uint256 noTokenId;
+
+    function setUp() public virtual {
+        LPVault impl = new LPVault();
+        mockUsdc = new MockERC20();
+        _deployConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
+        );
+        (conditionId, yesTokenId, noTokenId) = _prepareBinaryCondition(marketId, address(mockUsdc));
+    }
+
+    /// @dev Calls createVault as the Oracle with the given identity.
+    function _createAs(bytes32 conditionId_, uint256 yesTokenId_, uint256 noTokenId_) internal returns (address) {
+        vm.prank(oracleAddr);
+        return factory.createVault(marketId, int24(10), uint128(1000), conditionId_, yesTokenId_, noTokenId_);
+    }
+
+    /// @dev Asserts that no vault exists for marketId after a failed call.
+    function _assertNoVault() internal view {
+        assertEq(factory.vaultForMarket(marketId), address(0), "no vault should be registered for marketId");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-6HBV: createVault reverts on a malformed outcome-token identity
+// What: A zero conditionId, a zero token ID, or two equal token IDs each revert
+//       with their own error before any clone exists and before the factory calls
+//       the ConditionalTokens contract.
+// Why:  A clone cannot correct its identity after initialize(), so a wrong identity
+//       must never reach a clone. Each error names one defect so the Oracle service
+//       can fix its input.
+// Example: createVault(..., conditionId=0, yes, no) → revert ZeroConditionId.
+// ──────────────────────────────────────────────
+contract CreateVaultMalformedIdentityTest is OutcomeIdentityTestBase {
+    // SC-6HBV: a zero condition ID reverts ZeroConditionId
+    function test_revertsOnZeroConditionId() public {
+        vm.expectRevert(LPVaultFactory.ZeroConditionId.selector);
+        _createAs(bytes32(0), yesTokenId, noTokenId);
+        _assertNoVault();
+    }
+
+    // SC-6HBV: a zero YES token ID reverts ZeroTokenId
+    function test_revertsOnZeroYesTokenId() public {
+        vm.expectRevert(LPVaultFactory.ZeroTokenId.selector);
+        _createAs(conditionId, 0, noTokenId);
+        _assertNoVault();
+    }
+
+    // SC-6HBV: a zero NO token ID reverts ZeroTokenId
+    function test_revertsOnZeroNoTokenId() public {
+        vm.expectRevert(LPVaultFactory.ZeroTokenId.selector);
+        _createAs(conditionId, yesTokenId, 0);
+        _assertNoVault();
+    }
+
+    // SC-6HBV: equal token IDs revert DuplicateTokenId
+    function test_revertsOnDuplicateTokenId() public {
+        vm.expectRevert(LPVaultFactory.DuplicateTokenId.selector);
+        _createAs(conditionId, yesTokenId, yesTokenId);
+        _assertNoVault();
+    }
+
+    // SC-6HBV: the value checks run before any call to the ConditionalTokens contract
+    function test_malformedIdentityMakesNoConditionalTokensCall() public {
+        vm.expectCall(address(ctf), abi.encodeWithSelector(ITestConditionalTokens.getOutcomeSlotCount.selector), 0);
+        vm.expectRevert(LPVaultFactory.ZeroConditionId.selector);
+        _createAs(bytes32(0), yesTokenId, noTokenId);
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-6HBW: createVault reverts when the condition is not a prepared binary condition
+// What: An unprepared condition (outcome slot count 0) and a 3-outcome condition
+//       both revert with NotBinaryCondition.
+// Why:  The complete-set merge and the redemption use the partition [1, 2]. On a
+//       3-outcome condition that partition mints a third token instead of paying
+//       USDC. Prophet's Resolution.sol prepares only 2-outcome conditions.
+// Example: createVault(..., unpreparedConditionId, yes, no) → revert NotBinaryCondition.
+// ──────────────────────────────────────────────
+contract CreateVaultNotBinaryConditionTest is OutcomeIdentityTestBase {
+    // SC-6HBW: an unprepared condition returns outcome slot count 0 and reverts
+    function test_revertsOnUnpreparedCondition() public {
+        bytes32 unprepared = keccak256("never prepared");
+        assertEq(ctf.getOutcomeSlotCount(unprepared), 0, "precondition: the condition is not prepared");
+
+        vm.expectRevert(LPVaultFactory.NotBinaryCondition.selector);
+        _createAs(unprepared, yesTokenId, noTokenId);
+        _assertNoVault();
+    }
+
+    // SC-6HBW: a 3-outcome condition reverts although its two first position IDs are valid
+    function test_revertsOnThreeOutcomeCondition() public {
+        bytes32 questionId = keccak256("three outcomes");
+        ctf.prepareCondition(address(this), questionId, 3);
+        bytes32 ternary = ctf.getConditionId(address(this), questionId, 3);
+        uint256 id1 = ctf.getPositionId(address(mockUsdc), ctf.getCollectionId(bytes32(0), ternary, 1));
+        uint256 id2 = ctf.getPositionId(address(mockUsdc), ctf.getCollectionId(bytes32(0), ternary, 2));
+
+        vm.expectRevert(LPVaultFactory.NotBinaryCondition.selector);
+        _createAs(ternary, id1, id2);
+        _assertNoVault();
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-6HBX: createVault reverts when the token IDs do not match the condition's index sets
+// What: The valid pair of a different condition, and the correct pair in swapped
+//       order, both revert with TokenIdMismatch.
+// Why:  These are the two mistakes that look correct and that a clone can never undo:
+//       a vault that names one market's condition and another market's tokens, or
+//       a vault that labels NO as YES for its whole life.
+// Example: createVault(..., conditionA, yesOfB, noOfB) → revert TokenIdMismatch.
+// ──────────────────────────────────────────────
+contract CreateVaultTokenIdMismatchTest is OutcomeIdentityTestBase {
+    // SC-6HBX case A: another condition's valid pair reverts TokenIdMismatch
+    function test_revertsOnAnotherConditionsPair() public {
+        (, uint256 otherYes, uint256 otherNo) = _prepareBinaryCondition(keccak256("other market"), address(mockUsdc));
+
+        vm.expectRevert(LPVaultFactory.TokenIdMismatch.selector);
+        _createAs(conditionId, otherYes, otherNo);
+        _assertNoVault();
+    }
+
+    // SC-6HBX case B: the correct pair in swapped order reverts TokenIdMismatch
+    function test_revertsOnSwappedPair() public {
+        vm.expectRevert(LPVaultFactory.TokenIdMismatch.selector);
+        _createAs(conditionId, noTokenId, yesTokenId);
+        _assertNoVault();
+    }
+}
+
+// ──────────────────────────────────────────────
+// NFR-RER0: createVault execution gas stays below 650,000 for any condition
+// What: The identity check calls getCollectionId twice, and that call searches for
+//       a curve point in a loop, so its cost differs per condition. The execution
+//       gas of createVault must stay below 650,000 for every condition ID.
+// Why:  A limit that no test checks is a comment. The E3 exploration measured the
+//       cheapest condition at about 480,000 and the most expensive of 64 at about
+//       547,000 with the optimizer off.
+// Example: createVault over a random question ID uses fewer than 650,000 gas.
+// ──────────────────────────────────────────────
+contract CreateVaultGasLimitTest is OutcomeIdentityTestBase {
+    uint256 constant CREATE_VAULT_GAS_LIMIT = 650_000;
+
+    // NFR-RER0: execution gas of createVault is below the limit for a fuzzed condition
+    function testFuzz_createVaultGasBelowLimit(bytes32 questionId) public {
+        (bytes32 fuzzedCondition, uint256 fuzzedYes, uint256 fuzzedNo) =
+            _prepareBinaryCondition(questionId, address(mockUsdc));
+
+        vm.prank(oracleAddr);
+        uint256 before = gasleft();
+        factory.createVault(questionId, int24(10), uint128(1000), fuzzedCondition, fuzzedYes, fuzzedNo);
+        uint256 used = before - gasleft();
+
+        assertLt(used, CREATE_VAULT_GAS_LIMIT, "createVault execution gas must stay below the NFR-RER0 limit");
     }
 }
 
@@ -448,7 +594,7 @@ contract CreateVaultZeroFloorTest is Test {
 //          setMinimumFirstLiquidity(2000) → stored value = 2000,
 //          MinimumFirstLiquidityUpdated(1000, 2000) emitted.
 // ──────────────────────────────────────────────
-contract SetMinFirstLiqSuccessTest is Test {
+contract SetMinFirstLiqSuccessTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -464,12 +610,11 @@ contract SetMinFirstLiqSuccessTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, int24(10), initialMin));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), initialMin));
     }
 
     // SC-RG75: oracle sets new minimumFirstLiquidity value
@@ -500,7 +645,7 @@ contract SetMinFirstLiqSuccessTest is Test {
 //       handle transactional actions, not governance.
 // Example: operatorAddr calls setMinimumFirstLiquidity(2000) → revert NotOracle.
 // ──────────────────────────────────────────────
-contract SetMinFirstLiqAccessControlTest is Test {
+contract SetMinFirstLiqAccessControlTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -514,12 +659,11 @@ contract SetMinFirstLiqAccessControlTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
     }
 
     // SC-RG76: operator calling setMinimumFirstLiquidity reverts NotOracle
@@ -553,7 +697,7 @@ contract SetMinFirstLiqAccessControlTest is Test {
 //       guard provides. The invariant must hold at every write path.
 // Example: oracle calls setMinimumFirstLiquidity(0) → revert ZeroFloor.
 // ──────────────────────────────────────────────
-contract SetMinFirstLiqZeroTest is Test {
+contract SetMinFirstLiqZeroTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -566,12 +710,11 @@ contract SetMinFirstLiqZeroTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
     }
 
     // SC-RG77: oracle calling setMinimumFirstLiquidity(0) reverts ZeroFloor
@@ -593,10 +736,9 @@ contract SetMinFirstLiqZeroTest is Test {
 // Example: holder transfers 500e6 of the YES token id to the vault → the transfer
 //          completes, the vault's balance is 500e6, and the hook returned 0xf23a6e61.
 // ──────────────────────────────────────────────
-contract VaultReceivesOutcomeTokensTest is Test {
+contract VaultReceivesOutcomeTokensTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
-    MockConditionalTokens mockCt;
 
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
@@ -605,36 +747,37 @@ contract VaultReceivesOutcomeTokensTest is Test {
 
     bytes32 marketId = bytes32(uint256(1));
 
-    // Realistic CTF position ids for the two outcomes of one market
-    uint256 yesTokenId = uint256(keccak256("YES"));
-    uint256 noTokenId = uint256(keccak256("NO"));
+    // The vault's two outcome token IDs, read back from the vault after creation
+    uint256 yesTokenId;
+    uint256 noTokenId;
 
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
+        yesTokenId = vault.yesTokenId();
+        noTokenId = vault.noTokenId();
 
-        mockCt.mint(holder, yesTokenId, 1_000e6);
-        mockCt.mint(holder, noTokenId, 1_000e6);
+        // The holder splits 1,000 USDC into 1,000 YES and 1,000 NO through the real contract
+        _mintCompleteSets(mockUsdc, holder, vault.conditionId(), 1_000e6);
     }
 
     // SC-3WLL: a single safeTransferFrom from ConditionalTokens completes and credits the vault
     function test_acceptsSingleOutcomeTokenTransfer() public {
         vm.prank(holder);
-        mockCt.safeTransferFrom(holder, address(vault), yesTokenId, 500e6, "");
+        ctf.safeTransferFrom(holder, address(vault), yesTokenId, 500e6, "");
 
-        assertEq(mockCt.balanceOf(yesTokenId, address(vault)), 500e6, "vault should hold the transferred YES tokens");
-        assertEq(mockCt.balanceOf(yesTokenId, holder), 500e6, "holder balance should be debited");
+        assertEq(ctf.balanceOf(address(vault), yesTokenId), 500e6, "vault should hold the transferred YES tokens");
+        assertEq(ctf.balanceOf(holder, yesTokenId), 500e6, "holder balance should be debited");
     }
 
     // SC-3WLL: the hook returns the ERC-1155 single-transfer acknowledgement value
     function test_onERC1155ReceivedReturnsMagicValue() public {
-        vm.prank(address(mockCt));
+        vm.prank(address(ctf));
         bytes4 ack = IERC1155Receiver(address(vault)).onERC1155Received(holder, holder, yesTokenId, 500e6, "");
 
         assertEq(ack, bytes4(0xf23a6e61), "onERC1155Received must return 0xf23a6e61");
@@ -650,10 +793,10 @@ contract VaultReceivesOutcomeTokensTest is Test {
         amounts[1] = 200e6;
 
         vm.prank(holder);
-        mockCt.safeBatchTransferFrom(holder, address(vault), ids, amounts, "");
+        ctf.safeBatchTransferFrom(holder, address(vault), ids, amounts, "");
 
-        assertEq(mockCt.balanceOf(yesTokenId, address(vault)), 300e6, "vault should hold the transferred YES tokens");
-        assertEq(mockCt.balanceOf(noTokenId, address(vault)), 200e6, "vault should hold the transferred NO tokens");
+        assertEq(ctf.balanceOf(address(vault), yesTokenId), 300e6, "vault should hold the transferred YES tokens");
+        assertEq(ctf.balanceOf(address(vault), noTokenId), 200e6, "vault should hold the transferred NO tokens");
     }
 
     // SC-3WLM: the batch hook returns the ERC-1155 batch-transfer acknowledgement value
@@ -665,7 +808,7 @@ contract VaultReceivesOutcomeTokensTest is Test {
         amounts[0] = 300e6;
         amounts[1] = 200e6;
 
-        vm.prank(address(mockCt));
+        vm.prank(address(ctf));
         bytes4 ack = IERC1155Receiver(address(vault)).onERC1155BatchReceived(holder, holder, ids, amounts, "");
 
         assertEq(ack, bytes4(0xbc197c81), "onERC1155BatchReceived must return 0xbc197c81");
@@ -683,8 +826,8 @@ contract VaultReceivesOutcomeTokensTest is Test {
         amounts[1] = 200e6;
 
         vm.startPrank(holder);
-        mockCt.safeTransferFrom(holder, address(vault), yesTokenId, 100e6, "");
-        mockCt.safeBatchTransferFrom(holder, address(vault), ids, amounts, "");
+        ctf.safeTransferFrom(holder, address(vault), yesTokenId, 100e6, "");
+        ctf.safeBatchTransferFrom(holder, address(vault), ids, amounts, "");
         vm.stopPrank();
 
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move on an inbound transfer");
@@ -705,10 +848,9 @@ contract VaultReceivesOutcomeTokensTest is Test {
 // Example: an arbitrary EOA, or an unrelated ERC-1155 contract trying to push its
 //          own token ids into the vault, both revert with NotConditionalTokens.
 // ──────────────────────────────────────────────
-contract VaultRejectsForeignERC1155Test is Test {
+contract VaultRejectsForeignERC1155Test is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
-    MockConditionalTokens mockCt;
     ForeignERC1155 foreignToken;
 
     address admin = makeAddr("admin");
@@ -722,13 +864,12 @@ contract VaultRejectsForeignERC1155Test is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         foreignToken = new ForeignERC1155();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(marketId, int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
     }
 
     // SC-3WLN: an arbitrary EOA calling the single-transfer hook directly reverts
@@ -767,6 +908,84 @@ contract VaultRejectsForeignERC1155Test is Test {
 }
 
 // ──────────────────────────────────────────────
+// SC-6HBY: Receiver hook rejects a token ID outside the vault's market
+// What: A transfer from the vault's own ConditionalTokens contract of a token that
+//       belongs to a second condition reverts with UnknownTokenId, on a single transfer
+//       and on a batch that also carries a valid ID.
+// Why:  With the caller check (SC-3WLN), this turns the one-market assumption behind
+//       the unscoped setApprovalForAll into an on-chain check on both the token
+//       contract and the token ID.
+// Example: holder transfers a YES token of condition B to a vault for condition A →
+//          revert UnknownTokenId, and the vault's balances do not change.
+// ──────────────────────────────────────────────
+contract VaultRejectsForeignTokenIdTest is ConditionalTokensFixture {
+    LPVaultFactory factory;
+    LPVault vault;
+    MockERC20 mockUsdc;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+    address holder = makeAddr("holder");
+
+    bytes32 marketId = bytes32(uint256(1));
+
+    uint256 yesTokenId;
+    uint256 foreignTokenId;
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        mockUsdc = new MockERC20();
+        _deployConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
+        );
+        vault = LPVault(_createVault(factory, oracleAddr, marketId, int24(10), uint128(1000)));
+        yesTokenId = vault.yesTokenId();
+
+        // The holder owns tokens of the vault's condition and of a second condition on the same contract
+        _mintCompleteSets(mockUsdc, holder, vault.conditionId(), 1_000e6);
+        (bytes32 foreignCondition, uint256 foreignYes,) =
+            _prepareBinaryCondition(keccak256("other market"), address(mockUsdc));
+        _mintCompleteSets(mockUsdc, holder, foreignCondition, 1_000e6);
+        foreignTokenId = foreignYes;
+    }
+
+    // SC-6HBY: a single transfer of a foreign token ID reverts UnknownTokenId
+    function test_revertsOnSingleTransferOfForeignTokenId() public {
+        vm.prank(holder);
+        vm.expectRevert(LPVault.UnknownTokenId.selector);
+        ctf.safeTransferFrom(holder, address(vault), foreignTokenId, 100e6, "");
+
+        assertEq(ctf.balanceOf(address(vault), foreignTokenId), 0, "the foreign token must not reach the vault");
+    }
+
+    // SC-6HBY: a batch that carries one valid and one foreign ID reverts UnknownTokenId
+    function test_revertsOnBatchWithForeignTokenId() public {
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = yesTokenId;
+        ids[1] = foreignTokenId;
+        uint256[] memory amounts = new uint256[](2);
+        amounts[0] = 100e6;
+        amounts[1] = 100e6;
+
+        vm.prank(holder);
+        vm.expectRevert(LPVault.UnknownTokenId.selector);
+        ctf.safeBatchTransferFrom(holder, address(vault), ids, amounts, "");
+
+        assertEq(ctf.balanceOf(address(vault), yesTokenId), 0, "the valid ID in a rejected batch must not land either");
+        assertEq(ctf.balanceOf(address(vault), foreignTokenId), 0, "the foreign token must not reach the vault");
+    }
+
+    // SC-6HBY: the hook itself, called by the ConditionalTokens contract with a foreign ID, reverts
+    function test_hookRevertsOnForeignTokenIdFromConditionalTokens() public {
+        vm.prank(address(ctf));
+        vm.expectRevert(LPVault.UnknownTokenId.selector);
+        IERC1155Receiver(address(vault)).onERC1155Received(holder, holder, foreignTokenId, 100e6, "");
+    }
+}
+
+// ──────────────────────────────────────────────
 // SC-3WLO: Vault reports ERC-1155 receiver interface support
 // What: supportsInterface returns true for IERC1155Receiver and for ERC-165 itself,
 //       and false for anything else.
@@ -774,7 +993,7 @@ contract VaultRejectsForeignERC1155Test is Test {
 //       answer they skip the transfer entirely, even though the hooks work.
 // Example: supportsInterface(0x4e2312e0) == true, supportsInterface(0xffffffff) == false.
 // ──────────────────────────────────────────────
-contract VaultSupportsInterfaceTest is Test {
+contract VaultSupportsInterfaceTest is ConditionalTokensFixture {
     LPVault vault;
 
     address admin = makeAddr("admin");
@@ -784,12 +1003,11 @@ contract VaultSupportsInterfaceTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         LPVaultFactory factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
     }
 
     // SC-3WLO: the IERC1155Receiver interface id is reported as supported
@@ -825,7 +1043,7 @@ contract VaultSupportsInterfaceTest is Test {
 //       instantly — no per-vault updates needed for key rotation.
 // Example: factory.operators(operatorAddr) == 1, vault.operators(operatorAddr) == 1.
 // ──────────────────────────────────────────────
-contract VaultOperatorDelegationTest is Test {
+contract VaultOperatorDelegationTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -836,12 +1054,11 @@ contract VaultOperatorDelegationTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
     }
 
     // FR-FKD0: vault.operators(addr) returns factory.operators(addr)
@@ -866,7 +1083,7 @@ contract VaultOperatorDelegationTest is Test {
 //       vaults — the vault never stores a stale oracle address.
 // Example: factory.oracle() == oracleAddr, vault.oracle() == oracleAddr.
 // ──────────────────────────────────────────────
-contract VaultOracleDelegationTest is Test {
+contract VaultOracleDelegationTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -877,12 +1094,11 @@ contract VaultOracleDelegationTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
     }
 
     // FR-FKD1: vault.oracle() returns factory.oracle()
@@ -900,7 +1116,7 @@ contract VaultOracleDelegationTest is Test {
 //       needing per-vault admin management functions.
 // Example: factory.admins(admin) == 1, vault.admins(admin) == 1.
 // ──────────────────────────────────────────────
-contract VaultAdminDelegationTest is Test {
+contract VaultAdminDelegationTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -911,12 +1127,11 @@ contract VaultAdminDelegationTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
     }
 
     // FR-FKD2: vault.admins(addr) returns factory.admins(addr)
@@ -943,7 +1158,7 @@ contract VaultAdminDelegationTest is Test {
 // Example: vault created → vault.admins(admin) == 1 via factory delegation,
 //          but no admins mapping exists locally on the vault.
 // ──────────────────────────────────────────────
-contract VaultNoLocalRoleStateTest is Test {
+contract VaultNoLocalRoleStateTest is ConditionalTokensFixture {
     LPVaultFactory factory;
     LPVault vault;
 
@@ -954,12 +1169,11 @@ contract VaultNoLocalRoleStateTest is Test {
     function setUp() public {
         LPVault impl = new LPVault();
         MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
+        _deployConditionalTokens();
         factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
         );
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+        vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1000)));
     }
 
     // FR-FKD3: vault delegation reflects live factory state.

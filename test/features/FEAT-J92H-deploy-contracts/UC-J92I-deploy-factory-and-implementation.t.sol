@@ -45,7 +45,17 @@ contract DeployScriptSuccessTest is Test {
     function test_implementationInitializeReverts() public {
         vm.expectRevert(LPVault.AlreadyInitialized.selector);
         lpVault.initialize(
-            bytes32(uint256(1)), usdc, exchange, conditionalTokens, int24(10), address(factory), uint128(1000), 1
+            bytes32(uint256(1)),
+            usdc,
+            exchange,
+            conditionalTokens,
+            int24(10),
+            address(factory),
+            uint128(1000),
+            1,
+            bytes32(uint256(1)),
+            1,
+            2
         );
     }
 
