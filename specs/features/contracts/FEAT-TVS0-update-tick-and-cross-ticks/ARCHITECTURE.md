@@ -3,7 +3,7 @@ id: FEAT-TVS0
 name: Update Tick and Cross Ticks
 use_cases: [UC-TVS1]
 scenarios: [SC-TVS2, SC-TVS3, SC-TVS4, SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8]
-last_update: 2026-09-11
+last_update: 2026-09-12
 ---
 
 # Architecture: Update Tick and Cross Ticks
@@ -83,16 +83,17 @@ erDiagram
 
 | Event | Publisher | Payload | Condition | Consumers |
 |-------|-----------|---------|-----------|-----------|
-| `TickUpdated(int24 oldTick, int24 newTick, uint256 ticksCrossed)` | `LPVault.updateTick` | `oldTick, newTick, ticksCrossed` | Every successful updateTick call | Off-chain indexer, Keeper |
+| `TickUpdated(int24 oldTick, int24 newTick, uint256 ticksCrossed)` | `LPVault.updateTick` | `oldTick, newTick, ticksCrossed` | Every successful updateTick call whose newTick differs from currentTick | Off-chain indexer, Keeper |
 
 **Non-events (explicit):**
-- SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8: no event emitted (call reverts)
+- SC-TVS5, SC-TVS6, SC-TVS8: no event emitted (call reverts)
+- SC-TVS7: no event emitted (the call succeeds and only refreshes the heartbeat)
 
 ## API Surface
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| contract-call | `LPVault.updateTick(int24 newTick)` | `updateTick` | `onlyOperator` | `newTick: int24` | `void` (emits TickUpdated event) | `NotOperator`, `VaultNotActive`, `SameTick`, `TooManyTicksCrossed` |
+| contract-call | `LPVault.updateTick(int24 newTick)` | `updateTick` | `onlyOperator` | `newTick: int24` | `void` (emits TickUpdated when the tick changes; refreshes only the heartbeat when it does not) | `NotOperator`, `TradingIsPaused`, `VaultNotActive`, `TooManyTicksCrossed` |
 
 ## Integration Points
 
@@ -110,7 +111,7 @@ erDiagram
 | SC-TVS4 | No initialized ticks in range | `src/LPVault.sol:updateTick()`, `src/LPVault.sol:_nextInitializedTick()` |
 | SC-TVS5 | Too many initialized ticks to cross | `src/LPVault.sol:updateTick()` |
 | SC-TVS6 | Non-operator caller | `src/LPVault.sol:updateTick()` |
-| SC-TVS7 | Same tick | `src/LPVault.sol:updateTick()` |
+| SC-TVS7 | Same tick refreshes only the heartbeat | `src/LPVault.sol:updateTick()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-TVS8 | Vault not in Active phase | `src/LPVault.sol:updateTick()` |
 
 ## Architecture Decisions
@@ -120,5 +121,10 @@ In the context of iterating from currentTick to newTick, facing the risk that a 
 
 **ADR-TVUW:** 256 max initialized-tick crossings per call
 In the context of large price moves that could cross hundreds of initialized ticks, facing the risk of gas griefing or block-limit exhaustion, we decided to cap initialized-tick crossings at 256 per updateTick call and revert with TooManyTicksCrossed if exceeded, forcing the Keeper to chunk into multiple calls, accepting the operational complexity of multi-call chunking for extreme price movements.
+
+**ADR-9J43:** An unchanged tick report refreshes the heartbeat and returns
+In the context of the keeper reporting the tick every 60 seconds and after fills, on markets that mostly keep the same price, facing the fact that a `SameTick` revert cost about 23,600 gas, refreshed nothing, and forced a second `heartbeat()` transaction, we decided that `updateTick` with `newTick == currentTick` returns after the phase check with no crossing, no bitmap read, no event, and no storage write other than the heartbeat and the reentrancy guard toggle, which ends at its starting value, to achieve one report per interval at about 20,500 gas net against 15,600 for `heartbeat()`, accepting that the guards stay as modifiers, so the guard slot is written twice on the unchanged path and the report costs about 4,900 gas more than `heartbeat()`. The user decided this on 2026-09-11 (decision C11 in `audits/audit-fixes-ranged.md`), and it replaces the part of ADR-3XU3 in FEAT-JXQO that kept the revert. `notifyFees` keeps its `ZeroAmount` revert, because an income report of zero is a caller bug and not a normal case.
+
+**Rejected alternative -- check the unchanged tick before the reentrancy guard:** it removes the guard's 2,300 gas net but gives one function a hand-written guard, which is a review cost that security outranks. It is Part 7 candidate 6 in `audits/audit-fixes-ranged.md`.
 
 The fee-growth subtraction in this feature (the flip in `_crossTick()`) runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF.

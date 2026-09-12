@@ -3,7 +3,7 @@ id: FEAT-JXQO
 name: Emergency Cancel All Positions
 use_cases: [UC-JXQW]
 scenarios: [SC-JXQX, SC-JXQY, SC-JXQZ, SC-JXR0, SC-JXR1, SC-JXR2, SC-3XTZ, SC-3XU0, SC-3XU1, SC-3XUO, SC-3XU2]
-last_update: 2026-09-11
+last_update: 2026-09-12
 ---
 
 # Architecture: Emergency Cancel All Positions
@@ -135,10 +135,10 @@ stateDiagram-v2
 | SC-JXR0 | Multi-LP distribution | `src/LPVault.sol:emergencyCancelAll()` |
 | SC-JXR1 | Terminal state gates operations | `src/LPVault.sol:emergencyCancelAll()`, phase guards on all functions |
 | SC-JXR2 | Operator activity resets timelock | `src/LPVault.sol:touchesHeartbeat`, `src/LPVault.sol:notifyFees()`, `src/LPVault.sol:updateTick()` |
-| SC-3XTZ | Heartbeat defers emergency cancel | `src/LPVault.sol:heartbeat()`, `src/LPVault.sol:touchesHeartbeat` |
+| SC-3XTZ | Heartbeat defers emergency cancel | `src/LPVault.sol:heartbeat()`, `src/LPVault.sol:updateTick()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-3XU0 | Mint and merge reset the timelock | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:mergePositions()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-3XU1 | Non-Operator cannot heartbeat | `src/LPVault.sol:heartbeat()`, `src/LPVault.sol:onlyOperator` |
-| SC-3XUO | Heartbeat works while paused | `src/LPVault.sol:heartbeat()` |
+| SC-3XUO | Heartbeat works while paused or wound down | `src/LPVault.sol:heartbeat()` |
 | SC-3XU2 | Heartbeat reverts once Cancelled | `src/LPVault.sol:heartbeat()` |
 
 ## Architecture Decisions
@@ -151,7 +151,7 @@ In the context of proving the Operator is alive, facing the fact that `lastOpera
 
 We chose a separate modifier over folding the write into `onlyOperator` so that `onlyOperator` keeps doing exactly one thing (access control), and so the requirement stays visible in each function's signature -- a reviewer immediately notices a new Operator-gated function missing it, which a write buried in the modifier body would not surface. Because a revert rolls back the whole transaction, writing the timestamp before the function body is observationally identical to writing it after: the timer advances if and only if the call succeeds.
 
-We deliberately left `updateTick`'s `SameTick` revert and `notifyFees`'s `ZeroAmount` revert intact. Both are legitimate guards against wasted or mistaken calls; weakening them so they could double as liveness pings would be worse than giving the Operator a clean, dedicated function.
+We deliberately left `updateTick`'s `SameTick` revert and `notifyFees`'s `ZeroAmount` revert intact. Both are legitimate guards against wasted or mistaken calls; weakening them so they could double as liveness pings would be worse than giving the Operator a clean, dedicated function. **Superseded in part on 2026-09-11:** the user's decision C11 replaces the `SameTick` half. An unchanged tick report now refreshes the heartbeat and returns, because the keeper's 60-second report on an unchanged price is the normal case and a reverted call costs gas and refreshes nothing. The `ZeroAmount` revert in `notifyFees` stays. The unchanged-tick decision (ADR-9J43) in FEAT-TVS0 records the new rule.
 
 We accept a residual risk this does not address: an Operator that is technically alive but uncooperative can call `heartbeat()` indefinitely to keep `emergencyCancelAll` out of reach without doing any real work. That is the opposite failure mode (a false-positive freeze rather than a false-negative liveness signal) and materially lower stakes; it matters mainly because `emergencyCancelAll` is currently the only unconditional exit path, and later work in this sequence makes the individual exit paths work regardless of Operator behavior, which shrinks the exposure further.
 

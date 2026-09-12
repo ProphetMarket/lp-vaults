@@ -3,7 +3,7 @@ id: UC-JXQW
 name: Emergency Cancel All
 feature: FEAT-JXQO
 status: implemented
-version: 2
+version: 3
 actor: LP
 ---
 
@@ -21,7 +21,7 @@ actor: LP
 
 Any address holding at least one position calls `emergencyCancelAll()` on the vault.
 
-The silence timer this use case reads is refreshed by every successful Operator-gated call -- `mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, and the dedicated `heartbeat()`. A call that reverts does not refresh it. `heartbeat()` exists so an Operator running a quiet, stable market still has a way to prove liveness when every other Operator action would legitimately revert (`updateTick` with `SameTick`, `notifyFees` with `ZeroAmount`).
+The silence timer this use case reads is refreshed by every successful Operator-gated call -- `mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, and the dedicated `heartbeat()`. A call that reverts does not refresh it. On a quiet Active market the keeper's report with the unchanged tick refreshes the timer and does not revert (SC-TVS7). `heartbeat()` exists for a vault that is paused or wound down, where `updateTick` reverts, and for an Operator with no report to send. Every later Operator function carries `touchesHeartbeat` (`CLAUDE.md`, hard rules).
 
 ---
 
@@ -170,8 +170,8 @@ The silence timer this use case reads is refreshed by every successful Operator-
 ### SC-3XTZ: Heartbeat defers emergency cancel on a quiet market
 
 **Given:**
-- Vault is in Active phase with at least one position
-- The market is quiet and stable: the tick has not moved and no fee revenue has arrived, so `updateTick` would revert with `SameTick` and `notifyFees` would revert with `ZeroAmount`
+- Vault is in Active phase, not paused, with at least one position
+- The market is quiet and stable: the tick has not moved and no fee revenue has arrived, so `notifyFees` would revert with `ZeroAmount`
 - `block.timestamp - lastOperatorActivityTimestamp >= EMERGENCY_CANCEL_TIMELOCK` (timelock would have elapsed)
 
 **Steps:**
@@ -180,15 +180,23 @@ The silence timer this use case reads is refreshed by every successful Operator-
 3. Position holder immediately calls `emergencyCancelAll()`
 4. System checks the timelock -- it has NOT elapsed since the `heartbeat()`
 5. System reverts
+6. Time advances past the timelock again
+7. Operator calls `updateTick(currentTick)`, the keeper's normal 60-second report
+8. System refreshes `lastOperatorActivityTimestamp` to `block.timestamp` and returns without a crossing or an event (SC-TVS7)
+9. Position holder immediately calls `emergencyCancelAll()`
+10. System checks the timelock -- it has NOT elapsed since the report
+11. System reverts
 
 **Outcomes:**
-- `heartbeat()` succeeded
-- `emergencyCancelAll()` reverts with the timelock error
+- `heartbeat()` and `updateTick(currentTick)` both succeeded
+- Neither reverts on a quiet Active market
+- Each `emergencyCancelAll()` reverts with the timelock error
 - A healthy Operator on a market with no other work to do is no longer indistinguishable from a silent one
 
 **Side Effects:**
-- `lastOperatorActivityTimestamp` updated to `block.timestamp`
+- `lastOperatorActivityTimestamp` updated to `block.timestamp` on each of the two Operator calls
 - No change to `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, `phase`, or any position or tick record
+- No `TickUpdated` event emitted
 - No USDC transferred
 - No emergency cancel occurred and no `EmergencyCancelExecuted` event emitted
 
@@ -240,19 +248,20 @@ The silence timer this use case reads is refreshed by every successful Operator-
 
 ---
 
-### SC-3XUO: Heartbeat still works while trading is paused
+### SC-3XUO: Heartbeat still works while trading is paused or the vault is wound down
 
 **Given:**
-- Vault is in Active phase and an Admin has called `pauseTrading()`, so `paused == true`
-- Every other Operator-gated function (`mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`) reverts on the `whenNotPaused` gate
+- Case A: Vault is in Active phase and an Admin has called `pauseTrading()`, so `paused == true`. Every other Operator-gated function (`mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`) reverts on the `whenNotPaused` gate
+- Case B: the Oracle has called `startWindDown()`, so `phase == 2`, and `updateTick` reverts with `VaultNotActive`, so the keeper's unchanged report cannot refresh the timer
 
 **Steps:**
 1. Operator calls `heartbeat()`
-2. System checks the Operator gate and the Cancelled-phase guard, but not the pause flag
+2. System checks the Operator gate and the Cancelled-phase guard, but not the pause flag and not the Active phase
 
 **Outcomes:**
-- The call succeeds and `lastOperatorActivityTimestamp == block.timestamp`
-- A pause is an Admin decision about trading and says nothing about whether the Operator is alive, so a paused vault does not drift toward emergency cancellation while its Operator is still responding
+- In both cases the call succeeds and `lastOperatorActivityTimestamp == block.timestamp`
+- A pause is an Admin decision about trading, and a wind-down is an Oracle decision about the market. Neither says whether the Operator is alive, so neither state drifts toward emergency cancellation while its Operator is still responding
+- The keeper calls `heartbeat()` in both states
 
 **Side Effects:**
 - `lastOperatorActivityTimestamp` updated to `block.timestamp`

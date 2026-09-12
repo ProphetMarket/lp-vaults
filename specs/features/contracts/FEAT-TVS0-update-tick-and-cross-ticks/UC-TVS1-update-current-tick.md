@@ -3,7 +3,7 @@ id: UC-TVS1
 name: Update Current Tick
 feature: FEAT-TVS0
 status: implemented
-version: 2
+version: 3
 actor: Operator
 ---
 
@@ -14,13 +14,14 @@ actor: Operator
 ## Preconditions
 
 - Vault is in Active phase
+- Vault is not paused
 - Caller holds the Operator role
 
 ## Trigger
 
 Operator calls `updateTick(int24 newTick)` on the vault.
 
-The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the shared Operator-liveness mechanism owned by FEAT-JXQO (FR-JXQS): every successful Operator-gated call refreshes it, and a reverted call does not. A `SameTick` revert (SC-TVS7) therefore leaves the timer untouched -- which is why `heartbeat()` exists for markets whose tick does not move.
+The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the shared Operator-liveness mechanism owned by FEAT-JXQO (FR-JXQS): every successful Operator-gated call refreshes it, and a reverted call does not. A report with the current tick (SC-TVS7) succeeds and refreshes the timer, so the keeper's 60-second report is proof of life on a market whose price does not move. `updateTick` keeps its pause and phase checks, so while the vault is paused or wound down the keeper calls `heartbeat()` instead.
 
 ---
 
@@ -144,20 +145,30 @@ The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the 
 
 ---
 
-### SC-TVS7: Same tick
+### SC-TVS7: Same tick refreshes only the heartbeat
 
 **Given:**
 - currentTick = 100
+- Initialized ticks exist on both sides of it
+- Vault is Active and not paused
 
 **Steps:**
 1. Operator calls updateTick(100)
+2. System checks the phase
+3. System reads currentTick, finds it equal to newTick, and returns
 
 **Outcomes:**
-- Call reverts with SameTick
+- The call succeeds
+- currentTick is 100
+- lastOperatorActivityTimestamp is block.timestamp
+- The call costs about 20,500 gas net, against about 15,600 for `heartbeat()`, measured on 2026-09-12
 
 **Side Effects:**
-- No state changes
-- No events emitted
+- `lastOperatorActivityTimestamp` updated to `block.timestamp`
+- No `TickUpdated` event emitted
+- No tick crossed and no `tickBitmap` word read
+- No change to `currentTick`, `activeLiquidity`, `feeGrowthGlobalX128`, or any tick record
+- The reentrancy guard slot is written twice and ends at its starting value
 
 ---
 

@@ -4,8 +4,8 @@ name: Update Tick and Cross Ticks
 module: contracts
 domain: "@ticks"
 status: implemented
-version: 1
-refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR]
+version: 2
+refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR, FEAT-JXQO]
 ---
 
 # Update Tick and Cross Ticks
@@ -43,12 +43,12 @@ Linked to: UC-TVS1
 Fit Criterion: Given activeLiquidity=600e18 and tick.liquidityNet=+100e18 at tick 200, after right-to-left crossing, activeLiquidity=500e18.
 Linked to: UC-TVS1
 
-**FR-TVSD** `When updateTick completes successfully, the system shall store newTick as currentTick and record block.timestamp as lastOperatorActivityTimestamp.`
+**FR-TVSD** `When updateTick completes successfully with newTick different from currentTick, the system shall store newTick as currentTick and record block.timestamp as lastOperatorActivityTimestamp.`
 Fit Criterion: Given currentTick=100 before the call, after updateTick(300) at block.timestamp=T, currentTick=300 and lastOperatorActivityTimestamp=T.
 Linked to: UC-TVS1
 
-**FR-TVSE** `When updateTick completes successfully, the system shall emit a TickUpdated event containing the previous tick, the new tick, and the count of initialized ticks crossed.`
-Fit Criterion: Given currentTick=100 and newTick=300 with 3 initialized ticks crossed, the emitted event contains oldTick=100, newTick=300, ticksCrossed=3.
+**FR-TVSE** `When updateTick completes successfully with newTick different from currentTick, the system shall emit a TickUpdated event containing the previous tick, the new tick, and the count of initialized ticks crossed.`
+Fit Criterion: Given currentTick=100 and newTick=300 with 3 initialized ticks crossed, the emitted event contains oldTick=100, newTick=300, ticksCrossed=3. Given newTick equal to currentTick, no event is emitted.
 Linked to: UC-TVS1
 
 **FR-TVSF** `If the number of initialized ticks to cross in a single updateTick call exceeds 256, then the system shall revert.`
@@ -59,8 +59,8 @@ Linked to: UC-TVS1
 Fit Criterion: Given a non-Operator address calls updateTick, the call reverts with NotOperator.
 Linked to: UC-TVS1
 
-**FR-TVSH** `If newTick equals currentTick, then the system shall revert.`
-Fit Criterion: Given currentTick=100, updateTick(100) reverts with SameTick.
+**FR-TVSH** `If newTick equals currentTick, then the system shall record block.timestamp as lastOperatorActivityTimestamp and return without crossing a tick, reading the tick bitmap, or emitting an event, and with no storage write other than lastOperatorActivityTimestamp and the reentrancy guard toggle, which ends at its starting value.`
+Fit Criterion: Given currentTick=100 and initialized ticks on both sides of it, updateTick(100) succeeds, lastOperatorActivityTimestamp equals block.timestamp, no TickUpdated event is emitted, and currentTick, activeLiquidity, feeGrowthGlobalX128, and every tick record are unchanged.
 Linked to: UC-TVS1
 
 **FR-TVSI** `While the vault phase is not Active, when the Operator calls updateTick, the system shall revert.`

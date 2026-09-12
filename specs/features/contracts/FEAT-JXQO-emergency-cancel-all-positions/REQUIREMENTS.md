@@ -4,8 +4,8 @@ name: Emergency Cancel All Positions
 module: contracts
 domain: "@vault"
 status: implemented
-version: 2
-refs: [FEAT-REPZ, FEAT-JGE7]
+version: 3
+refs: [FEAT-REPZ, FEAT-JGE7, FEAT-TVS0]
 ---
 
 # Emergency Cancel All Positions
@@ -48,7 +48,7 @@ Fit Criterion: Given the Operator successfully calls any of `mintPositionFor`, `
 Linked to: UC-JXQW
 
 **FR-3XTW** `When the Operator calls heartbeat(), the system shall reset lastOperatorActivityTimestamp to block.timestamp and change no other vault state.`
-Fit Criterion: Given the Operator calls `heartbeat()`, `lastOperatorActivityTimestamp == block.timestamp` and `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, `phase`, and every position and tick record are unchanged. `heartbeat()` succeeds while the vault is paused, because a pause is an Admin decision about trading and says nothing about whether the Operator is alive.
+Fit Criterion: Given the Operator calls `heartbeat()`, `lastOperatorActivityTimestamp == block.timestamp` and `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, `phase`, and every position and tick record are unchanged. `heartbeat()` succeeds while the vault is paused and while the vault is in WindDown, because a pause is an Admin decision about trading and a wind-down is an Oracle decision about the market, and neither says whether the Operator is alive.
 Linked to: UC-JXQW
 
 **FR-3XTX** `If any caller other than a registered Operator calls heartbeat(), then the system shall revert.`
