@@ -56,6 +56,38 @@ contract RoleManagementBase is Test {
     }
 }
 
+/// @dev Shared base for the propagation tests (SC-FKD4, SC-FKD5, SC-5UJL).
+///      Deploys the factory against mock USDC and ConditionalTokens, then
+///      creates one vault, so each test proves that a role change on the
+///      factory reaches a vault that already exists.
+///      Events are re-declared here for the same reason as above.
+contract VaultPropagationBase is Test {
+    event NewOperator(address indexed newOperatorAddress, address indexed admin);
+    event RemovedOperator(address indexed removedOperator, address indexed admin);
+    event RemovedAdmin(address indexed removedAdmin, address indexed admin);
+    event MinimumFirstLiquidityUpdated(uint128 oldMin, uint128 newMin);
+    event TradingPaused(address indexed caller);
+
+    LPVaultFactory factory;
+    LPVault vault;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    function setUp() public virtual {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        MockConditionalTokens mockCt = new MockConditionalTokens();
+        factory = new LPVaultFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
+        );
+
+        vm.prank(oracleAddr);
+        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+    }
+}
+
 // SC-REQB: Add operator successfully
 // What: Admin can register a new operator address via addOperator, and the
 //       registry reflects the change with the correct event emitted.
@@ -616,28 +648,11 @@ contract RemoveAdminNonAdminTest is RoleManagementBase {
 // Example: vault V exists, admins {admin, secondAdmin} → removeAdmin(secondAdmin)
 //          → secondAdmin calling pauseTrading on V reverts NotAdmin,
 //          admin calling pauseTrading on V succeeds.
-contract AdminRemovalPropagationTest is Test {
-    LPVaultFactory factory;
-    LPVault vault;
-
-    address admin = makeAddr("admin");
+contract AdminRemovalPropagationTest is VaultPropagationBase {
     address secondAdmin = makeAddr("secondAdmin");
-    address oracleAddr = makeAddr("oracle");
-    address operatorAddr = makeAddr("operator");
 
-    event RemovedAdmin(address indexed removedAdmin, address indexed admin);
-    event TradingPaused(address indexed caller);
-
-    function setUp() public {
-        LPVault impl = new LPVault();
-        MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
-        factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorAddr
-        );
-
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
+    function setUp() public override {
+        super.setUp();
 
         // secondAdmin holds the role while the vault already exists
         vm.prank(admin);
@@ -874,41 +889,21 @@ contract RenounceClearsPendingProposalTest is RoleManagementBase {
 //       factory rotation call propagates to every deployed vault without
 //       needing per-vault transactions. This is the core security property
 //       that makes key rotation operationally viable.
-// Example: factory has operator A, vault V deployed → admin removes A,
-//          adds B → A calling notifyFees on V reverts, B succeeds.
+// Example: factory has the initial operator, vault V deployed → admin removes
+//          it, adds B → the initial operator calling notifyFees on V reverts,
+//          B succeeds.
 // ──────────────────────────────────────────────
-contract OperatorRotationPropagationTest is Test {
-    LPVaultFactory factory;
-    LPVault vault;
-
-    address admin = makeAddr("admin");
-    address oracleAddr = makeAddr("oracle");
-    address operatorA = makeAddr("operatorA");
+contract OperatorRotationPropagationTest is VaultPropagationBase {
     address operatorB = makeAddr("operatorB");
 
-    event NewOperator(address indexed newOperatorAddress, address indexed admin);
-    event RemovedOperator(address indexed removedOperator, address indexed admin);
-
-    function setUp() public {
-        LPVault impl = new LPVault();
-        MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
-        factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleAddr, operatorA
-        );
-
-        vm.prank(oracleAddr);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
-    }
-
-    // SC-FKD4: old operator A is rejected after removal from factory
+    // SC-FKD4: the initial operator is rejected after removal from factory
     function test_oldOperatorRejectedAfterRotation() public {
-        // Remove operator A from factory
+        // Remove the initial operator from factory
         vm.prank(admin);
-        factory.removeOperator(operatorA);
+        factory.removeOperator(operatorAddr);
 
-        // Operator A calling an operator-gated function on vault should revert
-        vm.prank(operatorA);
+        // The initial operator calling an operator-gated function on vault should revert
+        vm.prank(operatorAddr);
         vm.expectRevert(LPVault.NotOperator.selector);
         vault.notifyFees(100);
     }
@@ -928,16 +923,16 @@ contract OperatorRotationPropagationTest is Test {
         vault.notifyFees(100);
     }
 
-    // SC-FKD4: full rotation cycle — remove A, add B, verify both
+    // SC-FKD4: full rotation cycle — remove the initial operator, add B, verify both
     function test_fullRotationCycleVerifiesBothDirections() public {
-        // Rotate: remove A, add B
+        // Rotate: remove the initial operator, add B
         vm.startPrank(admin);
-        factory.removeOperator(operatorA);
+        factory.removeOperator(operatorAddr);
         factory.addOperator(operatorB);
         vm.stopPrank();
 
-        // Old operator A: rejected
-        vm.prank(operatorA);
+        // Initial operator: rejected
+        vm.prank(operatorAddr);
         vm.expectRevert(LPVault.NotOperator.selector);
         vault.notifyFees(100);
 
@@ -952,8 +947,8 @@ contract OperatorRotationPropagationTest is Test {
         vm.startPrank(admin);
 
         vm.expectEmit(true, true, false, false, address(factory));
-        emit RemovedOperator(operatorA, admin);
-        factory.removeOperator(operatorA);
+        emit RemovedOperator(operatorAddr, admin);
+        factory.removeOperator(operatorAddr);
 
         vm.expectEmit(true, true, false, false, address(factory));
         emit NewOperator(operatorB, admin);
@@ -971,40 +966,21 @@ contract OperatorRotationPropagationTest is Test {
 // Why:  Oracle key rotation is a critical security operation. Without
 //       propagation, a compromised oracle key remains valid on every
 //       deployed vault until each is individually wound down.
-// Example: factory has oracle X, vault V deployed → admin sets oracle to Y
-//          → X calling setMinimumFirstLiquidity on V reverts, Y succeeds.
+// Example: factory has the initial oracle, vault V deployed → admin sets oracle
+//          to Y → the initial oracle calling setMinimumFirstLiquidity on V
+//          reverts, Y succeeds.
 // ──────────────────────────────────────────────
-contract OracleRotationPropagationTest is Test {
-    LPVaultFactory factory;
-    LPVault vault;
-
-    address admin = makeAddr("admin");
-    address oracleX = makeAddr("oracleX");
+contract OracleRotationPropagationTest is VaultPropagationBase {
     address oracleY = makeAddr("oracleY");
-    address operatorAddr = makeAddr("operator");
 
-    event MinimumFirstLiquidityUpdated(uint128 oldMin, uint128 newMin);
-
-    function setUp() public {
-        LPVault impl = new LPVault();
-        MockERC20 mockUsdc = new MockERC20();
-        MockConditionalTokens mockCt = new MockConditionalTokens();
-        factory = new LPVaultFactory(
-            address(impl), address(mockUsdc), makeAddr("exchange"), address(mockCt), admin, oracleX, operatorAddr
-        );
-
-        vm.prank(oracleX);
-        vault = LPVault(factory.createVault(bytes32(uint256(1)), int24(10), uint128(1000)));
-    }
-
-    // SC-FKD5: old oracle X is rejected after rotation
+    // SC-FKD5: the initial oracle is rejected after rotation
     function test_oldOracleRejectedAfterRotation() public {
         // Rotate oracle on factory
         vm.prank(admin);
         factory.setOracle(oracleY);
 
-        // Old oracle X calling setMinimumFirstLiquidity on vault should revert
-        vm.prank(oracleX);
+        // The initial oracle calling setMinimumFirstLiquidity on vault should revert
+        vm.prank(oracleAddr);
         vm.expectRevert(LPVault.NotOracle.selector);
         vault.setMinimumFirstLiquidity(uint128(2000));
     }
@@ -1038,12 +1014,12 @@ contract OracleRotationPropagationTest is Test {
 
     // SC-FKD5: full oracle rotation — verify both old and new in one test
     function test_fullOracleRotationVerifiesBothDirections() public {
-        // Rotate oracle X → Y
+        // Rotate oracle: initial → Y
         vm.prank(admin);
         factory.setOracle(oracleY);
 
-        // Old oracle X: rejected
-        vm.prank(oracleX);
+        // Initial oracle: rejected
+        vm.prank(oracleAddr);
         vm.expectRevert(LPVault.NotOracle.selector);
         vault.setMinimumFirstLiquidity(uint128(2000));
 
