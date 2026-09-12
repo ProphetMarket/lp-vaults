@@ -35,10 +35,10 @@ Auditors examine these categories first. Every PR must satisfy every applicable 
 5. **Signature handling.** EIP-712 with a domain separator cached at `initialize()`; recompute on `block.chainid` mismatch (cf. OpenZeppelin's EIP712 pattern, inlined). ECDSA recovery enforces `s` malleability bounds and rejects `v` values outside `{27, 28}`.
 6. **External call hygiene.** Use an inline `_safeTransfer` / `_safeTransferFrom` helper that handles both bool-returning and non-bool-returning ERC-20s (USDT semantics). Never call `.call` / `.delegatecall` on user-supplied addresses. The CTF Exchange address is set at `initialize()` and immutable thereafter.
 7. **Initialization guards.** Clones use an `initializer` modifier (one-shot, replay-protected). The implementation contract MUST call `_disableInitializers()` in its constructor. The factory is the only address that can call `initialize` on a clone — enforce via an `onlyFactory` modifier checking `msg.sender == factory`.
-8. **EIP-1167 specifics.** Clones CANNOT use `immutable` — `immutable` values are baked into the implementation's bytecode and shared across all clones. All per-vault configuration (`marketId`, `usdc`, `exchange`, `oracle`, `tickSpacing`) lives in storage and is set inside `initialize()`. At every such storage variable, add a comment: `// would be immutable in a non-clone contract; storage because EIP-1167.`
+8. **EIP-1167 specifics.** Clones CANNOT use `immutable` — `immutable` values are baked into the implementation's bytecode and shared across all clones. All per-vault configuration (`marketId`, `usdc`, `exchange`, `conditionalTokens`, `conditionId`, `yesTokenId`, `noTokenId`, `tickSpacing`, `minimumFirstLiquidity`) lives in storage and is set inside `initialize()`. At every such storage variable, add a comment: `// would be immutable in a non-clone contract; storage because EIP-1167.`
 9. **Fee accumulator safety.** `notifyFees(amount)` MUST revert when `activeLiquidity == 0` — never silently lock fees in the contract. Q128 division truncates downward; the dust accumulates and is recovered on the next call. Document the dust path at the call site.
 10. **Tick math bounds.** `updateTick(newTick)` caps the number of ticks crossed per call (256). Revert if exceeded; force the keeper to chunk via multiple calls. Use a `TickBitmap`-style structure (inline) to skip uninitialized ticks rather than walking the full range.
-11. **Approval scope.** `setApprovalForAll(exchange, true)` on the CTF is acceptable BECAUSE the vault holds outcome tokens for exactly one market — token IDs for other markets cannot enter the vault (no entry point exists). Add a NatSpec comment at the call site documenting this assumption.
+11. **Approval scope.** `setApprovalForAll(exchange, true)` on the CTF is acceptable BECAUSE the vault holds outcome tokens for exactly one market. The receiver hooks enforce this: they revert on every token ID other than the vault's `yesTokenId` and `noTokenId`, which the factory verifies against `conditionId` at `createVault`. Add a NatSpec comment at the call site documenting this check.
 12. **Timestamp dependence.** Use `block.number` for ordering when possible. Timelocks (e.g., `RECLAIM_TIMELOCK`) may use `block.timestamp` but with a documented ±15s tolerance (Polygon block time). Never use `block.timestamp` for randomness.
 13. **Front-running / MEV.** The `feeGrowthInsideLastX128` snapshot at mint time already prevents fee-distribution MEV (new positions can't claim past fees). Any new operator-callable action that touches accounting MUST include an `MEV analysis:` NatSpec block before merge.
 
@@ -58,7 +58,7 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 
 | Function | Role | Contract |
 |---|---|---|
-| `createVault(marketId, tickSpacing)` | Oracle | `LPVaultFactory` |
+| `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` | Oracle | `LPVaultFactory` |
 | `setOracle`, `addOperator`, `removeOperator`, `pauseTrading` | Admin | both |
 | `transferAdmin`, `acceptAdmin` | Admin | `LPVaultFactory` |
 | `addAdmin`, `removeAdmin`, `renounceAdminRole` | Admin | `LPVaultFactory` |
@@ -89,6 +89,7 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
   - `test/features/{FEAT-dir}/{UC-dir}.t.sol` — integration tests, **one file per use case**. The path is derived from `specs/MODULES.md` (`Tests` column) and the spec tree; it is never chosen ad hoc. Every task and fix that touches a UC appends to that UC's single file — never a new numbered file.
   - `test/invariants/` — invariant tests (Foundry's `forge-std/StdInvariant.sol`)
   - `test/integration/` — forked-Polygon scenarios against deployed `ProphetCTFExchange`
+  - `test/fixtures/` — shared test fixtures: the real Conditional Tokens deployer, the one ERC-20 mock, and the vault storage helpers. Test files import them. `src/` never does.
 - Fuzz tests on all arithmetic-heavy code (Q128 math, liquidity formula, tick crossing).
 - Invariants on every state-machine property. Required invariants:
   - `Σ position.liquidity over in-range positions == activeLiquidity`

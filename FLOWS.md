@@ -53,9 +53,10 @@ sequenceDiagram
     Factory-->>Admin: factory address
 
     Note over Oracle,Vault: ── STEP 2: Create a vault for a market ─────────────────────
-    Oracle->>Factory: createVault(marketId, tickSpacing, minFirstLiq)
+    Oracle->>Factory: createVault(marketId, tickSpacing, minFirstLiq,<br/>conditionId, yesTokenId, noTokenId)
+    Note right of Factory: Checks the outcome-token identity<br/>against the ConditionalTokens contract
     Factory->>Vault: EIP-1167 clone deploy
-    Factory->>Vault: initialize(marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minFirstLiq, version)
+    Factory->>Vault: initialize(marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minFirstLiq, version,<br/>conditionId, yesTokenId, noTokenId)
     Vault-->>Factory: initialized
     Factory-->>Oracle: vault address
     Note right of Vault: Phase = Active<br/>activeLiquidity = 0

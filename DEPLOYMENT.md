@@ -323,11 +323,13 @@ After the factory is deployed, the **Oracle** must call `createVault` to deploy 
 
 ```bash
 cast send <FACTORY_ADDRESS> \
-  "createVault(bytes32,int24,uint128)" \
-  <MARKET_ID> <TICK_SPACING> <MIN_FIRST_LIQUIDITY> \
+  "createVault(bytes32,int24,uint128,bytes32,uint256,uint256)" \
+  <MARKET_ID> <TICK_SPACING> <MIN_FIRST_LIQUIDITY> <CONDITION_ID> <YES_TOKEN_ID> <NO_TOKEN_ID> \
   --rpc-url https://polygon-rpc.com \
   --account <oracle-account-name>
 ```
+
+`<CONDITION_ID>` is the market's condition ID on the ConditionalTokens contract. `<YES_TOKEN_ID>` is the index set 1 position ID and `<NO_TOKEN_ID>` is the index set 2 position ID of that condition, with USDC as collateral. Read both from the ConditionalTokens contract with `getPositionId(<USDC>, getCollectionId(0x0000000000000000000000000000000000000000000000000000000000000000, <CONDITION_ID>, 1))` for YES and the same call with index set `2` for NO. The factory checks all three values and reverts before it deploys a vault if any value is wrong, because a vault can never correct its identity later.
 
 The **Admin** should immediately:
 1. Confirm the initial operator and oracle are set correctly by calling `operators(<address>)` and `oracle()` on the factory.
@@ -348,3 +350,8 @@ The **Admin** should immediately:
 | `insufficient funds` | Deployer has no MATIC | Fund from faucet (Amoy) or bridge (mainnet) |
 | Compilation error `0.8.20` | Wrong compiler installed | Run `forge build --use solc:0.8.20` |
 | `DuplicateMarket()` on createVault | Vault for this marketId already exists | Check `vaultForMarket[marketId]` on the factory |
+| `ZeroConditionId()` on createVault | `<CONDITION_ID>` is zero | Pass the market's condition ID |
+| `ZeroTokenId()` on createVault | `<YES_TOKEN_ID>` or `<NO_TOKEN_ID>` is zero | Pass both outcome token IDs |
+| `DuplicateTokenId()` on createVault | The same ID was passed for YES and NO | Pass the index set 1 ID as YES and the index set 2 ID as NO |
+| `NotBinaryCondition()` on createVault | The condition is not prepared, or it has 3 or more outcomes | Call `getOutcomeSlotCount(<CONDITION_ID>)` on the ConditionalTokens contract. It must return `2` |
+| `TokenIdMismatch()` on createVault | The token IDs belong to another condition, or YES and NO are swapped | Recompute both IDs from `<CONDITION_ID>` with USDC as collateral, index set 1 for YES and index set 2 for NO |

@@ -66,31 +66,41 @@ sequenceDiagram
 function createVault(
     bytes32 marketId_,
     int24   tickSpacing_,
-    uint128 minimumFirstLiquidity_
+    uint128 minimumFirstLiquidity_,
+    bytes32 conditionId_,
+    uint256 yesTokenId_,
+    uint256 noTokenId_
 ) external onlyOracle returns (address vault)
 ```
 
 **Actor:** Oracle
 
-Deploys an EIP-1167 minimal-proxy clone of the current implementation, calls `initialize()` on it, and registers it in `vaultForMarket`.
+Verifies the market's outcome-token identity against the ConditionalTokens contract, deploys an EIP-1167 minimal-proxy clone of the current implementation, calls `initialize()` on it, and registers it in `vaultForMarket`. A clone can never correct its identity, so a wrong identity reverts before any clone exists.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `marketId_` | `bytes32` | Unique identifier for the market — must not already have a vault |
 | `tickSpacing_` | `int24` | Minimum tick increment; all position bounds must be multiples of this value |
 | `minimumFirstLiquidity_` | `uint128` | Floor on the liquidity value of the first mint (prevents inflation attacks); must be > 0 |
+| `conditionId_` | `bytes32` | ConditionalTokens condition ID of the market; must be a prepared 2-outcome condition |
+| `yesTokenId_` | `uint256` | YES outcome token ID: the index set 1 position ID of `(usdc, conditionId_)` |
+| `noTokenId_` | `uint256` | NO outcome token ID: the index set 2 position ID of `(usdc, conditionId_)` |
 
 ```mermaid
 sequenceDiagram
     actor Oracle
     participant Factory as LPVaultFactory
+    participant CT as ConditionalTokens
     participant Vault as LPVault (new clone)
 
-    Oracle->>Factory: createVault(marketId, tickSpacing, minFirstLiq)
-    Note right of Factory: Checks:<br/>minFirstLiq > 0<br/>vaultForMarket[marketId] == 0
+    Oracle->>Factory: createVault(marketId, tickSpacing, minFirstLiq,<br/>conditionId, yesTokenId, noTokenId)
+    Note right of Factory: Checks:<br/>minFirstLiq > 0<br/>vaultForMarket[marketId] == 0<br/>conditionId, yesTokenId, noTokenId non-zero<br/>yesTokenId != noTokenId
+    Factory->>CT: getOutcomeSlotCount(conditionId)
+    Factory->>CT: getCollectionId and getPositionId<br/>for index sets 1 and 2
+    Note right of Factory: Checks:<br/>outcome slot count == 2<br/>yesTokenId == index set 1 ID<br/>noTokenId == index set 2 ID
     Factory->>Vault: EIP-1167 deploy (clone of implementation)
     Factory->>Factory: vaultForMarket[marketId] = vault
-    Factory->>Vault: initialize(marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minFirstLiq, implementationVersion)
+    Factory->>Vault: initialize(marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minFirstLiq, implementationVersion,<br/>conditionId, yesTokenId, noTokenId)
     Vault-->>Factory: initialized
     Note right of Factory: VaultCreated event emitted
     Factory-->>Oracle: vault address
@@ -102,6 +112,11 @@ sequenceDiagram
 - `NotOracle()` — caller is not the oracle
 - `ZeroFloor()` — `minimumFirstLiquidity_` is 0
 - `DuplicateMarket()` — a vault already exists for `marketId_`
+- `ZeroConditionId()` — `conditionId_` is 0
+- `ZeroTokenId()` — `yesTokenId_` or `noTokenId_` is 0
+- `DuplicateTokenId()` — `yesTokenId_` equals `noTokenId_`
+- `NotBinaryCondition()` — the condition's outcome slot count is not 2; an unprepared condition returns 0
+- `TokenIdMismatch()` — `yesTokenId_` is not the index set 1 position ID, or `noTokenId_` is not the index set 2 position ID, of `(usdc, conditionId_)`
 - `CloneDeployFailed()` — EIP-1167 `create` returned address(0)
 
 ---
@@ -117,13 +132,16 @@ function initialize(
     int24   tickSpacing_,
     address factory_,
     uint128 minimumFirstLiquidity_,
-    uint256 version_
+    uint256 version_,
+    bytes32 conditionId_,
+    uint256 yesTokenId_,
+    uint256 noTokenId_
 ) external initializer
 ```
 
 **Actor:** Factory only (enforced by `onlyFactory` check inside the function)
 
-Called once by the factory immediately after cloning. Stores all per-vault configuration, sets the vault phase to Active, pre-approves the exchange for USDC and outcome tokens, and snapshots the EIP-712 domain separator.
+Called once by the factory immediately after cloning. Stores all per-vault configuration, including the outcome-token identity, sets the vault phase to Active, pre-approves the exchange for USDC and outcome tokens, and snapshots the EIP-712 domain separator. It makes no identity check of its own: only the factory can call it, and `createVault` verifies the identity before it deploys the clone.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -135,6 +153,9 @@ Called once by the factory immediately after cloning. Stores all per-vault confi
 | `factory_` | `address` | Factory that deployed this clone — must equal `msg.sender` |
 | `minimumFirstLiquidity_` | `uint128` | Floor for the first mint while `activeLiquidity == 0` |
 | `version_` | `uint256` | Factory's `implementationVersion` at deploy time; stored for off-chain identification |
+| `conditionId_` | `bytes32` | ConditionalTokens condition ID of the market; stored as `conditionId` |
+| `yesTokenId_` | `uint256` | Index set 1 (YES) position ID; stored as `yesTokenId` |
+| `noTokenId_` | `uint256` | Index set 2 (NO) position ID; stored as `noTokenId` |
 
 ```mermaid
 sequenceDiagram
@@ -145,7 +166,7 @@ sequenceDiagram
 
     Factory->>Vault: initialize(...)
     Note right of Vault: Checks:<br/>not already initialized<br/>msg.sender == factory_
-    Note right of Vault: Store: marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minimumFirstLiquidity,<br/>implementationVersion = version_
+    Note right of Vault: Store: marketId, usdc, exchange, ctf,<br/>conditionId, yesTokenId, noTokenId,<br/>tickSpacing, factory, minimumFirstLiquidity,<br/>implementationVersion = version_
     Note right of Vault: phase = 1 (Active)<br/>reentrancyGuard = 1<br/>lastOperatorActivityTimestamp = now
     Note right of Vault: Cache EIP-712 domain separator
     Vault->>USDC: approve(exchange, type(uint256).max)
@@ -157,6 +178,37 @@ sequenceDiagram
 **Reverts:**
 - `AlreadyInitialized()` — called a second time
 - `NotFactory()` — `msg.sender != factory_`
+
+---
+
+### `LPVault.onERC1155Received`, `LPVault.onERC1155BatchReceived`, `LPVault.supportsInterface`
+
+```solidity
+function onERC1155Received(address, address, uint256 id, uint256, bytes calldata)
+    external view onlyConditionalTokens returns (bytes4)
+
+function onERC1155BatchReceived(address, address, uint256[] calldata ids, uint256[] calldata, bytes calldata)
+    external view onlyConditionalTokens returns (bytes4)
+
+function supportsInterface(bytes4 interfaceId) external pure returns (bool)
+```
+
+**Actor:** The vault's own ConditionalTokens contract, during `safeTransferFrom` or `safeBatchTransferFrom`. `supportsInterface` is a public view for any caller.
+
+The two hooks let the vault receive its outcome tokens: the ERC-1155 standard makes the token contract call them on a contract recipient and revert unless it gets the acknowledgement value back. Both hooks are stateless. They write nothing, merge nothing, and take no reentrancy guard, because a hook runs inside the exchange's settlement transaction and a revert there reverts the match. Each hook returns its acknowledgement value only when the caller is the vault's configured `conditionalTokens` and every token ID is the vault's `yesTokenId` or `noTokenId`, which the factory verified at `createVault`. The unscoped `setApprovalForAll(exchange, true)` that `initialize` grants is acceptable because of this check: no other market's token can enter the vault.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `id` / `ids` | `uint256` / `uint256[]` | The token ID, or every token ID of the batch; each must be `yesTokenId` or `noTokenId` |
+| `interfaceId` | `bytes4` | `0x4e2312e0` (IERC1155Receiver) and `0x01ffc9a7` (ERC-165) return `true`; any other value returns `false` |
+
+**Returns:** `0xf23a6e61` from `onERC1155Received`, `0xbc197c81` from `onERC1155BatchReceived`.
+
+**Events:** none
+
+**Reverts:**
+- `NotConditionalTokens()` — the caller is not the vault's configured ConditionalTokens contract
+- `UnknownTokenId()` — a token ID is neither `yesTokenId` nor `noTokenId`; in a batch, one such element rejects the whole batch
 
 ---
 
