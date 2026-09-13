@@ -251,7 +251,9 @@ contract MintRevertsInWindDownTest is StartWindDownTestBase {
 // ──────────────────────────────────────────────
 // SC-JGEK: Exit paths succeed in WindDown
 // What: After startWindDown(), collect still works for positions with accrued
-//       fees. LPs can exit their positions without being blocked by the phase.
+//       fees, and burnPosition deletes the position, removes its liquidity
+//       from both ticks, and pays the Safe the claim's USDC. The position sits
+//       at its mint tick, so the claim is USDC only.
 // Why:  Capital must never be stranded. The wind-down only prevents new mints;
 //       all exit paths remain open so LPs can withdraw.
 // ──────────────────────────────────────────────
@@ -300,6 +302,30 @@ contract ExitPathsSucceedInWindDownTest is StartWindDownTestBase {
         vm.prank(lp);
         vault.collect(positionId);
 
+        assertEq(vault.phase(), 2, "phase should still be WindDown");
+    }
+
+    // SC-JGEK, FR-JGEC: after the collect, the burn pays the claim's USDC and deletes the position
+    function test_burnSucceedsInWindDownAfterCollect() public {
+        vm.prank(lp);
+        vault.collect(positionId);
+        uint256 afterCollect = mockUsdc.balanceOf(lp);
+        (,,,, uint128 liquidity,,) = vault.positions(positionId);
+        assertEq(vault.activeLiquidity(), liquidity, "precondition: the position is in range at its mint tick");
+
+        vm.prank(lp);
+        vault.burnPosition(positionId);
+
+        // 1000 USDC over [0, 100) at its mint tick: every level is still USDC
+        assertEq(mockUsdc.balanceOf(lp) - afterCollect, 1000, "the Safe receives the whole principal");
+        (address owner,,,, uint128 liqAfter,,) = vault.positions(positionId);
+        assertEq(owner, address(0), "the position record is deleted");
+        assertEq(liqAfter, 0, "the position record is deleted");
+        (uint128 gLower,,) = vault.ticks(int24(0));
+        (uint128 gUpper,,) = vault.ticks(int24(100));
+        assertEq(gLower, 0, "tick 0 lost the liquidity");
+        assertEq(gUpper, 0, "tick 100 lost the liquidity");
+        assertEq(vault.activeLiquidity(), 0, "activeLiquidity fell by the position's liquidity");
         assertEq(vault.phase(), 2, "phase should still be WindDown");
     }
 }

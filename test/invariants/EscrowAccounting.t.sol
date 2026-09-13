@@ -61,7 +61,8 @@ contract EscrowAccountingHandler is LPVaultFixture {
     {
         uint256 pk = _key(keySeed);
         address safe = _safeOf(vm.addr(pk));
-        int24 tickLower = int24(bound(tickLowerSeed, -2000, 2000) / 10 * 10);
+        // Inside the price scale [0, 10000] (FR-T7B2), so the range bound rejects no deposit
+        int24 tickLower = int24(bound(tickLowerSeed, 0, 8000) / 10 * 10);
         int24 width = int24(uint24(bound(widthSeed, 10, 200) * 10));
         int24 tickUpper = tickLower + width;
         uint256 amount = bound(amountSeed, 1e6, 10e18);

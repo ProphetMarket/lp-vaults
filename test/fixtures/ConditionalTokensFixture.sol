@@ -3,8 +3,11 @@ pragma solidity 0.8.20;
 
 // FEAT-REPZ: Deploy LP Vault for a Market
 // UC-REQ1: Create Vault for Market
+// FEAT-6HBN: Complete-Set Merge and Resolution Redemption
+// FEAT-7G40: Burn LP Position
 // Shared test fixture: the real Gnosis ConditionalTokens bytecode and the helpers that
-// prepare a binary condition and create a vault with a verified outcome-token identity.
+// prepare a binary condition, create a vault with a verified outcome-token identity, and
+// fund a vault with outcome tokens.
 // Test files import it. src/ never does.
 
 import {Test} from "forge-std/Test.sol";
@@ -82,6 +85,7 @@ abstract contract ConditionalTokensFixture is Test {
         uint128 minimumFirstLiquidity
     ) internal returns (address vault) {
         (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) = _prepareBinaryCondition(marketId, factory.usdc());
+        collateralOf[conditionId] = factory.usdc();
         vm.prank(oracle);
         vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId);
     }
@@ -93,6 +97,32 @@ abstract contract ConditionalTokensFixture is Test {
         usdc.approve(address(ctf), amount);
         ctf.splitPosition(address(usdc), bytes32(0), conditionId, _binaryPartition(), amount);
         vm.stopPrank();
+    }
+
+    /// @dev Gives `vault` `yesAmount` YES and `noAmount` NO, so a burn's token leg and the merge
+    ///      run against real balances. Splits max(yesAmount, noAmount) USDC to a throwaway holder
+    ///      through _mintCompleteSets, then transfers the asked amounts to the vault; the holder
+    ///      keeps the rest. The vault's receiver hook accepts its own two token IDs.
+    function _giveOutcomeTokens(address vault, bytes32 conditionId, uint256 yesAmount, uint256 noAmount) internal {
+        uint256 amount = yesAmount > noAmount ? yesAmount : noAmount;
+        if (amount == 0) return;
+        address holder = makeAddr("outcome-token-holder");
+        MockERC20 usdc = MockERC20(_collateralOf(conditionId));
+        _mintCompleteSets(usdc, holder, conditionId, amount);
+        uint256 yesId = ctf.getPositionId(address(usdc), ctf.getCollectionId(bytes32(0), conditionId, 1));
+        uint256 noId = ctf.getPositionId(address(usdc), ctf.getCollectionId(bytes32(0), conditionId, 2));
+        vm.startPrank(holder);
+        if (yesAmount > 0) ctf.safeTransferFrom(holder, vault, yesId, yesAmount, "");
+        if (noAmount > 0) ctf.safeTransferFrom(holder, vault, noId, noAmount, "");
+        vm.stopPrank();
+    }
+
+    /// @dev The collateral each prepared condition was split against, recorded by _createVault
+    ///      so _giveOutcomeTokens needs no extra argument.
+    mapping(bytes32 => address) internal collateralOf;
+
+    function _collateralOf(bytes32 conditionId) internal view returns (address) {
+        return collateralOf[conditionId];
     }
 
     /// @dev The partition [1, 2]: YES then NO.

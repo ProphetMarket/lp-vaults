@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.20;
 
+// FEAT-TVS0: Update Tick and Cross Ticks (the planted extreme ticks)
+// FEAT-6HBN: Complete-Set Merge and Resolution Redemption (the Cancelled phase)
 // Shared test fixture: writes LPVault storage fields that no entry point sets on demand.
 // Test files import it. src/ never does.
 
@@ -25,6 +27,41 @@ library VaultStorage {
         // casting to 'uint256' is safe because the two's complement bit pattern is the key itself
         // forge-lint: disable-next-line(unsafe-typecast)
         store.target(vault).sig("ticks(int24)").with_key(bytes32(uint256(int256(tick)))).depth(2).checked_write(value);
+    }
+
+    /// @dev Overwrites phase. Used to reach the Cancelled phase where the tested function reads
+    ///      only `phase`, because the real emergencyCancelAll needs a position and a 7-day silence
+    ///      that the emergency-cancel tests already prove.
+    function setPhase(StdStorage storage store, address vault, uint8 phase) internal {
+        // `phase` shares a slot with `_initialized` and `paused`, so the packed-slot mode
+        // finds the byte inside the word and writes only that byte.
+        store.enable_packed_slots().target(vault).sig("phase()").checked_write(uint256(phase));
+    }
+
+    /// @dev Plants an initialized tick: writes ticks[tick].liquidityGross, the first field of a
+    ///      TickInfo, and sets the tick's bitmap bit, with no position behind it. The four
+    ///      extreme-word search tests use it, because a mint is bounded to the price scale
+    ///      [0, 10000] and cannot reach tick 8,388,590 (FEAT-T7AF FR-T7B2).
+    function plantTick(StdStorage storage store, address vault, int24 tick, uint128 liquidityGross) internal {
+        // casting to 'uint256' is safe because the two's complement bit pattern is the key itself
+        // forge-lint: disable-next-line(unsafe-typecast)
+        store.target(vault).sig("ticks(int24)").with_key(bytes32(uint256(int256(tick)))).depth(0)
+            .checked_write(uint256(liquidityGross));
+
+        // The same decomposition as LPVault._tickPosition: an arithmetic shift for the word and
+        // the low eight bits for the position inside it.
+        // casting to 'int16' is safe because an int24 shifted right by 8 fits in 16 bits
+        // forge-lint: disable-next-line(unsafe-typecast)
+        int16 wordPos = int16(tick >> 8);
+        // casting to 'uint8' is safe because the mask keeps eight bits
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint8 bitPos = uint8(uint24(tick) & 0xff);
+        // casting to 'uint256' is safe because the two's complement bit pattern is the key itself
+        // forge-lint: disable-next-line(unsafe-typecast)
+        bytes32 key = bytes32(uint256(int256(wordPos)));
+        uint256 word = store.target(vault).sig("tickBitmap(int16)").with_key(key).read_uint();
+        // forge-lint: disable-next-line(incorrect-shift)
+        store.target(vault).sig("tickBitmap(int16)").with_key(key).checked_write(word | (uint256(1) << bitPos));
     }
 
     /// @dev Overwrites currentTick. The write moves no liquidity: `activeLiquidity` and every

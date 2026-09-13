@@ -15,8 +15,12 @@ pragma solidity 0.8.20;
 // Since R8 (decision C19) the file also proves the backing form: notifyFees
 // takes the USDC it credits, so the vault's balance covers escrow, principal,
 // and every claimable fee, with no exchange fill (see invariant_feeCreditsAreBacked).
+// Since R9 the handler also burns (FEAT-7G40): a burn pays the position's fees with
+// its principal, so the ghost totals move by what the event reports, and a short
+// collect leaves its remainder in tokensOwed, which the claimable sum reads.
 
 import {StdInvariant} from "forge-std/StdInvariant.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../src/LPVaultFactory.sol";
 import {LPVault} from "../../src/LPVault.sol";
 import {LPVaultFixture} from "../fixtures/LPVaultFixture.sol";
@@ -65,7 +69,8 @@ contract FeeGrowthAccountingHandler is LPVaultFixture {
     // stays well under uint128's range -- that overflow belongs to FEAT-T7AF's
     // mint feature, not the fee-growth arithmetic this invariant targets.
     function mint(int256 tickLowerSeed, uint256 widthSeed, uint256 usdcAmountSeed) public {
-        int24 tickLower = int24(bound(tickLowerSeed, -2000, 2000) / 10 * 10);
+        // Inside the price scale [0, 10000] (FR-T7B2), so the range bound rejects no mint
+        int24 tickLower = int24(bound(tickLowerSeed, 0, 8000) / 10 * 10);
         int24 width = int24(uint24(bound(widthSeed, 10, 200) * 10));
         int24 tickUpper = tickLower + width;
         uint256 usdcAmount = bound(usdcAmountSeed, 1e6, 10e18);
@@ -115,6 +120,49 @@ contract FeeGrowthAccountingHandler is LPVaultFixture {
     }
 
     uint256 public totalFeesPaidOut;
+
+    event PositionBurned(
+        uint256 indexed positionId,
+        address indexed owner,
+        uint256 usdcOwed,
+        uint256 feesOwed,
+        uint256 usdcPaid,
+        uint256 tokenId,
+        uint256 tokenOwed,
+        uint256 tokenPaid
+    );
+
+    /// @dev The Safe burns a random position. On success the burn's feesOwed joins the paid-out
+    ///      total and the position's full principal (liquidity * width / 1e18) leaves the ghost
+    ///      principal, whatever the claim paid in USDC: the harness holds no outcome token, so a
+    ///      token leg pays nothing and the vault keeps that USDC, which only strengthens the
+    ///      backing bound. The record stays in the list; a burned record reads zero, and
+    ///      _totalClaimable skips it.
+    function burn(uint256 idSeed) public {
+        if (positionIds.length == 0) return;
+        uint256 id = positionIds[idSeed % positionIds.length];
+        (, int24 tickLower, int24 tickUpper,, uint128 liquidity,,) = vault.positions(id);
+        if (liquidity == 0) return;
+        uint256 principal = uint256(liquidity) * uint256(int256(tickUpper - tickLower)) / 1e18;
+
+        vm.recordLogs();
+        vm.prank(lp);
+        try vault.burnPosition(id) {
+            totalFeesPaidOut += _feesOwedOf(vm.getRecordedLogs());
+            totalPrincipalMinted -= principal;
+        } catch {}
+    }
+
+    function _feesOwedOf(Vm.Log[] memory logs) internal pure returns (uint256) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == PositionBurned.selector) {
+                (, uint256 feesOwed,,,,) =
+                    abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+                return feesOwed;
+            }
+        }
+        revert("a successful burn must emit PositionBurned");
+    }
 }
 
 contract FeeGrowthAccountingInvariantTest is StdInvariant, LPVaultFixture {

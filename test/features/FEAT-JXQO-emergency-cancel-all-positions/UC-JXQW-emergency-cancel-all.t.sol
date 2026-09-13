@@ -296,13 +296,13 @@ contract MultiLPDistributionTest is EmergencyCancelTestBase {
 }
 
 // ──────────────────────────────────────────────
-// SC-JXR1: Terminal state gates off all operations
-// What: After emergencyCancelAll(), every state-changing function reverts.
+// SC-JXR1: Terminal state gates off trading, and every exit stays open
+// What: After emergencyCancelAll(), every trading entry point reverts.
 //       mintPositionFor, updateTick, startWindDown revert with VaultNotActive.
-//       collect, notifyFees revert with VaultCancelled.
-//       emergencyCancelAll itself reverts (already cancelled).
-// Why:  The Cancelled state is terminal — no further operations should succeed
-//       on a vault where all funds have been distributed.
+//       notifyFees, mergePositions, heartbeat revert with VaultCancelled.
+//       emergencyCancelAll itself reverts (already cancelled). collect succeeds
+//       and pays zero, and mergeCompleteSets succeeds (decision C9).
+// Why:  The Cancelled state stops trading; it never locks an exit.
 // ──────────────────────────────────────────────
 contract TerminalStateGatingTest is EmergencyCancelTestBase {
     function setUp() public override {
@@ -371,11 +371,27 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
         assertEq(mockUsdc.balanceOf(lpA) - before_, 500, "the relayed reclaim pays after the cancel");
     }
 
-    // SC-JXR1: collect reverts with VaultCancelled
-    function test_collectReverts() public {
+    // SC-JXR1, FR-JXQT: collect succeeds and pays zero, because the cancel zeroed the position
+    function test_collectSucceedsAndPaysZero() public {
+        uint256 before_ = mockUsdc.balanceOf(lpA);
+
         vm.prank(lpA);
-        vm.expectRevert(LPVault.VaultCancelled.selector);
         vault.collect(positionIdA);
+
+        assertEq(mockUsdc.balanceOf(lpA), before_, "the cancel already paid the position");
+        assertEq(vault.phase(), 3, "phase stays Cancelled");
+    }
+
+    // SC-JXR1, FR-JXQT: mergeCompleteSets succeeds in the Cancelled phase
+    function test_mergeCompleteSetsSucceeds() public {
+        _giveOutcomeTokens(address(vault), vault.conditionId(), 10, 10);
+        uint256 before_ = mockUsdc.balanceOf(address(vault));
+
+        vm.prank(makeAddr("anyone"));
+        vault.mergeCompleteSets();
+
+        assertEq(mockUsdc.balanceOf(address(vault)), before_ + 10, "the merge adds 10 USDC");
+        assertEq(vault.phase(), 3, "phase stays Cancelled");
     }
 
     // SC-JXR1: notifyFees reverts with VaultCancelled

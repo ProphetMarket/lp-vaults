@@ -3,9 +3,10 @@ pragma solidity 0.8.20;
 
 // UC-U07A: Collect Position Fees
 // Integration tests for every scenario in this use case.
-// Covers: SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E
+// Covers: SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-BMFF
 
 import {Test} from "forge-std/Test.sol";
+import {Vm} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
@@ -36,8 +37,9 @@ contract CollectFeesTestBase is LPVaultFixture {
     uint256 constant LIQUIDITY_PRECISION = 1e18;
     uint256 constant Q128 = 2 ** 128;
 
-    // Event declared for expectEmit
+    // Events declared for expectEmit and log reads
     event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
+    event CompleteSetsMerged(address indexed caller, uint256 amount);
 
     // Position minted in setUp: range [0, 100), 1000 USDC, positionId = 0
     uint256 positionId;
@@ -638,5 +640,192 @@ contract FeeGrowthWraparoundFuzzTest is FeeGrowthWraparoundTestBase {
         uint256 owed = vaultBalBefore - mockUsdc.balanceOf(address(vault));
 
         assertEq(owed, 0, "an immediate collect on a wrapped snapshot must owe nothing");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-BMFD: Collect in the Cancelled phase does not revert
+// What: After a real emergencyCancelAll the position is zeroed. The Safe's collect
+//       succeeds, pays nothing, emits nothing, and the phase stays 3.
+// Why:  Decision C9: no exit reverts on the phase. At this step the cancel paid the
+//       position; after R10 the cancel is a freeze and the collect pays the fees.
+// ──────────────────────────────────────────────
+contract CollectInCancelledPhaseTest is CollectFeesTestBase {
+    function setUp() public override {
+        super.setUp();
+        _distributeFees(500);
+        vm.warp(block.timestamp + vault.EMERGENCY_CANCEL_TIMELOCK() + 1);
+        vm.prank(lp);
+        vault.emergencyCancelAll();
+        assertEq(vault.phase(), 3, "precondition: Cancelled");
+    }
+
+    // SC-BMFD: the collect does not revert and pays zero
+    function test_whenCancelledThenCollectSucceedsAndPaysZero() public {
+        uint256 lpBefore = mockUsdc.balanceOf(lp);
+
+        vm.recordLogs();
+        vm.prank(lp);
+        vault.collect(positionId);
+
+        assertEq(mockUsdc.balanceOf(lp), lpBefore, "the cancel already paid the position");
+        assertEq(vm.getRecordedLogs().length, 0, "no FeesCollected and no merge");
+        assertEq(vault.phase(), 3, "phase stays Cancelled");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-BMFE: Collect merges the vault's pairs first
+// What: The vault holds 50 YES and 50 NO. A paying collect merges them, then pays the
+//       fees; CompleteSetsMerged(safe, 50) precedes FeesCollected in the log.
+// Why:  Decision C26: a pair is worth exactly 1 USDC and a payout turns it into USDC first.
+// ──────────────────────────────────────────────
+contract CollectMergesFirstTest is CollectFeesTestBase {
+    uint256 constant PAIRS = 50;
+
+    function setUp() public override {
+        super.setUp();
+        _distributeFees(500);
+        _giveOutcomeTokens(address(vault), vault.conditionId(), PAIRS, PAIRS);
+    }
+
+    // SC-BMFE: the pairs are gone and the LP receives the fees
+    function test_whenVaultHoldsPairsThenCollectMergesThem() public {
+        uint256 expectedOwed = uint256(positionLiquidity) * vault.feeGrowthGlobalX128() / Q128;
+        uint256 vaultBefore = mockUsdc.balanceOf(address(vault));
+
+        vm.prank(lp);
+        vault.collect(positionId);
+
+        assertEq(ctf.balanceOf(address(vault), vault.yesTokenId()), 0, "no YES after the merge");
+        assertEq(ctf.balanceOf(address(vault), vault.noTokenId()), 0, "no NO after the merge");
+        assertEq(mockUsdc.balanceOf(address(vault)), vaultBefore + PAIRS - expectedOwed, "50 in, the fees out");
+        assertEq(mockUsdc.balanceOf(lp), expectedOwed, "the LP receives the fees");
+    }
+
+    // SC-BMFE: CompleteSetsMerged(safe, 50) precedes FeesCollected
+    function test_whenVaultHoldsPairsThenMergeLogPrecedesFeesCollected() public {
+        vm.recordLogs();
+        vm.prank(lp);
+        vault.collect(positionId);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        uint256 mergedAt = type(uint256).max;
+        uint256 collectedAt = type(uint256).max;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == CompleteSetsMerged.selector) {
+                mergedAt = i;
+                assertEq(address(uint160(uint256(logs[i].topics[1]))), lp, "the caller is the Safe");
+                assertEq(abi.decode(logs[i].data, (uint256)), PAIRS, "50 pairs merged");
+            }
+            if (logs[i].topics[0] == FeesCollected.selector) collectedAt = i;
+        }
+        assertLt(mergedAt, collectedAt, "the merge precedes FeesCollected");
+    }
+
+    // FR-U07K: a zero-owed collect reads no balance and merges nothing
+    function test_whenNothingOwedThenNoMerge() public {
+        vm.prank(lp);
+        vault.collect(positionId);
+
+        vm.recordLogs();
+        vm.prank(lp);
+        vault.collect(positionId);
+
+        assertEq(vm.getRecordedLogs().length, 0, "a zero-owed collect merges nothing");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-BMFF: Collect keeps its unpaid remainder
+// What: Case A: the vault holds 4 USDC above escrow against 10 owed; the collect pays 4,
+//       keeps 6 in tokensOwed, and a later collect pays the 6 once the vault holds them.
+//       Case B: the vault's balance is below totalEscrowed; the collect pays zero, does not
+//       revert, and keeps the whole amount.
+// Why:  Decisions C6, C7, and O2: no revert on the comparison, escrowed USDC never pays a
+//       fee, and the snapshot has already advanced so the remainder must wait in tokensOwed.
+// Setup: the exchange's standing approval moves USDC out of the vault, as a fill would.
+// ──────────────────────────────────────────────
+contract CollectKeepsRemainderTest is CollectFeesTestBase {
+    uint256 constant LP_B_PK = 0xB0B;
+    uint256 owed;
+
+    function setUp() public override {
+        super.setUp();
+        _distributeFees(10);
+        owed = uint256(positionLiquidity) * vault.feeGrowthGlobalX128() / Q128;
+        assertGt(owed, 4, "precondition: more owed than the vault will hold");
+    }
+
+    function _drainThroughExchange(uint256 amount) internal {
+        vm.prank(exchangeAddr);
+        mockUsdc.transferFrom(address(vault), exchangeAddr, amount);
+    }
+
+    // SC-BMFF: case A — pays 4, keeps the rest, and pays the rest later
+    function test_whenVaultIsShortThenCollectPaysWhatItHoldsAndKeepsTheRest() public {
+        _drainThroughExchange(mockUsdc.balanceOf(address(vault)) - 4);
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit FeesCollected(positionId, lp, 4);
+        vm.prank(lp);
+        vault.collect(positionId);
+
+        assertEq(mockUsdc.balanceOf(lp), 4, "the 4 USDC the vault held");
+        (,,,,,, uint256 remainder) = vault.positions(positionId);
+        assertEq(remainder, owed - 4, "the rest waits in tokensOwed");
+
+        // The vault gains the remainder, and a later collect pays it
+        mockUsdc.mint(address(vault), remainder);
+        vm.prank(lp);
+        vault.collect(positionId);
+
+        assertEq(mockUsdc.balanceOf(lp), owed, "the later collect pays the remainder");
+        (,,,,,, uint256 after_) = vault.positions(positionId);
+        assertEq(after_, 0, "nothing left to pay");
+    }
+
+    // SC-BMFF: case B — a balance below totalEscrowed pays zero and keeps everything
+    function test_whenBalanceIsBelowEscrowThenCollectPaysZeroAndKeepsAll() public {
+        address safeB = _safeOf(vm.addr(LP_B_PK));
+        _fundSafe(mockUsdc, safeB, address(vault), 500);
+        _escrow(vault, operatorAddr, LP_B_PK, safeB, int24(0), int24(100), 500, keccak256("escrow-b"), FAR_DEADLINE);
+        _drainThroughExchange(mockUsdc.balanceOf(address(vault)) - 300);
+        assertLt(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "precondition: below escrow");
+
+        vm.recordLogs();
+        vm.prank(lp);
+        vault.collect(positionId);
+
+        assertEq(mockUsdc.balanceOf(lp), 0, "nothing paid");
+        assertEq(vm.getRecordedLogs().length, 0, "no FeesCollected and no transfer");
+        (,,,,, uint256 snapshot, uint256 remainder) = vault.positions(positionId);
+        assertEq(remainder, owed, "the whole amount waits in tokensOwed");
+        assertEq(snapshot, vault.feeGrowthGlobalX128(), "the snapshot advanced");
+        assertEq(vault.totalEscrowed(), 500, "escrowed USDC never pays a fee");
+    }
+
+    /// @dev One cold collect, as R3 measured: every slot of the vault, the factory, the mock,
+    ///      and the ConditionalTokens contract starts cold, as in a real transaction.
+    function _coldCollectGas() internal returns (uint256) {
+        vm.cool(address(vault));
+        vm.cool(address(factory));
+        vm.cool(address(mockUsdc));
+        vm.cool(address(ctf));
+        vm.prank(lp);
+        uint256 before = gasleft();
+        vault.collect(positionId);
+        return before - gasleft();
+    }
+
+    // NFR-U07P: a paying collect with no pair to merge stays under 120,000 gas
+    function test_collectWithNoPairStaysUnderBound() public {
+        assertLt(_coldCollectGas(), 120_000, "the collect must stay under the NFR-U07P bound with no pair");
+    }
+
+    // NFR-U07P: a paying collect that merges the vault's pairs stays under 180,000 gas
+    function test_collectWithMergeStaysUnderBound() public {
+        _giveOutcomeTokens(address(vault), vault.conditionId(), 20, 20);
+        assertLt(_coldCollectGas(), 180_000, "the collect must stay under the NFR-U07P bound with a merge");
     }
 }

@@ -736,6 +736,13 @@ contract BoundedTickSearchTestBase is LPVaultFixture {
         VaultStorage.setCurrentTick(stdstore, address(vault), tick);
     }
 
+    /// @dev Plants an initialized tick through storage, with no position behind it: liquidityGross
+    ///      of 1 and the bitmap bit. The extreme-word tests use it because a mint is bounded to the
+    ///      price scale [0, 10000] (FEAT-T7AF FR-T7B2), so no mint can reach tick 8,388,590.
+    function _plantTick(int24 tick) internal {
+        VaultStorage.plantTick(stdstore, address(vault), tick, uint128(1));
+    }
+
     /// @dev Plants one position, which initializes its two ticks in the bitmap.
     function _plant(int24 tickLower, int24 tickUpper, uint256 usdcAmount) internal returns (uint256) {
         return _escrowAndMint(
@@ -754,9 +761,9 @@ contract BoundedTickSearchTestBase is LPVaultFixture {
 
 // ──────────────────────────────────────────────
 // SC-5IDH: Initialized tick far above the target is never searched
-// What: One position at [8388590, 8388600) puts two bits in the highest
-//       bitmap word (32767). From currentTick = 100 the Operator moves to
-//       300. The search stops at the word that holds 300 and never reads
+// What: Ticks 8388590 and 8388600, planted in storage, put two bits in the
+//       highest bitmap word (32767). From currentTick = 100 the Operator moves
+//       to 300. The search stops at the word that holds 300 and never reads
 //       toward word 32767.
 // Why:  Audit issue 6.10, upward. Without the bound the move reads more than
 //       32,000 words and costs 76,618,321 gas, past the Polygon block limit.
@@ -764,7 +771,8 @@ contract BoundedTickSearchTestBase is LPVaultFixture {
 contract BoundedTickSearchFarAboveTest is BoundedTickSearchTestBase {
     function setUp() public override {
         super.setUp();
-        _plant(int24(8388590), int24(8388600), 1000);
+        _plantTick(int24(8388590));
+        _plantTick(int24(8388600));
         _setCurrentTick(int24(100));
     }
 
@@ -807,15 +815,16 @@ contract BoundedTickSearchFarAboveTest is BoundedTickSearchTestBase {
 
 // ──────────────────────────────────────────────
 // SC-5IDI: Initialized tick far below the target is never searched
-// What: One position at [-8388600, -8388590) puts two bits in the lowest
-//       bitmap word (-32768). From currentTick = 300 the Operator moves down
-//       to 100. The search stops at the word that holds 100.
+// What: Ticks -8388600 and -8388590, planted in storage, put two bits in the
+//       lowest bitmap word (-32768). From currentTick = 300 the Operator moves
+//       down to 100. The search stops at the word that holds 100.
 // Why:  Audit issue 6.10, downward.
 // ──────────────────────────────────────────────
 contract BoundedTickSearchFarBelowTest is BoundedTickSearchTestBase {
     function setUp() public override {
         super.setUp();
-        _plant(int24(-8388600), int24(-8388590), 1000);
+        _plantTick(int24(-8388600));
+        _plantTick(int24(-8388590));
         _setCurrentTick(int24(300));
     }
 
@@ -993,10 +1002,11 @@ contract BoundedTickSearchFuzzTest is BoundedTickSearchTestBase {
 
     // FR-5IDE: an upward move past empty words completes with zero crossings
     // whatever sits in the highest word. Start in [-8,000,000, 7,999,999], move
-    // in [1, 200,000], target clamped to 8,000,000; the plant at
-    // [8388590, 8388600) is outside the window.
+    // in [1, 200,000], target clamped to 8,000,000; the ticks planted at
+    // 8388590 and 8388600 are outside the window.
     function testFuzz_upwardMoveCompletesPastEmptyWords(int256 startSeed, uint256 moveSeed) public {
-        _plant(int24(8388590), int24(8388600), 1000);
+        _plantTick(int24(8388590));
+        _plantTick(int24(8388600));
         int24 start = int24(bound(startSeed, -8_000_000, 7_999_999));
         int256 targetWide = int256(start) + int256(bound(moveSeed, 1, 200_000));
         int24 target = int24(targetWide > 8_000_000 ? int256(8_000_000) : targetWide);
@@ -1013,10 +1023,11 @@ contract BoundedTickSearchFuzzTest is BoundedTickSearchTestBase {
 
     // FR-5IDE: a downward move past empty words completes with zero crossings
     // whatever sits in the lowest word. Start in [-7,999,999, 8,000,000], move
-    // in [1, 200,000], target clamped to -8,000,000; the plant at
-    // [-8388600, -8388590) is outside the window.
+    // in [1, 200,000], target clamped to -8,000,000; the ticks planted at
+    // -8388600 and -8388590 are outside the window.
     function testFuzz_downwardMoveCompletesPastEmptyWords(int256 startSeed, uint256 moveSeed) public {
-        _plant(int24(-8388600), int24(-8388590), 1000);
+        _plantTick(int24(-8388600));
+        _plantTick(int24(-8388590));
         int24 start = int24(bound(startSeed, -7_999_999, 8_000_000));
         int256 targetWide = int256(start) - int256(bound(moveSeed, 1, 200_000));
         int24 target = int24(targetWide < -8_000_000 ? int256(-8_000_000) : targetWide);

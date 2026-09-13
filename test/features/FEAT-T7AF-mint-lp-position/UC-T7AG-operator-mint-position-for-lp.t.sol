@@ -499,6 +499,21 @@ contract MintPositionValidationTest is MintPositionTestBase {
         vault.mintPositionFor(lp, int24(50), int24(50), 600, keccak256("eq"), FAR_DEADLINE);
     }
 
+    // SC-T7AK, FR-T7B2: a negative lower tick is outside the price scale
+    function test_revertsWhenLowerTickIsBelowZero() public {
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.InvalidRange.selector);
+        vault.mintPositionFor(lp, int24(-10), int24(20), 600, keccak256("neg"), FAR_DEADLINE);
+    }
+
+    // SC-T7AK, FR-T7B2: an upper tick above PRICE_TICK_ONE is outside the price scale
+    function test_revertsWhenUpperTickIsAbovePriceOne() public {
+        assertEq(vault.PRICE_TICK_ONE(), int24(10000), "precondition: one tick is one basis point");
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.InvalidRange.selector);
+        vault.mintPositionFor(lp, int24(9990), int24(10010), 600, keccak256("over"), FAR_DEADLINE);
+    }
+
     // SC-T7AL: tick not aligned to tickSpacing reverts with TickNotAligned
     function test_revertsOnMisalignedLowerTick() public {
         vm.prank(operatorAddr);

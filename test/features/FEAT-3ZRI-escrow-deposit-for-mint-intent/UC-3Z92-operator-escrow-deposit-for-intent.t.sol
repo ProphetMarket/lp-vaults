@@ -378,10 +378,11 @@ contract EscrowAccessControlTest is EscrowDepositTestBase {
 
 // ──────────────────────────────────────────────
 // SC-3Z99: Revert on zero amount
-// SC-9OYA: Revert on an inverted or misaligned range
-// What: usdcAmount == 0 reverts ZeroAmount; tickLower >= tickUpper reverts
-//       InvalidRange; a tick that is not a multiple of tickSpacing reverts
-//       TickNotAligned. No escrow entry is written.
+// SC-9OYA: Revert on an inverted, out-of-scale, or misaligned range
+// What: usdcAmount == 0 reverts ZeroAmount; tickLower >= tickUpper, a tick
+//       below 0, or a tick above 10000 reverts InvalidRange; a tick that is
+//       not a multiple of tickSpacing reverts TickNotAligned. No escrow entry
+//       is written.
 // Why:  The vault never takes USDC it can only refund: a zero escrow could
 //       never mint (FR-T7B5), and the mint always rejects a bad range
 //       (FR-9OYL, one _requireValidRange shared with the mint).
@@ -425,6 +426,16 @@ contract EscrowValidationTest is EscrowDepositTestBase {
     // SC-9OYA: equal ticks
     function test_revertsOnEqualTicks() public {
         _expect(LPVault.InvalidRange.selector, int24(50), int24(50), usdcAmount);
+    }
+
+    // SC-9OYA, FR-9OYL: a negative lower tick is outside the price scale
+    function test_revertsWhenLowerTickIsBelowZero() public {
+        _expect(LPVault.InvalidRange.selector, int24(-10), int24(20), usdcAmount);
+    }
+
+    // SC-9OYA, FR-9OYL: an upper tick above PRICE_TICK_ONE is outside the price scale
+    function test_revertsWhenUpperTickIsAbovePriceOne() public {
+        _expect(LPVault.InvalidRange.selector, int24(9990), int24(10010), usdcAmount);
     }
 
     // SC-9OYA: misaligned lower tick

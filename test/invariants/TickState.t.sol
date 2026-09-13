@@ -4,9 +4,10 @@ pragma solidity 0.8.20;
 // FEAT-TVS0: Update Tick and Cross Ticks (FR-A2ZS, FR-5IDF, NFR-5IDG)
 // FEAT-T7AF: Mint LP Position (the two liquidity invariants in its Data Model)
 // FEAT-K1M2: Merge Positions (FR-AFPU, the merge conservation invariant)
+// FEAT-7G40: Burn LP Position (FR-7G4O, FR-7G4P, the bitmap invariant)
 // Invariants required by CLAUDE.md's Foundry conventions (an invariant on every
 // state-machine property), for the tick state machine under mints, tick moves,
-// and merges, with the target-bounded bitmap search:
+// merges, and burns, with the target-bounded bitmap search:
 //   1. activeLiquidity == Σ position.liquidity over positions whose range holds currentTick
 //   2. ticks[t].liquidityGross == Σ position.liquidity over positions that reference t
 //   3. updateTick reverts only for a documented reason (never an arithmetic panic, FR-5IDF)
@@ -18,11 +19,14 @@ pragma solidity 0.8.20;
 //      issue 6.14 asked for it.
 //   6. mergePositions([a, a]) always reverts DuplicatePositionId (FR-AFPS), so the
 //      rejection is documented in the run and not mistaken for a gap
+//   7. every tick a mint ever referenced has its bitmap bit set exactly when its
+//      liquidityGross is above zero (FR-7G4P), which a burn that clears the bit keeps true
+//   8. a burn reverts only for a documented reason (never an arithmetic panic)
 // A search that skipped a legitimate crossing would break invariant 1 without a
 // revert, and a search that scanned to the end of the scale would break 3 or 4,
 // so the proof of the bounded search lives here. Every expected value is read
-// from the vault's own position records, with no handler mirror, so a later
-// burn action (R9) changes no check.
+// from the vault's own position records, with no handler mirror, so the burn
+// actions change no earlier check: a burned record reads zero and adds nothing.
 
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {Vm} from "forge-std/Vm.sol";
@@ -52,8 +56,9 @@ contract TickStateHandler is LPVaultFixture {
     int24 constant SPACING = 10;
     /// @dev The widest aligned range the handler plants, in ticks.
     int24 constant MAX_WIDTH = 50 * SPACING;
-    /// @dev Every planted tick stays inside [-8388600, 8388600], aligned to SPACING.
-    int24 constant EDGE = 8388600;
+    /// @dev Every planted tick stays inside the price scale [0, SCALE], aligned to SPACING
+    ///      (FR-T7B2): a mint outside it reverts InvalidRange since R9.
+    int24 constant SCALE = 10000;
 
     uint256 internal intentNonce;
     uint256[] internal positionIds;
@@ -80,6 +85,15 @@ contract TickStateHandler is LPVaultFixture {
     uint256 public duplicateMergeAttempts;
     bytes4 public undocumentedDuplicateMergeRevert;
 
+    /// @dev Every tick a mint ever referenced, with repeats, so the bitmap invariant can read
+    ///      a tick after the burn that deleted the position which referenced it.
+    int24[] public referencedTicks;
+    /// @dev How many burns completed, and the first burn revert selector that is not a
+    ///      documented rejection. Zero while every burn revert was documented.
+    uint256 public completedBurns;
+    bytes4 public undocumentedBurnRevert;
+    uint256 internal burnDeadlineNonce;
+
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
     constructor(LPVault vault_, MockERC20 mockUsdc_, address operatorAddr_) {
@@ -89,31 +103,37 @@ contract TickStateHandler is LPVaultFixture {
         lp = _safeOf(vm.addr(LP_PK));
     }
 
-    /// @dev Mints one position. Near mode places tickLower within 3,000 ticks of currentTick.
-    ///      Extreme mode places the range within 2,000 ticks of an edge, so words 32767 and
-    ///      -32768 get bits during a run. One time in four, when positions exist, the range
-    ///      copies an existing position's range, so the merge action finds a pair. Liquidity is
-    ///      at most 1e6 * 1e18 / 10 = 1e23 per position, so liquidityGross on a shared tick
-    ///      stays far below uint128 over any run.
+    /// @dev Mints one position. Near mode places tickLower within 3,000 ticks of currentTick,
+    ///      clamped into the scale (the tick can drift outside it over a run). Extreme mode
+    ///      places the range within 2,000 ticks of tick 0 or of tick 10000, the two edges of the
+    ///      scale. One time in four, when positions exist, the range copies a live existing
+    ///      position's range, so the merge action finds a pair; a burned record reads zero and
+    ///      is placed at random instead. Liquidity is at most
+    ///      1e6 * 1e18 / 10 = 1e23 per position, so liquidityGross on a shared tick stays far
+    ///      below uint128 over any run.
     function mintPosition(uint256 placementSeed, uint256 widthSeed, uint256 usdcSeed, bool nearCurrentTick) public {
         int24 tickLower;
         int24 tickUpper;
+        uint128 copiedLiquidity;
         if (positionIds.length > 0 && placementSeed % 4 == 0) {
-            (, tickLower, tickUpper,,,,) = vault.positions(positionIds[placementSeed % positionIds.length]);
-        } else {
+            (, tickLower, tickUpper,, copiedLiquidity,,) =
+                vault.positions(positionIds[placementSeed % positionIds.length]);
+        }
+        // A burned record reads zero, so its range cannot be copied; place the mint at random instead
+        if (copiedLiquidity == 0) {
             int24 width = int24(int256(bound(widthSeed, 1, 50))) * SPACING;
             int256 low;
             int256 high;
             if (nearCurrentTick) {
                 int256 current = int256(vault.currentTick());
-                low = _max(current - 3000, -EDGE);
-                high = _min(current + 3000, EDGE - width);
+                low = _clamp(current - 3000, 0, SCALE - width);
+                high = _clamp(current + 3000, 0, SCALE - width);
             } else if (placementSeed % 2 == 0) {
-                low = EDGE - width - 2000;
-                high = EDGE - width;
+                low = SCALE - width - 2000;
+                high = SCALE - width;
             } else {
-                low = -EDGE;
-                high = -EDGE + 2000;
+                low = 0;
+                high = 2000;
             }
             // Pick in units of SPACING so the result is aligned. The hard edges are exact
             // multiples of SPACING; the soft near-mode edges may round by less than one unit.
@@ -126,6 +146,52 @@ contract TickStateHandler is LPVaultFixture {
         bytes32 intentId = keccak256(abi.encode("tick-state-mint", intentNonce++));
         uint256 id = _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
         positionIds.push(id);
+        referencedTicks.push(tickLower);
+        referencedTicks.push(tickUpper);
+    }
+
+    function referencedTickCount() external view returns (uint256) {
+        return referencedTicks.length;
+    }
+
+    /// @dev The owning Safe burns a random position. A live one when the pick is live, else
+    ///      the documented PositionNotFound of a burned or merged-away record. The vault holds
+    ///      no outcome token in this harness, so the token leg pays zero and the USDC leg pays
+    ///      from the principal the mints left.
+    function burn(uint256 seed) public {
+        uint256 count = positionIds.length;
+        if (count == 0) return;
+        uint256 id = positionIds[seed % count];
+        vm.prank(lp);
+        try vault.burnPosition(id) {
+            completedBurns++;
+        } catch (bytes memory reason) {
+            _recordBurnRevert(reason);
+        }
+    }
+
+    /// @dev The Operator relays a burn the owner key signed. The deadline changes per call, so a
+    ///      replayed struct hash never blocks a live position; a burned one reports
+    ///      PositionNotFound, which is documented.
+    function burnFor(uint256 seed) public {
+        uint256 count = positionIds.length;
+        if (count == 0) return;
+        uint256 id = positionIds[seed % count];
+        uint256 deadline = FAR_DEADLINE - (burnDeadlineNonce++);
+        bytes memory sig = _signBurnIntent(address(vault), LP_PK, lp, id, deadline);
+        vm.prank(operatorAddr);
+        try vault.burnPositionFor(lp, id, deadline, sig) {
+            completedBurns++;
+        } catch (bytes memory reason) {
+            _recordBurnRevert(reason);
+        }
+    }
+
+    function _recordBurnRevert(bytes memory reason) internal {
+        bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0xffffffff);
+        bool documented = selector == LPVault.PositionNotFound.selector || selector == LPVault.NotPositionOwner.selector
+            || selector == LPVault.IntentAlreadyUsed.selector;
+        if (undocumentedBurnRevert == bytes4(0) && !documented) undocumentedBurnRevert = selector;
     }
 
     /// @dev Moves the tick by at most 2,000 ticks, clamped to int24. A zero move is skipped.
@@ -230,18 +296,15 @@ contract TickStateHandler is LPVaultFixture {
             || selector == LPVault.VaultNotActive.selector || selector == LPVault.TooManyTicksCrossed.selector;
     }
 
-    function _max(int256 a, int256 b) internal pure returns (int256) {
-        return a > b ? a : b;
-    }
-
-    function _min(int256 a, int256 b) internal pure returns (int256) {
-        return a < b ? a : b;
+    function _clamp(int256 x, int256 lo, int256 hi) internal pure returns (int256) {
+        return x < lo ? lo : (x > hi ? hi : x);
     }
 }
 
 /// @dev fail-on-revert makes any handler-level revert fail the run. The mint runs with no
-///      try/catch on purpose, so a mint rejection fails the run; the move and the merge absorb
-///      the vault's documented rejections in try/catch, so only an unexpected revert reaches here.
+///      try/catch on purpose, so a mint rejection fails the run; the move, the merge, and the
+///      two burns absorb the vault's documented rejections in try/catch, so only an unexpected
+///      revert reaches here.
 /// forge-config: default.invariant.fail-on-revert = true
 contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
     LPVaultFactory factory;
@@ -279,6 +342,16 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
 
         handler = new TickStateHandler(vault, mockUsdc, operatorAddr);
         targetContract(address(handler));
+
+        // Prologue: run each guarded action once, so the afterInvariant guards below hold by
+        // construction. With six actions a 50-call run skips one of them a few times in a
+        // thousand, which made the guards flake once R9 added the two burn actions. The
+        // prologue still catches a harness whose action never works: a move, a duplicate
+        // merge, or a burn that failed here would leave its counter at zero.
+        handler.mintPosition(1, 5, 1_000, true);
+        handler.moveTick(100);
+        handler.mergeDuplicate(0);
+        handler.burn(0);
     }
 
     // FR-A2ZS: activeLiquidity equals the sum of the liquidity of every position whose range
@@ -357,11 +430,50 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         );
     }
 
-    /// @dev At least one move completed in the run, so the gas ceiling proved something, and at
-    ///      least one duplicate merge was attempted, so invariant 6 proved something.
+    // FR-7G4P: every tick a mint ever referenced has its bitmap bit set exactly when its
+    // liquidityGross is above zero. A burn that takes liquidityGross to zero must clear the bit,
+    // or a later updateTick would cross a tick with no liquidity behind it (audit issue 6.15).
+    function invariant_zeroLiquidityTickHasNoBit() public view {
+        uint256 count = handler.referencedTickCount();
+        for (uint256 i = 0; i < count; i++) {
+            int24 tick = handler.referencedTicks(i);
+            (uint128 liquidityGross,,) = vault.ticks(tick);
+            assertEq(
+                _bitIsSet(tick),
+                liquidityGross > 0,
+                string.concat("the bitmap bit of tick ", vm.toString(tick), " must match liquidityGross > 0")
+            );
+        }
+    }
+
+    // FR-7G4W, FR-7G55: a burn never reverted for an undocumented reason, so no burn panicked.
+    function invariant_burnRevertsOnlyForDocumentedReasons() public view {
+        assertEq(
+            handler.undocumentedBurnRevert(),
+            bytes4(0),
+            "a burn reverted with a selector that is not a documented rejection"
+        );
+    }
+
+    /// @dev At least one move completed, so the gas ceiling proved something, at least one
+    ///      duplicate merge was attempted, so invariant 6 proved something, and at least one
+    ///      burn completed, so invariants 7 and 8 proved something. The setUp prologue makes
+    ///      each one true when its action works, and false when it does not.
     function afterInvariant() public view {
         assertGt(handler.completedMoves(), 0, "the run must include at least one completed move");
         assertGt(handler.duplicateMergeAttempts(), 0, "the run must include at least one duplicate merge attempt");
+        assertGt(handler.completedBurns(), 0, "the run must include at least one completed burn");
+    }
+
+    /// @dev The same decomposition as LPVault._tickPosition.
+    function _bitIsSet(int24 tick) internal view returns (bool) {
+        // casting to 'int16' is safe because an int24 shifted right by 8 fits in 16 bits
+        // forge-lint: disable-next-line(unsafe-typecast)
+        int16 wordPos = int16(tick >> 8);
+        // casting to 'uint8' is safe because the mask keeps eight bits
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint8 bitPos = uint8(uint24(tick) & 0xff);
+        return (vault.tickBitmap(wordPos) >> bitPos) & 1 == 1;
     }
 
     /// @dev The index of the first position that references `tick`, so each tick is counted once.
@@ -377,13 +489,22 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         return liquidityGross;
     }
 
-    /// @dev Every position record the vault holds, from 0 to nextPositionId - 1.
+    /// @dev Every position record the vault holds, from 0 to nextPositionId - 1, without the
+    ///      records a burn deleted: a deleted record reads tickLower == tickUpper == 0, so it
+    ///      would count tick 0 twice in the summed check. A merged-away record keeps its range
+    ///      and its zero liquidity, and stays in the view.
     function _positions() internal view returns (PositionView[] memory all) {
         uint256 count = vault.nextPositionId();
-        all = new PositionView[](count);
+        PositionView[] memory every = new PositionView[](count);
+        uint256 live = 0;
         for (uint256 i = 0; i < count; i++) {
-            (, int24 tickLower, int24 tickUpper,, uint128 liquidity,,) = vault.positions(i);
-            all[i] = PositionView(tickLower, tickUpper, liquidity);
+            (address owner, int24 tickLower, int24 tickUpper,, uint128 liquidity,,) = vault.positions(i);
+            if (owner == address(0)) continue;
+            every[live++] = PositionView(tickLower, tickUpper, liquidity);
+        }
+        all = new PositionView[](live);
+        for (uint256 i = 0; i < live; i++) {
+            all[i] = every[i];
         }
     }
 

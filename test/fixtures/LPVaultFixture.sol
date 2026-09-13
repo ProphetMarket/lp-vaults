@@ -6,8 +6,10 @@ pragma solidity 0.8.20;
 // FEAT-T7AF: Mint LP Position
 // FEAT-JAIJ: LP Escape Hatch
 // FEAT-TOGR: Notify and Distribute Fees
+// FEAT-7G40: Burn LP Position
+// FEAT-U079: Collect Fees on a Position
 // Shared test fixture: the base of every vault test. Deploys the factory with the Safe derivation
-// constants, signs the two LP intent types with an owner key, derives the Safe the vault expects,
+// constants, signs the four LP intent types with an owner key, derives the Safe the vault expects,
 // runs the escrow-then-mint flow that every position starts from, and funds the Operator's fee report.
 // Test files import it. src/ never does.
 
@@ -35,6 +37,10 @@ abstract contract LPVaultFixture is ConditionalTokensFixture {
     );
     bytes32 internal constant RECLAIM_INTENT_TYPEHASH =
         keccak256("ReclaimIntent(address lp,bytes32 intentId,uint256 deadline)");
+    bytes32 internal constant BURN_INTENT_TYPEHASH =
+        keccak256("BurnIntent(address lp,uint256 positionId,uint256 deadline)");
+    bytes32 internal constant COLLECT_INTENT_TYPEHASH =
+        keccak256("CollectIntent(address lp,uint256 positionId,uint256 nonce,uint256 deadline)");
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
@@ -126,6 +132,27 @@ abstract contract LPVaultFixture is ConditionalTokensFixture {
         returns (bytes memory)
     {
         return _signStruct(vault, pk, keccak256(abi.encode(RECLAIM_INTENT_TYPEHASH, lp, intentId, deadline)));
+    }
+
+    /// @dev Signs a BurnIntent with the owner key `pk`, naming `lp` (normally the key's Safe).
+    function _signBurnIntent(address vault, uint256 pk, address lp, uint256 positionId, uint256 deadline)
+        internal
+        view
+        returns (bytes memory)
+    {
+        return _signStruct(vault, pk, keccak256(abi.encode(BURN_INTENT_TYPEHASH, lp, positionId, deadline)));
+    }
+
+    /// @dev Signs a CollectIntent with the owner key `pk`, naming `lp` (normally the key's Safe).
+    function _signCollectIntent(
+        address vault,
+        uint256 pk,
+        address lp,
+        uint256 positionId,
+        uint256 nonce,
+        uint256 deadline
+    ) internal view returns (bytes memory) {
+        return _signStruct(vault, pk, keccak256(abi.encode(COLLECT_INTENT_TYPEHASH, lp, positionId, nonce, deadline)));
     }
 
     // ──────────────────────────────────────────────
