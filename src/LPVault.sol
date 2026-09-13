@@ -1135,6 +1135,11 @@ contract LPVault {
     ///      feeGrowthOutsideX128 and applying liquidityNet to activeLiquidity.
     ///      A call with the current tick refreshes only the heartbeat and returns; while
     ///      the vault is paused or wound down the keeper calls `heartbeat()` instead.
+    ///      The bitmap search reads only the words between currentTick and newTick
+    ///      (FR-5IDE, ADR-5IDK), so the cost of a call follows the reported move and not
+    ///      where any LP initialized a tick. A large jump across empty words still reads one
+    ///      word per 256 ticks, so the Operator chunks a very large jump as it chunks
+    ///      crossings (ADR-TVUW).
     /// @param newTick The new price tick to set
     function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
         // Phase check: only Active vaults accept tick updates
@@ -1156,7 +1161,7 @@ contract LPVault {
         if (movingRight) {
             // Cross every initialized tick in (oldTick, newTick]
             while (tick < newTick) {
-                (int24 next, bool found) = _nextInitializedTick(tick, true);
+                (int24 next, bool found) = _nextInitializedTick(tick, true, newTick);
                 if (!found || next > newTick) break;
 
                 crossCount++;
@@ -1167,7 +1172,7 @@ contract LPVault {
         } else {
             // Cross every initialized tick in (newTick, oldTick]
             while (tick > newTick) {
-                (int24 next, bool found) = _nextInitializedTick(tick, false);
+                (int24 next, bool found) = _nextInitializedTick(tick, false, newTick);
                 if (!found || next <= newTick) break;
 
                 crossCount++;
@@ -1490,11 +1495,37 @@ contract LPVault {
         tickBitmap[wordPos] &= ~(1 << bitPos);
     }
 
-    /// @dev Finds the next initialized tick relative to the given tick.
+    /// @dev Finds the next initialized tick relative to the given tick, reading no bitmap word
+    ///      beyond the one that holds `targetTick`.
     ///      searchRight=true: smallest initialized tick strictly greater than `tick`.
     ///      searchRight=false: largest initialized tick less than or equal to `tick`.
-    ///      Returns (nextTick, true) if found, or (0, false) if no initialized tick exists.
-    function _nextInitializedTick(int24 tick, bool searchRight) internal view returns (int24 next, bool found) {
+    ///      Returns (nextTick, true) if found, or (0, false) if no initialized tick exists
+    ///      within the bounded range.
+    ///
+    ///      The bound (FR-5IDE, ADR-5IDK): the scan stops at the bitmap word that contains
+    ///      `targetTick`, inclusive, so a tick that an LP initialized beyond the Operator's
+    ///      target is never read and the cost of a call follows the reported move, not where
+    ///      any third party placed a tick (NFR-5IDG). The target's own word is scanned in
+    ///      full, so a set bit in that word past the target is returned, and `updateTick`'s
+    ///      `next > newTick` or `next <= newTick` check discards it.
+    ///
+    ///      The extreme-word test (FR-5IDF): each loop checks for `type(int16).max` or
+    ///      `type(int16).min` before it steps, so `wordPos` never overflows and reaching the
+    ///      end of the scale is reported as "not found", never as an arithmetic panic. For a
+    ///      target inside int24 the target-word test already stops at the extreme word, so
+    ///      this test is defense in depth that decision C13 keeps on purpose.
+    ///
+    ///      Upward, `tick + 1` never overflows, because `updateTick` calls with
+    ///      `tick < newTick <= type(int24).max`. Downward, the `next - 1` in `updateTick`
+    ///      never underflows, because its loop breaks when `next <= newTick`, and
+    ///      `newTick >= type(int24).min`.
+    function _nextInitializedTick(int24 tick, bool searchRight, int24 targetTick)
+        internal
+        view
+        returns (int24 next, bool found)
+    {
+        (int16 targetWordPos,) = _tickPosition(targetTick);
+
         if (searchRight) {
             // Start from tick + 1
             int24 startTick = tick + 1;
@@ -1507,16 +1538,17 @@ contract LPVault {
                 return (startTick + int24(uint24(offset)), true);
             }
 
-            // Search subsequent words
-            wordPos++;
-            for (; wordPos <= type(int16).max; wordPos++) {
+            // Search subsequent words, up to and including the target's word. The bound and
+            // the extreme-word test run before the step, so wordPos++ never overflows.
+            for (;;) {
+                if (wordPos >= targetWordPos || wordPos == type(int16).max) return (0, false);
+                wordPos++;
                 word = tickBitmap[wordPos];
                 if (word != 0) {
                     uint8 offset = _leastSignificantBit(word);
                     return (int24(int256(wordPos)) * 256 + int24(uint24(offset)), true);
                 }
             }
-            return (0, false);
         } else {
             // Start from tick itself (search at or below)
             (int16 wordPos, uint8 bitPos) = _tickPosition(tick);
@@ -1533,17 +1565,17 @@ contract LPVault {
                 return (int24(int256(wordPos)) * 256 + int24(uint24(offset)), true);
             }
 
-            // Search previous words
-            wordPos--;
-            for (; wordPos >= type(int16).min; wordPos--) {
+            // Search previous words, down to and including the target's word. The bound and
+            // the extreme-word test run before the step, so wordPos-- never underflows.
+            for (;;) {
+                if (wordPos <= targetWordPos || wordPos == type(int16).min) return (0, false);
+                wordPos--;
                 word = tickBitmap[wordPos];
                 if (word != 0) {
                     uint8 offset = _mostSignificantBit(word);
                     return (int24(int256(wordPos)) * 256 + int24(uint24(offset)), true);
                 }
-                if (wordPos == type(int16).min) break;
             }
-            return (0, false);
         }
     }
 
