@@ -3,18 +3,19 @@ id: UC-TOGS
 name: Operator Notify Fee Revenue
 feature: FEAT-TOGR
 status: implemented
-version: 2
+version: 3
 actor: Operator
 ---
 
 # UC-TOGS: Operator Notify Fee Revenue
 
-> The Operator distributes newly arrived fee revenue across all in-range LP positions by updating the vault's global fee accumulator.
+> The Operator distributes newly arrived fee revenue across all in-range LP positions by updating the vault's global fee accumulator, and the vault takes that revenue from the Operator wallet in the same call.
 
 ## Preconditions
 
 - A vault clone has been initialized via the factory (FEAT-REPZ)
 - The caller holds a registered Operator key
+- The Operator wallet holds a standing USDC approval to the vault (NFR-ASNQ)
 
 ## Trigger
 
@@ -26,24 +27,26 @@ Operator calls `notifyFees(amount)` on the vault.
 
 **Given:**
 - At least one LP position is in range (`activeLiquidity > 0`)
-- Operator has deposited `amount` USDC into the vault off-chain
+- The Operator wallet holds at least `amount` USDC and has approved the vault for at least `amount`
 
 **Steps:**
 1. Operator calls `notifyFees(amount)` with amount > 0
 2. System validates amount > 0 and activeLiquidity > 0
 3. System computes `delta = mulDiv(amount, Q128, activeLiquidity)`
 4. System increments `feeGrowthGlobalX128` by delta
-5. System emits `FeesNotified(amount, feeGrowthGlobalX128)`
+5. System transfers `amount` USDC from the Operator wallet to the vault with `transferFrom`
+6. System emits `FeesNotified(amount, feeGrowthGlobalX128)`
 
 **Outcomes:**
 - `feeGrowthGlobalX128` increased by the computed delta
+- The vault's USDC balance rose by `amount` and the Operator wallet's balance fell by `amount` in the same transaction
 - Call succeeds (no revert)
 
 **Side Effects:**
 - `feeGrowthGlobalX128` storage: incremented by `mulDiv(amount, Q128, activeLiquidity)`
 - `lastOperatorActivityTimestamp` storage: refreshed to `block.timestamp` -- a successful notification is proof the Operator is alive (FEAT-JXQO)
+- `amount` USDC moves from the Operator wallet to the vault: the USDC contract emits `Transfer(operator, vault, amount)` before the vault emits `FeesNotified`
 - `FeesNotified(amount, feeGrowthGlobalX128)` event emitted
-- No USDC transfers during the call
 - No position-level state changes (fees accrue lazily via the global accumulator)
 
 ---
@@ -52,23 +55,24 @@ Operator calls `notifyFees(amount)` on the vault.
 
 **Given:**
 - `activeLiquidity > 0` (unchanged between calls)
-- Operator deposits amounts A and B into the vault separately
+- The Operator wallet holds at least A + B USDC and has approved the vault for at least A + B
 
 **Steps:**
 1. Operator calls `notifyFees(A)`
-2. System increments `feeGrowthGlobalX128` by `mulDiv(A, Q128, activeLiquidity)`
+2. System increments `feeGrowthGlobalX128` by `mulDiv(A, Q128, activeLiquidity)` and takes A USDC from the Operator wallet
 3. Operator calls `notifyFees(B)`
-4. System increments `feeGrowthGlobalX128` by `mulDiv(B, Q128, activeLiquidity)`
+4. System increments `feeGrowthGlobalX128` by `mulDiv(B, Q128, activeLiquidity)` and takes B USDC from the Operator wallet
 
 **Outcomes:**
 - `feeGrowthGlobalX128 == initial + mulDiv(A, Q128, activeLiquidity) + mulDiv(B, Q128, activeLiquidity)`
+- The vault's USDC balance rose by A + B
 - Two separate `FeesNotified` events emitted with correct cumulative values
 
 **Side Effects:**
 - `feeGrowthGlobalX128` storage updated twice
 - `lastOperatorActivityTimestamp` storage refreshed on each call
+- Two USDC transfers from the Operator wallet to the vault, A then B
 - Two `FeesNotified` events emitted
-- No USDC transfers
 - No position-level state changes
 
 ---
@@ -136,11 +140,13 @@ Operator calls `notifyFees(amount)` on the vault.
 **Given:**
 - `activeLiquidity > 0`
 - `amount` and `activeLiquidity` chosen so that `amount * Q128 % activeLiquidity != 0` (non-zero truncation dust)
+- The Operator wallet holds and has approved `amount` USDC
 
 **Steps:**
 1. Operator calls `notifyFees(amount)`
 2. System computes `delta = mulDiv(amount, Q128, activeLiquidity)` (truncates toward zero)
 3. System increments `feeGrowthGlobalX128` by delta
+4. System takes `amount` USDC from the Operator wallet
 
 **Outcomes:**
 - `feeGrowthGlobalX128` incremented by the truncated (floor) value
@@ -148,7 +154,33 @@ Operator calls `notifyFees(amount)` on the vault.
 
 **Side Effects:**
 - `feeGrowthGlobalX128` storage updated with truncated value
+- `amount` USDC moves from the Operator wallet to the vault, so the truncation dust is USDC that the vault holds and that no position can claim
 - `FeesNotified` event emitted
 - No separate dust tracking
+
+---
+
+### SC-ASNK: Revert when the Operator did not fund the report
+
+**Given:**
+- `activeLiquidity > 0`
+- One of two cases holds: (A) the Operator wallet holds less than `amount` USDC, or (B) the Operator wallet holds `amount` USDC but has approved the vault for less than `amount`
+
+**Steps:**
+1. Operator calls `notifyFees(amount)` with amount > 0
+2. System passes the phase, amount, and liquidity checks and increments `feeGrowthGlobalX128`
+3. System calls `transferFrom` on the USDC contract, which rejects the transfer
+4. System reverts with `TransferFailed`, which rolls back the increment
+
+**Outcomes:**
+- Call reverts
+- `feeGrowthGlobalX128` is unchanged
+- The vault's and the Operator wallet's USDC balances are unchanged
+- `lastOperatorActivityTimestamp` is unchanged, because a reverted call is not proof of life
+
+**Side Effects:**
+- No storage updates
+- No events emitted
+- No USDC moves
 
 ---

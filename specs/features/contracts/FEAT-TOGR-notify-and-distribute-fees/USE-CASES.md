@@ -6,4 +6,4 @@
 
 | ID | Name | Status | Description | File |
 |----|------|--------|-------------|------|
-| UC-TOGS | Operator Notify Fee Revenue | implemented | Operator distributes newly arrived fee revenue by incrementing the vault's global Q128 fee accumulator proportionally to active liquidity | [UC-TOGS-operator-notify-fee-revenue.md](UC-TOGS-operator-notify-fee-revenue.md) |
+| UC-TOGS | Operator Notify Fee Revenue | implemented | Operator distributes newly arrived fee revenue by incrementing the vault's global Q128 fee accumulator proportionally to active liquidity, and the vault takes that revenue from the Operator wallet in the same call | [UC-TOGS-operator-notify-fee-revenue.md](UC-TOGS-operator-notify-fee-revenue.md) |
