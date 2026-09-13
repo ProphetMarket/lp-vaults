@@ -3,7 +3,7 @@
 This guide explains the main interaction patterns for the LP Vaults contracts using sequence diagrams. It covers four areas:
 
 1. [Vault Lifecycle](#1-vault-lifecycle) — creation through wind-down, shown as a continuous example
-2. [Transactional Flows](#2-transactional-flows) — depositing USDC, managing positions, collecting fees
+2. [Transactional Flows](#2-transactional-flows) — depositing USDC, managing positions, collecting fees, exiting, merging pairs
 3. [Emergency Procedures](#3-emergency-procedures) — emergency cancel and pause/unpause
 4. [Admin & Governance](#4-admin--governance) — role management and implementation upgrades
 
@@ -14,7 +14,7 @@ This guide explains the main interaction patterns for the LP Vaults contracts us
 | `Admin` | Admin | Registry-only authority — manages roles, pauses, schedules upgrades |
 | `Oracle` | Oracle | Lifecycle authority — creates vaults, triggers wind-down |
 | `Operator` | Operator | Transactional authority — credits positions, distributes fees, updates tick |
-| `LP` | LP | Liquidity provider — owns positions, collects fees, can reclaim deposits |
+| `LP` | LP | Liquidity provider — a Safe that owns positions, collects fees, burns positions, and reclaims deposits, itself or through the owner key's signed intents that the Operator relays |
 | `Factory` | LPVaultFactory | Deploys vault clones and holds the role registry |
 | `Vault` | LPVault (clone) | Per-market vault instance |
 
@@ -22,7 +22,7 @@ This guide explains the main interaction patterns for the LP Vaults contracts us
 
 ## 1. Vault Lifecycle
 
-A vault lives through three phases: **Active** (minting and trading), **WindDown** (no new positions, exits still open), and **Cancelled** (terminal — all funds distributed).
+A vault lives through three phases: **Active** (minting and trading), **WindDown** (no new positions, exits still open), and **Cancelled** (terminal — trading stops, every exit and the complete-set merge stay open).
 
 ### Phase State Machine
 
@@ -90,12 +90,16 @@ sequenceDiagram
     LP->>Vault: collect(positionId)
     Vault->>LP: transfer remaining fees
     Note right of Vault: LP can still collect<br/>even in WindDown
+    LP->>Vault: burnPosition(positionId)
+    Note right of Vault: merges the vault's pairs, values the claim<br/>from the mint tick, deletes the position
+    Vault->>LP: transfer the claim's USDC and its one outcome token
 ```
 
 **Key invariants during the lifecycle:**
 - `nextPositionId == 0` until the first mint. The `minFirstLiq` floor applies to that one mint and prevents inflation attacks on it. `activeLiquidity` can return to zero later without re-applying the floor.
 - `notifyFees` reverts if `activeLiquidity == 0` — fees cannot be distributed into the void.
-- After `startWindDown()`, only exit paths remain open: `collect`, `reclaimDeposit`, `reclaimDepositFor`, and `emergencyCancelAll`.
+- After `startWindDown()`, only exit paths remain open: `collect`, `collectFor`, `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, `mergeCompleteSets`, and `emergencyCancelAll`.
+- One tick is one basis point, and every position range lies inside [0, 10000]. A burn values the claim from the tick where the position was minted (decision C26).
 - `Oracle` and `Operator` **must** be different wallets — the constructor enforces this.
 
 ---
@@ -197,35 +201,45 @@ sequenceDiagram
 
 ---
 
-### 2.4 Collect Fees (`collect`)
+### 2.4 Collect Fees (`collect`, `collectFor`)
 
-An LP withdraws their accrued trading fees from a position without removing the position itself.
+An LP withdraws their accrued trading fees from a position without removing the position itself. Two entry points: the Safe calls `collect(positionId)` itself, or the owner key signs a `CollectIntent` (with a nonce, because a collect repeats) and the Operator relays it through `collectFor`. Before it pays, the vault merges any YES and NO pairs it holds into USDC, and it pays the smaller of the fees owed and the USDC it holds above escrow; any remainder waits in `tokensOwed` for a later collect.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor LP
+    actor OwnerKey as Owner key
+    participant Safe as LP's Safe
+    actor Operator
     participant Vault as LPVault
+    participant CTF as ConditionalTokens
 
-    LP->>Vault: collect(positionId)
-    Note right of Vault: Checks:<br/>• phase != Cancelled<br/>• position.owner == msg.sender
-
+    alt Self-service
+        OwnerKey->>Safe: signed Safe transaction collect(positionId)
+        Safe->>Vault: collect(positionId)
+        Note right of Vault: Checks (any phase, paused or not):<br/>• position exists<br/>• position.owner == msg.sender
+    else Relayed
+        OwnerKey->>Operator: signed CollectIntent(lp = Safe, positionId, nonce, deadline)
+        Operator->>Vault: collectFor(lp, positionId, nonce, deadline, sig)
+        Note right of Vault: Checks:<br/>block.timestamp ≤ deadline<br/>Safe derived from the signer == lp<br/>struct hash not used<br/>position.owner == lp
+    end
     Note right of Vault: feeGrowthInside = global - below(tL) - above(tU)
-    Note right of Vault: owed = position.liquidity<br/>    × (feeGrowthInside - feeGrowthInsideLast)<br/>    ÷ 2^128
-    Note right of Vault: Also adds position.tokensOwed<br/>(fees rolled in from mergePositions)
-    Note right of Vault: feeGrowthInsideLastX128 = feeGrowthInside<br/>tokensOwed = 0
-
-    Vault->>LP: transfer owed USDC
-    Note right of Vault: FeesCollected event emitted<br/>(only if owed > 0)
+    Note right of Vault: owed = liquidity × (feeGrowthInside - feeGrowthInsideLast) ÷ 2^128<br/>+ position.tokensOwed
+    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
+    Note right of Vault: paid = min(owed, usdc.balanceOf(vault) + pairs − totalEscrowed)
+    Note right of Vault: feeGrowthInsideLastX128 = feeGrowthInside<br/>tokensOwed = owed − paid
+    Vault->>CTF: mergePositions(pairs) if pairs > 0
+    Vault->>Safe: transfer paid USDC
+    Note right of Vault: CompleteSetsMerged (if pairs > 0), then<br/>FeesCollected(positionId, safe, paid) (if paid > 0)
 ```
 
-**When to call:** Any time the LP wants to collect accrued fees. Works in both Active and WindDown phases. `feeGrowthInsideLastX128` is updated each call so subsequent collects only pay fees that accrued since the last collection.
+**When to call:** Any time the LP wants to collect accrued fees. Works in every phase, including Cancelled, and while paused. `feeGrowthInsideLastX128` is updated each call so subsequent collects only pay fees that accrued since the last collection; a short vault leaves the unpaid part in `tokensOwed`.
 
 ---
 
 ### 2.5 Merge Positions (`mergePositions`)
 
-Operator housekeeping: combines two or more distinct positions with the same owner, range, and mint tick into one, preserving total liquidity and rolling up uncollected fees. This joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC that audit-fix step R9 adds.
+Operator housekeeping: combines two or more distinct positions with the same owner, range, and mint tick into one, preserving total liquidity and rolling up uncollected fees. This joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC (section 2.8).
 
 ```mermaid
 sequenceDiagram
@@ -279,6 +293,72 @@ sequenceDiagram
 ```
 
 **When to call:** Whenever the LP wants the escrow back before the Operator mints it. The refund comes from the record, in every phase, paused or not, and with every Operator removed.
+
+---
+
+### 2.7 Burn a Position (`burnPosition`, `burnPositionFor`)
+
+An LP closes a position and receives what its claim holds under the claim model (decision C26). Every level of the range starts as USDC. A level below the mint tick bought YES when the price fell through it; a level at or above the mint tick bought NO when the price rose through it. So the claim is USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick, plus the USDC that buying that token at each level's price did not spend, plus the accrued fees. The vault merges any pairs it holds first, and pays the smaller of what is owed and what it holds, per asset, without a revert. Two entry points: the Safe calls `burnPosition(positionId)` itself, in every phase and with no Operator, or the owner key signs a `BurnIntent` and the Operator relays it through `burnPositionFor`.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor OwnerKey as Owner key
+    participant Safe as LP's Safe
+    actor Operator
+    participant Vault as LPVault
+    participant CTF as ConditionalTokens
+
+    alt Self-service (no Operator, every phase)
+        OwnerKey->>Safe: signed Safe transaction burnPosition(positionId)
+        Safe->>Vault: burnPosition(positionId)
+        Note right of Vault: Checks:<br/>• owner set and liquidity > 0<br/>• position.owner == msg.sender
+    else Relayed
+        OwnerKey->>Operator: signed BurnIntent(lp = Safe, positionId, deadline)
+        Operator->>Vault: burnPositionFor(lp, positionId, deadline, sig)
+        Note right of Vault: Checks:<br/>block.timestamp ≤ deadline<br/>Safe derived from the signer == lp<br/>struct hash not used<br/>owner set, liquidity > 0, owner == lp
+    end
+    Note right of Vault: fees = liquidity × (feeGrowthInside − snapshot) ÷ 2^128 + tokensOwed
+    Note right of Vault: claim from (liquidity, range, mintTick, currentTick):<br/>usdcOwed, tokenId (YES below the mint tick, NO above), tokenOwed
+    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
+    Note right of Vault: usdcPaid = min(usdcOwed + fees, balance + pairs − totalEscrowed)<br/>tokenPaid = min(tokenOwed, held − pairs)
+    Note right of Vault: remove liquidity from both ticks (clear a bit at zero)<br/>activeLiquidity −= liquidity if in range<br/>delete positions[positionId]
+    Vault->>CTF: mergePositions(pairs) if pairs > 0
+    Vault->>Safe: transfer usdcPaid
+    Vault->>CTF: safeTransferFrom(vault, safe, tokenId, tokenPaid) — last call
+    Note right of Vault: PositionBurned(positionId, owner, usdcOwed, feesOwed,<br/>usdcPaid, tokenId, tokenOwed, tokenPaid)
+```
+
+**Worked example.** 300 USDC over `[5500, 6500)` minted at tick 6000 gives `liquidity = 3e23`. With the vault at 5700 the YES band is `[5700, 6000)`: 90 YES, and `3e23 × (1000 × 10000 − 300 × (5700 + 6000 − 1) / 2) / (10000 × 1e18) = 247,354,500` USDC units. The vault spent 52.6455 USDC on the 90 YES, an average price of 0.585. At 6300 the NO band is `[6000, 6300)`: 90 NO and 265,345,500 units. At 6000 the claim is 300 USDC.
+
+**When to call:** Whenever the LP wants out. The self-service path needs no Operator, no signature, no timelock, and no declared emergency, and it works with every Operator removed. `burnPositionFor` refreshes the Operator heartbeat; `burnPosition` never does.
+
+---
+
+### 2.8 Merge Complete Sets (`mergeCompleteSets`)
+
+Any wallet turns the vault's matched YES and NO pairs into USDC held by the vault. A round trip through a level leaves one YES and one NO per token, worth exactly 1 USDC, and the Conditional Tokens contract turns a pair into USDC with no counterparty. The keeper merges on sight so an LP's exit does not pay for the merge; every burn and every paying collect merges first anyway.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Caller as Any wallet
+    participant Vault as LPVault
+    participant CTF as ConditionalTokens
+
+    Caller->>Vault: mergeCompleteSets()
+    Note right of Vault: No role, pause, phase, or heartbeat check
+    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
+    alt min(YES, NO) == 0
+        Note right of Vault: return, no call, no event
+    else amount > 0
+        Vault->>CTF: mergePositions(usdc, 0, conditionId, [1, 2], amount)
+        CTF->>Vault: transfer amount USDC
+        Note right of Vault: CompleteSetsMerged(caller, amount)
+    end
+```
+
+**When to call:** Whenever the vault holds pairs. The caller receives nothing, and a merge moves no value between parties, so the call needs no trusted caller. It never refreshes the Operator heartbeat.
 
 ---
 
@@ -448,7 +528,11 @@ sequenceDiagram
 | `updateTick` | Operator | Active | Not paused; max 256 ticks |
 | `mergePositions` | Operator | Active / WindDown | Not paused |
 | `heartbeat` | Operator | Active / WindDown | Works while paused; refreshes the silence timer only |
-| `collect` | LP (owner) | Active / WindDown | Always open; works while paused |
+| `collect` | LP's Safe (owner) | Every phase | Always open; works while paused; merges pairs first; pays what the vault holds above escrow |
+| `collectFor` | Operator | Every phase | Works while paused; owner-key CollectIntent with a nonce and a deadline |
+| `burnPosition` | LP's Safe (owner) | Every phase | Always open; works while paused; no Operator, no timelock; the claim from the mint tick |
+| `burnPositionFor` | Operator | Every phase | Works while paused; owner-key BurnIntent with a deadline |
+| `mergeCompleteSets` | Any wallet | Every phase | Works while paused; never refreshes the heartbeat |
 | `reclaimDeposit` | LP's Safe | Every phase | Always open; works while paused; no timelock |
 | `reclaimDepositFor` | Operator | Every phase | Works while paused; owner-key ReclaimIntent with a deadline |
 | `emergencyCancelAll` | Any position holder | Active / WindDown | After 7-day silence |

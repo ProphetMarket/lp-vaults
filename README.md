@@ -23,7 +23,9 @@ The contracts are the on-chain foundation only. The off-chain keeper, event list
 | Upgradeable Vault Implementation Pointer | implemented | Admin two-step 7-day timelocked upgrade of the factory's implementation pointer |
 | Escrow Deposit for Mint Intent | implemented | Operator escrows an LP's USDC from the LP's Safe against a signed mint intent |
 | Mint LP Position | implemented | Operator-gated mint that consumes a per-intent escrow |
-| Collect Fees on a Position | implemented | LP fee withdrawal via v3 feeGrowthInside snapshot |
+| Collect Fees on a Position | implemented | LP fee withdrawal via v3 feeGrowthInside snapshot, by the Safe or relayed, merging the vault's pairs first and paying what the vault holds |
+| Burn LP Position | implemented | LP exit by the Safe or relayed: the claim from the mint tick (decision C26), USDC plus one outcome token, pay what is there |
+| Complete-Set Merge and Resolution Redemption | implemented | Any wallet merges the vault's YES and NO pairs into USDC, in every phase; the redemption waits for Part 6 |
 | Merge Positions | implemented | Operator housekeeping to combine same-range same-owner positions |
 | Notify and Distribute Fees | implemented | Operator-driven Q128 accumulator update |
 | Update Tick and Cross Ticks | implemented | Operator tick sync with per-tick accumulator flip |
@@ -36,10 +38,10 @@ Full specs are under `specs/features/`. Feature index: [specs/FEATURES.md](specs
 | Role | Authority | Notes |
 |------|-----------|-------|
 | **Admin** | Registry-only: add/remove operators, set oracle, pause trading, schedule/apply/cancel implementation upgrades, two-step admin transfer | Cannot call user-facing vault functions |
-| **Operator** | Transactional: `depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat` | Multiple addresses allowed; must be separate from Oracle |
+| **Operator** | Transactional: `depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `burnPositionFor`, `collectFor`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat` | Multiple addresses allowed; must be separate from Oracle |
 | **Oracle** | Lifecycle: `createVault` (factory), `startWindDown` (vault) | Single wallet; must be separate from Operator |
-| **LP** | A Safe wallet; the owner key signs intents, and the Safe calls `reclaimDeposit`, `collect`, `burnPosition` on its own escrows and positions | The vault accepts an owner key only when the Safe it derives equals the named Safe |
-| **Keeper** | Off-chain bot holding an Operator key — no on-chain role | Not a contract concept |
+| **LP** | A Safe wallet; the owner key signs `MintIntent`, `ReclaimIntent`, `BurnIntent`, and `CollectIntent`, and the Safe calls `reclaimDeposit`, `collect`, `burnPosition` on its own escrows and positions, in every phase | The vault accepts an owner key only when the Safe it derives equals the named Safe |
+| **Keeper** | Off-chain bot holding an Operator key — no on-chain role | Not a contract concept; merges the vault's pairs through `mergeCompleteSets`, which any wallet may call |
 
 See `specs/ACTORS.md` for full role details and `CLAUDE.md` for the security checklist enforced on every PR.
 
@@ -48,6 +50,7 @@ See `specs/ACTORS.md` for full role details and `CLAUDE.md` for the security che
 - **EIP-1167 minimal-proxy clones.** Each market gets a fresh vault clone from the factory. Per-vault config lives in storage (not `immutable`) since clones share the implementation's bytecode.
 - **Factory-delegated authorization.** Vault modifiers (`onlyAdmin`, `onlyOperator`, `onlyOracle`) read role state from the factory at call time. Role rotation on the factory propagates immediately to all deployed vaults.
 - **Uniswap v3 fee math.** Q128 global and per-tick accumulators; positions snapshot `feeGrowthInsideLastX128` at mint to prevent retroactive fee claims.
+- **The claim model (decision C26).** One tick is one basis point and every range lies inside [0, 10000]. Liquidity is the token count on every tick of a range, each tick funded with 1 USDC per token. A level below the mint tick buys YES when the price falls through it, a level at or above it buys NO when the price rises through it, and a round trip leaves a pair that merges back into 1 USDC. A burn values the claim in closed form from the liquidity, the range, the mint tick, and the current tick, merges the vault's pairs first, and pays the smaller of what is owed and what the vault holds per asset.
 - **Two-step timelocked upgrades.** Factory's implementation pointer can be swapped after a 7-day delay. Existing clones stay pinned to their original bytecode by EIP-1167 construction; new clones use the current pointer.
 - **Inlined patterns.** Reentrancy guard, safe transfers, mulDiv, safe casts, EIP-712 domain separator, and EIP-1167 clone deployment are all inlined per the pattern policy in `CLAUDE.md` — no library imports beyond OpenZeppelin interfaces.
 

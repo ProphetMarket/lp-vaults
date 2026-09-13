@@ -101,7 +101,7 @@ Verifies the market's outcome-token identity against the ConditionalTokens contr
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `marketId_` | `bytes32` | Unique identifier for the market — must not already have a vault |
-| `tickSpacing_` | `int24` | Minimum tick increment; all position bounds must be multiples of this value |
+| `tickSpacing_` | `int24` | Minimum tick increment; all position bounds must be multiples of this value. One tick is one basis point (`PRICE_TICK_ONE = 10000`, price = tick / 10000), so `tickSpacing` is the width of a level, and every position range lies inside [0, 10000] |
 | `minimumFirstLiquidity_` | `uint128` | Floor on the liquidity value of the first mint (prevents inflation attacks); must be > 0 |
 | `conditionId_` | `bytes32` | ConditionalTokens condition ID of the market; must be a prepared 2-outcome condition |
 | `yesTokenId_` | `uint256` | YES outcome token ID: the index set 1 position ID of `(usdc, conditionId_)` |
@@ -353,7 +353,7 @@ sequenceDiagram
 - `VaultNotActive()` — vault is not in Active phase
 - `ZeroAmount()` — `usdcAmount` is 0
 - `IntentExpired()` — `block.timestamp > deadline`
-- `InvalidRange()` — `tickLower >= tickUpper`
+- `InvalidRange()` — `tickLower >= tickUpper`, `tickLower < 0`, or `tickUpper > PRICE_TICK_ONE` (10000)
 - `TickNotAligned()` — either tick is not a multiple of `tickSpacing`
 - `InvalidSignature()` — signature is malformed, malleable, or from a key whose derived Safe is not `lp`
 - `IntentAlreadyUsed()` — `intentId` was consumed by a mint or a reclaim
@@ -413,7 +413,7 @@ sequenceDiagram
 - `TradingIsPaused()` — vault is paused
 - `VaultNotActive()` — vault is not in Active phase
 - `ZeroAmount()` — `usdcAmount` is 0
-- `InvalidRange()` — `tickLower >= tickUpper`
+- `InvalidRange()` — `tickLower >= tickUpper`, `tickLower < 0`, or `tickUpper > PRICE_TICK_ONE` (10000)
 - `TickNotAligned()` — either tick is not a multiple of `tickSpacing`
 - `IntentAlreadyUsed()` — `intentId` was already used by a mint or a reclaim
 - `DepositNotEscrowed()` — no escrow exists for `intentId`
@@ -544,9 +544,9 @@ sequenceDiagram
 function collect(uint256 positionId) external nonReentrant
 ```
 
-**Actor:** LP (position owner)
+**Actor:** LP's Safe (position owner)
 
-Withdraws all accrued trading fees from a position. Computes fees since the last collect using the per-tick `feeGrowthOutside` accumulators, adds any `tokensOwed` (rolled in from `mergePositions`), and transfers USDC to the caller.
+Withdraws accrued trading fees from a position without removing it, in every phase and while paused. Computes the fees since the last collect from the per-tick `feeGrowthOutside` accumulators, adds `tokensOwed` (rolled in from `mergePositions`, or the remainder of an earlier short collect), merges the vault's YES and NO pairs into USDC, and pays the smaller of the amount owed and the USDC the vault holds above `totalEscrowed`. The unpaid remainder waits in `tokensOwed`. A zero-owed collect reads no balance and merges nothing.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -554,26 +554,223 @@ Withdraws all accrued trading fees from a position. Computes fees since the last
 
 ```mermaid
 sequenceDiagram
-    actor LP
+    actor Safe as LP's Safe
+    participant Vault as LPVault
+    participant CTF as ConditionalTokens
+    participant USDC
+
+    Safe->>Vault: collect(positionId)
+    Note right of Vault: Checks:<br/>position.owner != 0 (exists)<br/>position.owner == msg.sender
+    Note right of Vault: feeGrowthInside = global - below(tL) - above(tU)
+    Note right of Vault: owed = position.liquidity<br/>    x (feeGrowthInside - feeGrowthInsideLastX128)<br/>    / 2^128 + position.tokensOwed
+    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
+    Vault->>USDC: balanceOf(vault)
+    Note right of Vault: paid = min(owed, balance + pairs - totalEscrowed)
+    Note right of Vault: position.feeGrowthInsideLastX128 = feeGrowthInside<br/>position.tokensOwed = owed - paid
+    Vault->>CTF: mergePositions(pairs) if pairs > 0
+    Vault->>USDC: transfer(safe, paid)
+    Note right of Vault: CompleteSetsMerged (if pairs > 0), FeesCollected (if paid > 0)
+```
+
+**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when pairs merged; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount)` with the amount paid
+
+**Reverts:**
+- `PositionNotFound()` — no position exists at `positionId`
+- `NotPositionOwner()` — caller does not own this position
+- `TransferFailed()` — USDC transfer failed
+
+---
+
+### `LPVault.collectFor`
+
+```solidity
+function collectFor(
+    address  lp,
+    uint256  positionId,
+    uint256  nonce,
+    uint256  deadline,
+    bytes calldata signature
+) external onlyOperator nonReentrant touchesHeartbeat
+```
+
+**Actor:** Operator
+
+Relays the owner key's signed `CollectIntent` to pay that Safe its fees — the same collect as `collect`, with the Operator paying the gas. The USDC goes to `position.owner`, never to the caller. The type carries a `nonce` because a collect repeats over a position's life, and each struct hash is consumed once in its own record.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `lp` | `address` | The LP's Safe — must be the position's recorded owner |
+| `positionId` | `uint256` | The position to collect from |
+| `nonce` | `uint256` | A value the owner key never reuses for this position |
+| `deadline` | `uint256` | Last `block.timestamp` at which the relayed collect is accepted (inclusive) |
+| `signature` | `bytes` | 65-byte EIP-712 signature from the Safe's owner key over `CollectIntent(address lp,uint256 positionId,uint256 nonce,uint256 deadline)` |
+
+```mermaid
+sequenceDiagram
+    actor Operator
     participant Vault as LPVault
     participant USDC
 
-    LP->>Vault: collect(positionId)
-    Note right of Vault: Checks:<br/>phase != Cancelled<br/>position.owner != 0 (exists)<br/>position.owner == msg.sender
-    Note right of Vault: feeGrowthInside = global - below(tL) - above(tU)
-    Note right of Vault: owed = position.liquidity<br/>    x (feeGrowthInside - feeGrowthInsideLastX128)<br/>    / 2^128
-    Note right of Vault: owed += position.tokensOwed
-    Note right of Vault: position.feeGrowthInsideLastX128 = feeGrowthInside<br/>position.tokensOwed = 0
-    Vault->>USDC: transfer(lp, owed)
-    Note right of Vault: FeesCollected event emitted (if owed > 0)
+    Operator->>Vault: collectFor(lp, positionId, nonce, deadline, sig)
+    Note right of Vault: Checks:<br/>block.timestamp <= deadline<br/>derived Safe of the signer == lp<br/>struct hash not used<br/>position exists, position.owner == lp
+    Note right of Vault: usedCollectAuthorizations[structHash] = true
+    Note right of Vault: the same body as collect
+    Vault->>USDC: transfer(lp, paid)
+    Note right of Vault: FeesCollected event emitted (if paid > 0)
 ```
 
-**Events:** `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount)`
+**Events:** `CompleteSetsMerged` when pairs merged; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount)`
 
 **Reverts:**
-- `VaultCancelled()` — vault is in terminal Cancelled phase
+- `NotOperator()` — caller is not an operator
+- `IntentExpired()` — `block.timestamp > deadline`
+- `InvalidSignature()` — signature is malformed, malleable, produced over another type, or from a key whose derived Safe is not `lp`
+- `IntentAlreadyUsed()` — this `CollectIntent` was already consumed
 - `PositionNotFound()` — no position exists at `positionId`
+- `NotPositionOwner()` — `lp` does not own this position
+- `TransferFailed()` — USDC transfer failed
+
+---
+
+### `LPVault.burnPosition`
+
+```solidity
+function burnPosition(uint256 positionId) external nonReentrant
+```
+
+**Actor:** LP's Safe (position owner)
+
+Closes a position the Safe owns and pays what its claim holds under the claim model (decision C26): USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick (YES below the mint tick, NO at or above it) plus the USDC that buying that token at each level's price did not spend, and the accrued fees. The vault merges its YES and NO pairs first, removes the position's liquidity from both ticks (deleting a tick and clearing its bitmap bit when its `liquidityGross` reaches zero), reduces `activeLiquidity` when the position is in range, deletes the record, and pays the smaller of what is owed and what it holds, per asset, without a revert. Works in every phase, while paused, and with every Operator removed. Never refreshes the Operator heartbeat.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `positionId` | `uint256` | The position to close; `msg.sender` must be its recorded owner |
+
+**The claim.** With `L = liquidity`, `width = tickUpper − tickLower`, `m = mintTick`, `c = currentTick`, `ONE = 10000`, and `P = 1e18`:
+
+```text
+c < m:   a = max(c, tickLower), band = m − a           # the YES band [a, m)
+         tokens = L × band / P
+         Σt = band × (a + m − 1) / 2
+         usdc = L × (width × ONE − Σt) / (ONE × P)
+c > m:   b = min(c, tickUpper), band = b − m           # the NO band [m, b)
+         tokens = L × band / P
+         Σt = band × (m + b − 1) / 2
+         usdc = L × ((width − band) × ONE + Σt) / (ONE × P)
+c == m, or band == 0:  usdc = L × width / P, no token
+```
+
+Worked example: 300 USDC over `[5500, 6500)` minted at 6000 gives `L = 3e23`. With the vault at 5700: `band = 300`, `tokens = 90e6` (90 YES), `Σt = 300 × (5700 + 6000 − 1) / 2 = 1,754,850`, `usdc = 3e23 × (10,000,000 − 1,754,850) / 1e22 = 247,354,500` (247.3545 USDC). The vault spent 52.6455 USDC on the 90 YES, an average price of 0.585, the middle of the band. At 6300 the NO band pays 90 NO and 265,345,500 units.
+
+```mermaid
+sequenceDiagram
+    actor Safe as LP's Safe
+    participant Vault as LPVault
+    participant CTF as ConditionalTokens
+    participant USDC
+
+    Safe->>Vault: burnPosition(positionId)
+    Note right of Vault: Checks:<br/>owner != 0 and liquidity > 0<br/>position.owner == msg.sender
+    Note right of Vault: fees from feeGrowthInside; the claim from<br/>(liquidity, range, mintTick, currentTick)
+    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
+    Vault->>USDC: balanceOf(vault)
+    Note right of Vault: usdcPaid = min(usdcOwed + fees, balance + pairs - totalEscrowed)<br/>tokenPaid = min(tokenOwed, held - pairs)
+    Note right of Vault: remove liquidity from both ticks (clear a bit at zero)<br/>activeLiquidity -= liquidity if in range<br/>delete positions[positionId]
+    Vault->>CTF: mergePositions(pairs) if pairs > 0
+    Vault->>USDC: transfer(safe, usdcPaid)
+    Vault->>CTF: safeTransferFrom(vault, safe, tokenId, tokenPaid) — last call
+    Note right of Vault: PositionBurned event emitted
+```
+
+**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when pairs merged; `PositionBurned(uint256 indexed positionId, address indexed owner, uint256 usdcOwed, uint256 feesOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid)` — `paid < owed` marks a shortfall
+
+**Reverts:**
+- `PositionNotFound()` — never minted, already burned, or consumed by `mergePositions`
 - `NotPositionOwner()` — caller does not own this position
+- `TransferFailed()` — USDC transfer failed
+
+---
+
+### `LPVault.burnPositionFor`
+
+```solidity
+function burnPositionFor(
+    address  lp,
+    uint256  positionId,
+    uint256  deadline,
+    bytes calldata signature
+) external onlyOperator nonReentrant touchesHeartbeat
+```
+
+**Actor:** Operator
+
+Relays the owner key's signed `BurnIntent` to close that Safe's position — the same burn as `burnPosition`, with the Operator paying the gas. Every asset goes to `position.owner`, never to the caller. The Operator chooses the block, and so the `currentTick` that values the claim, bounded by the deadline the owner key signed; the Safe's remedy is `burnPosition`.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `lp` | `address` | The LP's Safe — must be the position's recorded owner |
+| `positionId` | `uint256` | The position to close |
+| `deadline` | `uint256` | Last `block.timestamp` at which the relayed burn is accepted (inclusive) |
+| `signature` | `bytes` | 65-byte EIP-712 signature from the Safe's owner key over `BurnIntent(address lp,uint256 positionId,uint256 deadline)` |
+
+```mermaid
+sequenceDiagram
+    actor Operator
+    participant Vault as LPVault
+    participant USDC
+    participant CTF as ConditionalTokens
+
+    Operator->>Vault: burnPositionFor(lp, positionId, deadline, sig)
+    Note right of Vault: Checks:<br/>block.timestamp <= deadline<br/>derived Safe of the signer == lp<br/>struct hash not used<br/>owner != 0, liquidity > 0, owner == lp
+    Note right of Vault: usedBurnAuthorizations[structHash] = true
+    Note right of Vault: the same body as burnPosition
+    Vault->>USDC: transfer(lp, usdcPaid)
+    Vault->>CTF: safeTransferFrom(vault, lp, tokenId, tokenPaid)
+    Note right of Vault: PositionBurned event emitted
+```
+
+**Events:** `CompleteSetsMerged` when pairs merged; `PositionBurned(...)`
+
+**Reverts:**
+- `NotOperator()` — caller is not an operator
+- `IntentExpired()` — `block.timestamp > deadline`
+- `InvalidSignature()` — signature is malformed, malleable, produced over another type, or from a key whose derived Safe is not `lp`
+- `IntentAlreadyUsed()` — this `BurnIntent` was already consumed
+- `PositionNotFound()` — never minted, already burned, or consumed by `mergePositions`
+- `NotPositionOwner()` — `lp` does not own this position
+- `TransferFailed()` — USDC transfer failed
+
+---
+
+### `LPVault.mergeCompleteSets`
+
+```solidity
+function mergeCompleteSets() external nonReentrant
+```
+
+**Actor:** Any wallet
+
+Merges `min(YES balance, NO balance)` complete sets of the vault's condition into USDC held by the vault, through the Conditional Tokens contract. One YES plus one NO always pays exactly 1 USDC, so the merge moves no value between parties and the caller receives nothing. No role, pause, phase, or heartbeat check. A vault with no pair returns without a call and emits nothing.
+
+```mermaid
+sequenceDiagram
+    actor Caller as Any wallet
+    participant Vault as LPVault
+    participant CTF as ConditionalTokens
+    participant USDC
+
+    Caller->>Vault: mergeCompleteSets()
+    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
+    Note right of Vault: amount = min; return if 0
+    Vault->>CTF: mergePositions(usdc, 0, conditionId, [1, 2], amount)
+    CTF->>USDC: transfer(vault, amount)
+    Note right of Vault: CompleteSetsMerged(caller, amount)
+```
+
+**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)`, only when `amount > 0`
+
+**Reverts:**
+- `Reentrancy()` — re-entered through a guarded call
 
 ---
 
