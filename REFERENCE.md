@@ -426,12 +426,12 @@ sequenceDiagram
 ### `LPVault.notifyFees`
 
 ```solidity
-function notifyFees(uint256 amount) external onlyOperator whenNotPaused touchesHeartbeat
+function notifyFees(uint256 amount) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat
 ```
 
 **Actor:** Operator
 
-Increments the global Q128 fee accumulator by the per-unit share of `amount` distributed across `activeLiquidity`. The Operator is trusted to have deposited the corresponding USDC into the vault before calling.
+Increments the global Q128 fee accumulator by the per-unit share of `amount` distributed across `activeLiquidity`, then takes `amount` USDC from the caller with `transferFrom` in the same call, so no fee credit exists without the USDC behind it. The Operator wallet must hold the swept USDC and a standing USDC approval to the vault (see `DEPLOYMENT.md`, "Operator USDC approval per vault"). The vault performs no balance check beyond the pull: the Operator can still under-report.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -441,15 +441,18 @@ Increments the global Q128 fee accumulator by the per-unit share of `amount` dis
 sequenceDiagram
     actor Operator
     participant Vault as LPVault
+    participant USDC
 
     Operator->>Vault: notifyFees(amount)
     Note right of Vault: Checks:<br/>not paused<br/>phase != Cancelled<br/>amount > 0<br/>activeLiquidity > 0
     Note right of Vault: feeGrowthGlobalX128 +=<br/>mulDiv(amount, 2^128, activeLiquidity)
+    Vault->>USDC: transferFrom(operator, vault, amount)
+    Note right of Vault: a rejected transfer reverts<br/>the whole call (TransferFailed)
     Note right of Vault: lastOperatorActivityTimestamp = now
     Note right of Vault: FeesNotified event emitted
 ```
 
-**Events:** `FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128)`
+**Events:** `FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128)`, preceded in the same transaction by the USDC contract's `Transfer(operator, vault, amount)`
 
 **Reverts:**
 - `NotOperator()` — caller is not an operator
@@ -457,6 +460,7 @@ sequenceDiagram
 - `VaultCancelled()` — vault is in terminal Cancelled phase
 - `ZeroAmount()` — `amount` is 0
 - `NoActiveLiquidity()` — `activeLiquidity` is 0
+- `TransferFailed()` — the USDC `transferFrom` from the caller failed (no balance, or no approval); the accumulator increment rolls back
 
 ---
 

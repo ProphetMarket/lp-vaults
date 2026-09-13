@@ -72,6 +72,7 @@ sequenceDiagram
 
     Note over Operator,Vault: ── STEP 4: Trading — fees distributed over time ─────────
     Operator->>Vault: notifyFees(feeAmount)
+    Vault->>Operator: pull feeAmount USDC from the<br/>Operator wallet via transferFrom
     Note right of Vault: feeGrowthGlobalX128 increases
     Operator->>Vault: updateTick(newTick)
     Note right of Vault: currentTick updated<br/>activeLiquidity adjusted
@@ -147,15 +148,18 @@ sequenceDiagram
     autonumber
     actor Operator
     participant Vault as LPVault
+    participant USDC
 
-    Note over Operator: Operator has swept fee revenue<br/>and deposited USDC into vault off-chain
+    Note over Operator: Operator has swept fee revenue into the<br/>Operator wallet, which has approved the vault
     Operator->>Vault: notifyFees(feeAmount)
     Note right of Vault: Checks:<br/>• phase != Cancelled<br/>• feeAmount > 0<br/>• activeLiquidity > 0
     Note right of Vault: feeGrowthGlobalX128 +=<br/>mulDiv(feeAmount, 2^128, activeLiquidity)
+    Vault->>USDC: transferFrom(operator, vault, feeAmount)
+    Note right of Vault: a rejected transfer reverts the call<br/>(TransferFailed), so no credit without USDC
     Note right of Vault: lastOperatorActivityTimestamp = now<br/>(resets 7-day emergency silence timer)
 ```
 
-**When to call:** After the Operator sweeps trading fees from the exchange and deposits the corresponding USDC into the vault. The contract does not verify the USDC balance — the Operator is trusted to have funded the vault before calling.
+**When to call:** After the Operator sweeps trading fees from the exchange into the Operator wallet. The vault takes the USDC itself inside the call, so the credit and the funds move in one transaction. Each Operator wallet needs a standing USDC approval to each vault it reports to (see `DEPLOYMENT.md`, "Operator USDC approval per vault"); a wallet with no approval reverts on its first report with `TransferFailed`. The vault performs no balance check beyond the pull, so the Operator can still under-report.
 
 **Why `activeLiquidity > 0` matters:** Distributing fees with zero active liquidity would lock USDC permanently with no LP able to claim. The revert prevents this.
 
@@ -440,7 +444,7 @@ sequenceDiagram
 | `startWindDown` | Oracle | Active | One-way; enables exit-only |
 | `depositForIntent` | Operator | Active | Not paused; owner-key signature checked against the derived Safe |
 | `mintPositionFor` | Operator | Active | Not paused; escrow required, no signature, no USDC |
-| `notifyFees` | Operator | Active / WindDown | Not paused; activeLiquidity > 0 |
+| `notifyFees` | Operator | Active / WindDown | Not paused; activeLiquidity > 0; takes `amount` USDC from the Operator wallet |
 | `updateTick` | Operator | Active | Not paused; max 256 ticks |
 | `mergePositions` | Operator | Active / WindDown | Not paused |
 | `heartbeat` | Operator | Active / WindDown | Works while paused; refreshes the silence timer only |

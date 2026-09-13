@@ -376,6 +376,20 @@ The **Admin** should immediately:
 3. Transfer admin if needed via the two-step `transferAdmin` / `acceptAdmin` flow.
 4. After a transfer, call `removeAdmin(<old admin address>)` from the new admin. `acceptAdmin` adds the new admin but does not remove the old one, so the old key keeps full admin rights on the factory and on every vault until it is removed.
 
+### Operator USDC approval per vault
+
+`notifyFees(amount)` takes `amount` USDC from the Operator wallet with `transferFrom` in the same call, so no fee credit exists without the USDC behind it. Every Operator wallet therefore needs a standing USDC approval to every vault it reports fees to. Grant it when the keeper onboards the vault, from each Operator wallet:
+
+```bash
+cast send <USDC_ADDRESS> \
+  "approve(address,uint256)" \
+  <VAULT_ADDRESS> 0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff \
+  --rpc-url https://polygon-rpc.com \
+  --account <operator-account-name>
+```
+
+A max approval is the recommended grant, as `initialize()` grants to the exchange: the vault pulls only inside `notifyFees`, which the Operator itself calls with the amount it chose, so the approval never exposes more than the Operator reports. Repeat the grant for each vault, because every vault is its own EIP-1167 clone, and for each Operator wallet the keeper uses. A vault whose Operator wallet gave no approval, or holds less USDC than it reports, reverts on `notifyFees` with `TransferFailed`; that is the expected failure mode, and the fix is the approval or the sweep, not a contract change.
+
 ---
 
 ## 10. Troubleshooting
