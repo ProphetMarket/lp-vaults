@@ -21,7 +21,9 @@
 
 **Bitmap word** -- One `uint256` entry of the tick bitmap, covering 256 consecutive ticks. The word index is the tick divided by 256, rounded down, and it spans `int16`: word −32768 holds the lowest ticks and word 32767 the highest. The tick search stops at the word that holds the Operator's target.
 
-**Position** -- A per-LP record stored in the vault: `(owner, tickLower, tickUpper, liquidity, feeGrowthInsideLastX128, tokensOwed)`. Each LP can hold multiple positions per vault with different ranges.
+**Position** -- A per-LP record stored in the vault: `(owner, tickLower, tickUpper, mintTick, liquidity, feeGrowthInsideLastX128, tokensOwed)`. Each LP can hold multiple positions per vault with different ranges.
+
+**Mint tick** -- The vault's `currentTick` at the moment a position was minted, clamped into the position's range: `tickLower` when the price was below the range, `tickUpper` when it was at or above it. Stored as `Position.mintTick`. It anchors which levels of the range hold USDC and which hold outcome tokens (decision C26 in `audits/audit-fixes-ranged.md`), and two positions merge only when their mint ticks are equal.
 
 **feeGrowthGlobalX128** -- Vault-wide cumulative fees per unit of active liquidity since vault inception, scaled by 2^128 (Q128 fixed-point). Incremented on every `notifyFees` call.
 

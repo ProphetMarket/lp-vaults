@@ -4,7 +4,7 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 6
+version: 7
 refs: []
 ---
 
@@ -131,12 +131,12 @@ Linked to: UC-3Z92
 Fit Criterion: Given a non-Operator caller (including LPs directly, Admin, Oracle, Factory Owner, and arbitrary addresses), every position-creation entry point on the vault reverts with an access control error.
 Linked to: UC-REQ1
 
-**FR-RFS7** `When a position is minted on a vault while activeLiquidity == 0, the system shall reject the mint if the resulting liquidity is below the vault's current minimumFirstLiquidity.`
-Fit Criterion: Given a vault with `activeLiquidity == 0` and `minimumFirstLiquidity == M`, a mint that would produce `liquidity < M` reverts; a mint that would produce `liquidity >= M` succeeds and `activeLiquidity > 0` thereafter. `minimumFirstLiquidity` is supplied by the Oracle as a parameter to `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` and stored on the vault clone at `initialize()` time. The check applies whenever `activeLiquidity == 0` -- both the very first mint and any subsequent mint after every position has been burned.
+**FR-RFS7** `When a position is minted on a vault while nextPositionId == 0, the system shall reject the mint if the resulting liquidity is below the vault's current minimumFirstLiquidity.`
+Fit Criterion: Given a vault with `nextPositionId == 0` and `minimumFirstLiquidity == M`, a mint that would produce `liquidity < M` reverts; a mint that would produce `liquidity >= M` succeeds and `nextPositionId == 1` thereafter. Given `nextPositionId > 0`, a mint that would produce `liquidity < M` succeeds, even when `activeLiquidity == 0` because the price sits in a range with no position. `minimumFirstLiquidity` is supplied by the Oracle as a parameter to `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` and stored on the vault clone at `initialize()` time. The check applies exactly once in the vault's history, because position IDs are never reused, even after a burn (audit issue 6.9, decision C15 in `audits/audit-fixes-ranged.md`).
 Linked to: UC-REQ1
 
 **FR-RG4W** `When the Oracle calls setMinimumFirstLiquidity(uint128 newMin) on a vault, the system shall update the vault's minimumFirstLiquidity to newMin.`
-Fit Criterion: Given the Oracle calls `setMinimumFirstLiquidity(newMin)` on a vault, the vault's `minimumFirstLiquidity == newMin` after the call. Subsequent mints while `activeLiquidity == 0` are gated by the new value. The setter is callable regardless of current `activeLiquidity`, but only changes the enforced floor for future zero-liquidity states.
+Fit Criterion: Given the Oracle calls `setMinimumFirstLiquidity(newMin)` on a vault, the vault's `minimumFirstLiquidity == newMin` after the call. The new value gates the first mint when no position has been minted yet (`nextPositionId == 0`). Once `nextPositionId > 0` the setter still succeeds and still emits its event, and it changes a value that no later mint reads. The user chose on 2026-09-12 to keep the setter unchanged, because the auditors asked for decision C15 and nothing more. Rejected alternative, recorded for a later step if the Oracle service needs a hard stop: revert the setter once `nextPositionId > 0`.
 Linked to: UC-REQ1
 
 **FR-RG4X** `If any caller other than the Oracle calls setMinimumFirstLiquidity, then the system shall revert.`
@@ -226,7 +226,7 @@ Linked to: UC-REQ2
 - All use cases (Deploy Factory, Create Vault for Market, Manage Roles on Factory) pass with full scenario coverage
 - Role separation tests verify Operator cannot call Oracle-gated functions and vice versa
 - Non-Operator callers cannot create the first position on a vault (verified by invariant test against every position-creation entry point)
-- Mints below `MINIMUM_FIRST_LIQUIDITY` revert when `activeLiquidity == 0` (verified by fuzz test)
+- Mints below `minimumFirstLiquidity` revert when `nextPositionId == 0`, and a later mint below the floor succeeds even when `activeLiquidity == 0` (verified by a fuzz test in the UC-T7AG test file)
 - EIP-1167 clones use storage for all per-vault config (no `immutable` usage in LPVault)
 - Implementation contract cannot be initialized directly
 - The vault accepts inbound ERC-1155 transfers of its own two outcome-token IDs from its own ConditionalTokens contract, and rejects receiver-hook calls from every other address and every other token ID

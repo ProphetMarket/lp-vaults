@@ -3,7 +3,7 @@ id: FEAT-REPZ
 name: Deploy LP Vault for a Market
 use_cases: [UC-REQ0, UC-REQ1, UC-REQ2]
 scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5, SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN, SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR, SC-6HBV, SC-6HBW, SC-6HBX, SC-6HBY, SC-9OY7]
-last_update: 2026-09-12
+last_update: 2026-09-13
 ---
 
 # Architecture: Deploy LP Vault for a Market
@@ -93,9 +93,9 @@ erDiagram
         uint8 phase "Active or WindDown"
         bool initialized "one-shot guard"
         uint256 feeGrowthGlobalX128 "starts at 0"
-        uint128 activeLiquidity "starts at 0; first mint must meet minimumFirstLiquidity"
+        uint128 activeLiquidity "starts at 0"
         int24 currentTick "starts at 0"
-        uint256 nextPositionId "starts at 0"
+        uint256 nextPositionId "starts at 0; the first mint must meet minimumFirstLiquidity"
     }
     LPVAULT ||--o{ POSITION : "holds"
     POSITION {
@@ -103,6 +103,7 @@ erDiagram
         address owner "factory for ghost, LP for real"
         int24 tickLower "must align to tickSpacing"
         int24 tickUpper "must align to tickSpacing"
+        int24 mintTick "currentTick at mint, clamped into the range"
         uint128 liquidity "non-zero"
         uint256 feeGrowthInsideLastX128 "snapshot at mint"
         uint256 tokensOwed "unclaimed fees"
@@ -126,7 +127,7 @@ erDiagram
 - Vaults hold no Safe derivation input -- `safeFactory` and `safeProxyBytecodeHash` are read from the factory at call time, and no function on the factory changes them
 - `initialized` flips from false to true exactly once per clone -- never resets
 - All position-creation entry points on the vault are gated by `onlyOperator` -- no direct LP mint path exists
-- When `activeLiquidity == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` or revert -- the first position is always materially large
+- When `nextPositionId == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` or revert -- the first position is always materially large, and the floor applies exactly once
 - `minimumFirstLiquidity > 0` always -- enforced at `createVault()` and on every `setMinimumFirstLiquidity()` call; the floor cannot be disabled
 - Every successful ERC-1155 receiver-hook invocation on a vault has `msg.sender == conditionalTokens` -- the vault never acknowledges tokens from any other ERC-1155 contract
 - The receiver hooks are pure with respect to vault state -- no position, tick, or fee-accumulator storage is written by an inbound transfer
@@ -284,6 +285,7 @@ In the context of role management, facing the pattern policy that forbids import
 
 **ADR-RFS9:** Operator-gated minting + per-vault minimum-first-liquidity floor for inflation-grief protection
 In the context of first-LP protection, facing the risk that a tiny first position can manipulate `feeGrowthGlobalX128` initialization (the v3 analog of the ERC-4626 first-depositor inflation attack), we decided to (a) route every position-creation entry point through an `onlyOperator` gate so no public mint path exists, and (b) enforce on-chain that the next mint while `activeLiquidity == 0` must produce `liquidity >= minimumFirstLiquidity`, where `minimumFirstLiquidity` is supplied per-market by the Oracle at `createVault` time and adjustable later via `setMinimumFirstLiquidity` (also `onlyOracle`). The floor cannot be set to zero. This achieves attack-resistance without locking capital per-vault while giving the Oracle per-market control to size the floor against expected market depth. We accept that the Operator is now in the path of every LP onboarding -- a trust assumption already established by the OPERATOR TRUST ASSUMPTION pattern in CLAUDE.md and mirrored from the CTF Exchange's operator-matched order flow -- and that lowering the floor requires a compromised Oracle to collude with a compromised Operator before an inflation grief becomes possible (two-of-two compromise).
+Superseded in part on 2026-09-12 (audit NM-0986 issue 6.9, decision C15 in `audits/audit-fixes-ranged.md`): the floor applies when `nextPositionId == 0`, not when `activeLiquidity == 0`. `activeLiquidity` returns to zero whenever the price enters a range with no position, so the old condition re-applied the floor long after the first mint and blocked small LPs. `nextPositionId` only grows and no ID is reused, so the floor now applies exactly once. The Operator gate in part (a) and the non-zero floor stay as decided.
 
 **ADR-3WLP:** Stateless ERC-1155 receiver hooks gated on the vault's own ConditionalTokens address
 In the context of the vault holding ERC-1155 outcome tokens acquired through exchange fills, facing the fact that ERC-1155 `safeTransferFrom` and `safeBatchTransferFrom` revert when the contract recipient does not return the receiver acknowledgement values, we decided to implement `onERC1155Received` and `onERC1155BatchReceived` as stateless hooks that return `0xf23a6e61` and `0xbc197c81`, gated by an `onlyConditionalTokens` modifier, plus an ERC-165 `supportsInterface`. This achieves the vault's core ability to receive outcome tokens -- without the hooks every normal trade settling tokens into the vault reverts, a permanent denial of the vault's purpose -- while turning the existing "no entry point exists for foreign token IDs" comment into an enforced on-chain check at near-zero marginal cost. We accept that the hooks perform no accounting: position, tick, and fee state stay driven by mint, burn, collect, and `notifyFees`, so an inbound transfer is invisible to vault bookkeeping by design, and any reconciliation between token balances and position accounting remains the Operator's off-chain responsibility.

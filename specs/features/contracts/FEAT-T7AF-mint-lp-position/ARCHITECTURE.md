@@ -2,7 +2,7 @@
 id: FEAT-T7AF
 name: Mint LP Position
 use_cases: [UC-T7AG]
-scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AR, SC-3XU5, SC-3XU6, SC-8L1C, SC-3Z9J, SC-45IE, SC-3Z9K]
+scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AR, SC-3XU5, SC-3XU6, SC-8L1C, SC-3Z9J, SC-45IE, SC-3Z9K, SC-AFPM, SC-AFPN]
 last_update: 2026-09-13
 ---
 
@@ -56,7 +56,7 @@ erDiagram
         uint128 activeLiquidity "sum of in-range position liquidity"
         uint256 feeGrowthGlobalX128 "Q128 cumulative fees per unit active L"
         int24 currentTick "last-known market mid-price tick"
-        uint256 nextPositionId "auto-increment counter"
+        uint256 nextPositionId "auto-increment counter; the first mint must meet minimumFirstLiquidity"
         int24 tickSpacing "storage, would be immutable in non-clone"
         uint128 minimumFirstLiquidity "floor for first mint (FEAT-REPZ)"
         uint8 phase "1=Active, 2=WindDown"
@@ -79,6 +79,7 @@ erDiagram
         address owner "the LP's Safe (the escrow's recorded depositor)"
         int24 tickLower "must align to tickSpacing"
         int24 tickUpper "must align to tickSpacing, > tickLower"
+        int24 mintTick "currentTick at mint, clamped into [tickLower, tickUpper] (C26)"
         uint128 liquidity "usdcAmount * PRECISION / (tickUpper - tickLower)"
         uint256 feeGrowthInsideLastX128 "snapshot at mint time (Q128)"
         uint256 tokensOwed "0 at mint; accumulates on collect"
@@ -112,7 +113,8 @@ erDiagram
 - `usedIntents[intentId] == true` after a successful mint -- never reset to false
 - A mint consumes exactly the recorded escrow: `pendingDeposits[intentId]` is deleted and `totalEscrowed` falls by its amount in the same call, before any state that a reclaim could observe
 - `position.owner == pendingDeposits[intentId].lp` at the moment of the mint
-- When `activeLiquidity == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` (FEAT-REPZ invariant)
+- When `nextPositionId == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` (FEAT-REPZ invariant); a later mint is not floored, even when `activeLiquidity == 0`
+- `tickLower <= position.mintTick <= tickUpper` for every position, and the value never changes after the mint
 - Newly initialized tick: `feeGrowthOutsideX128 = (tick <= currentTick) ? feeGrowthGlobalX128 : 0`
 
 ## Component Inventory
@@ -124,7 +126,7 @@ erDiagram
 | `src/LPVault.sol` | Per-market vault -- position minting from an escrow, tick initialization, fee growth computation | `mintPositionFor()`, `_requireValidRange()`, `_mintIntentHash()`, `_initializeTick()`, `_computeFeeGrowthInside()`, `MINT_INTENT_TYPEHASH`, `IntentMismatch`, `DepositNotEscrowed` |
 | `test/fixtures/LPVaultFixture.sol` | Test fixture -- `_escrowAndMint` is the one way every test mints | `_escrowAndMint()`, `_signMintIntent()` |
 | `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp.t.sol` | Integration tests for all 16 scenarios | SC-T7AH through SC-T7AR, SC-8L1C, SC-3Z9J, SC-45IE, SC-3Z9K |
-| `test/invariants/TickState.t.sol` | Invariant test for the tick state machine: the two liquidity invariants this Data Model states, over random mints, tick moves, and merges | `TickStateHandler`, `invariant_activeLiquidityEqualsInRangeLiquidity`, `invariant_liquidityGrossEqualsReferencingLiquidity`, `invariant_updateTickRevertsOnlyForDocumentedReasons`, `invariant_zeroCrossingMoveGasStaysBounded` |
+| `test/invariants/TickState.t.sol` | Invariant test for the tick state machine: the two liquidity invariants this Data Model states, over random mints, tick moves, and merges, plus the merge conservation invariant (FEAT-K1M2) | `TickStateHandler`, `invariant_activeLiquidityEqualsInRangeLiquidity`, `invariant_liquidityGrossEqualsReferencingLiquidity`, `invariant_updateTickRevertsOnlyForDocumentedReasons`, `invariant_zeroCrossingMoveGasStaysBounded`, `invariant_mergeConservesLiquidity`, `invariant_duplicateMergeAlwaysRejected` |
 
 ## Event Topology
 
@@ -132,7 +134,7 @@ erDiagram
 
 | Event | Publisher | Payload | Condition | Consumers |
 |-------|-----------|---------|-----------|-----------|
-| `PositionMinted(uint256 indexed positionId, address indexed owner, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 usdcAmount, bytes32 intentId)` | LPVault | `positionId, owner, tickLower, tickUpper, liquidity, usdcAmount, intentId` | On successful `mintPositionFor()`; `owner` is the Safe | Off-chain Event Listener, Keeper |
+| `PositionMinted(uint256 indexed positionId, address indexed owner, int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity, uint256 usdcAmount, bytes32 intentId)` | LPVault | `positionId, owner, tickLower, tickUpper, mintTick, liquidity, usdcAmount, intentId` | On successful `mintPositionFor()`; `owner` is the Safe; `mintTick` is the clamped currentTick | Off-chain Event Listener, Keeper |
 
 **Non-events (explicit):**
 - Failed mints (any revert scenario): no events emitted, no state changes
@@ -172,6 +174,8 @@ erDiagram
 | SC-T7AM | Non-active vault revert | `src/LPVault.sol:mintPositionFor()` |
 | SC-T7AN | Non-operator caller revert | `src/LPVault.sol:mintPositionFor()` |
 | SC-T7AO | First mint below minimum liquidity | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_toUint128()` |
+| SC-AFPM | Small mint succeeds after active liquidity returns to zero | `src/LPVault.sol:mintPositionFor()` (the `nextPositionId == 0` check) |
+| SC-AFPN | Mint tick clamps into the range when the price is outside it | `src/LPVault.sol:mintPositionFor()` (the clamp before the position write) |
 | SC-T7AP | Duplicate intentId revert | `src/LPVault.sol:mintPositionFor()` |
 | SC-3Z9J | Revert when no deposit is escrowed for the intent | `src/LPVault.sol:mintPositionFor()` (escrow read) |
 | SC-45IE | Revert when the escrow belongs to a different Safe | `src/LPVault.sol:mintPositionFor()` (recorded Safe check) |
@@ -202,6 +206,11 @@ In the context of Uniswap v3 lazy fee accounting compiled under Solidity 0.8.20 
 The mechanism: a tick initialized late assumes all past growth sits on one side of it, so `below + above` can exceed `global`, and `global - below - above` must wrap modulo 2^256. A position stores that wrapped value as its snapshot. Later, `inside_now - snapshot` must also wrap, because both values wrapped by the same offset and the subtraction cancels the offset to the true small delta. That subtraction is the load-bearing part. On a correct delta, `liquidity * delta` fits in 256 bits for every reachable value, so `_mulDiv` and the unchecked product return the same number. On a wrong delta, both return a wrong number. The no-`_mulDiv` rule is therefore a convention that keeps one shape at every fee site and keeps the shape the auditors reviewed, not a safety claim.
 
 Rejected: signed integers, because `feeGrowthGlobalX128` itself can approach 2^256. Rejected: a fee model without wraparound, because it would replace an audited pattern with a new one. The sites at the time of this decision: `_computeFeeGrowthInside()`, `_crossTick()`, `collect()`, `mergePositions()` (survivor and consumed), and `emergencyCancelAll()`. A burn (R9 in `audits/audit-fixes-ranged.md`) adds a sixth site with the same shape.
+
+**ADR-AFPP:** The mint tick is clamped into the range at mint
+In the context of the claim model (decision C26 in `audits/audit-fixes-ranged.md`), where a claim's assets follow the price from the tick at which it was minted, facing a mint whose `currentTick` sits outside its own range, we decided to store `mintTick = currentTick` clamped into `[tickLower, tickUpper]` inside `mintPositionFor` (`tickLower` when the price is below the range, `tickUpper` when it is at or above it), to achieve one stored value that R9 reads as settled and that gives two positions minted on the same side of their range the same mint tick so they can merge under decision C16, accepting that R9 must still decide what the level exactly at the mint tick holds, a question an in-range mint poses in the same form, and that the Operator sets the value through the order of its `updateTick` and `mintPositionFor` calls, which the mint's OPERATOR TRUST ASSUMPTION states. The field sits after `tickUpper` in the `Position` struct, so it packs into the first storage slot and the mint writes no new slot. The user chose this on 2026-09-12.
+
+Rejected: store the raw `currentTick` and clamp at read time in R9, because two same-mix positions minted at different prices below their range could then never merge. Rejected: append the field after `tokensOwed`, because that opens a fifth storage slot and adds about 22,100 gas to every mint.
 
 ## Testing Decisions
 

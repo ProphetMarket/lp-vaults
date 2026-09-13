@@ -2,8 +2,8 @@
 id: FEAT-K1M2
 name: Merge Positions
 use_cases: [UC-K1M8]
-scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC, SC-3XUP, SC-3XUQ]
-last_update: 2026-09-11
+scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC, SC-3XUP, SC-3XUQ, SC-AFPQ, SC-AFPR]
+last_update: 2026-09-13
 ---
 
 # Architecture: Merge Positions
@@ -37,6 +37,7 @@ erDiagram
         address owner "must match across merged positions"
         int24 tickLower "must match across merged positions"
         int24 tickUpper "must match across merged positions"
+        int24 mintTick "must match across merged positions (C26)"
         uint128 liquidity "summed into survivor; zeroed on consumed"
         uint256 feeGrowthInsideLastX128 "reset to current on survivor"
         uint256 tokensOwed "accumulated fees rolled into survivor"
@@ -44,7 +45,9 @@ erDiagram
 ```
 
 **Invariants:**
+- `positionIds` holds no repeated ID -- checked pairwise before any position is read
 - After merge: `survivor.liquidity == sum(consumed.liquidity)` (total liquidity unchanged)
+- The sum of `position.liquidity` over every position is unchanged by a merge, which equals half the sum of `liquidityGross` over the distinct referenced ticks
 - After merge: tick `liquidityGross` unchanged (same total liquidity on same range)
 - After merge: consumed positions have `liquidity == 0`
 - `feeGrowthInsideLastX128` on survivor is set to current value to prevent double-counting
@@ -53,7 +56,8 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | Vault with position merge | `mergePositions()`, `PositionsMerged` event |
+| `src/LPVault.sol` | Vault with position merge | `mergePositions()`, `PositionsMerged` event, `DuplicatePositionId`, `MintTickMismatch` |
+| `test/invariants/TickState.t.sol` | Invariant suite whose handler mints, moves the tick, merges same-range same-mint-tick pairs, and runs the documented `[a, a]` rejection | `invariant_mergeConservesLiquidity`, `invariant_duplicateMergeAlwaysRejected` |
 
 ## Event Topology
 
@@ -69,7 +73,7 @@ erDiagram
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| call | `LPVault.mergePositions(uint256[])` | `mergePositions` | onlyOperator | `positionIds` | void | NotOperator, VaultCancelled, RangeMismatch, InsufficientPositions |
+| call | `LPVault.mergePositions(uint256[])` | `mergePositions` | onlyOperator | `positionIds` | void | NotOperator, TradingIsPaused, VaultCancelled, InsufficientPositions, DuplicatePositionId, RangeMismatch, MintTickMismatch |
 
 ## Integration Points
 
@@ -85,11 +89,13 @@ _None — merge is a pure storage operation with no external calls._
 | SC-3XUQ | Reverted merge leaves silence timer untouched | `src/LPVault.sol:mergePositions()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-K1MA | Revert on mismatched ranges | `src/LPVault.sol:mergePositions()` |
 | SC-K1MB | Revert on empty/single input | `src/LPVault.sol:mergePositions()` |
+| SC-AFPQ | Revert on a repeated position ID | `src/LPVault.sol:mergePositions()` (the pairwise check) |
+| SC-AFPR | Revert on a different mint tick | `src/LPVault.sol:mergePositions()` (the mintTick compare) |
 | SC-K1MC | Fee accounting preserved | `src/LPVault.sol:mergePositions()` |
 
 ## Architecture Decisions
 
-The fee-growth subtraction in this feature (the fee deltas in `mergePositions()`, survivor and consumed) runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF.
+The fee-growth subtraction in this feature (the fee deltas in `mergePositions()`, survivor and consumed) runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF. The mint tick that a merge compares is the clamped value the mint stores; see the clamp decision (ADR-AFPP) in FEAT-T7AF.
 
 ## Testing Decisions
 

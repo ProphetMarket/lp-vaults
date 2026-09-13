@@ -3,7 +3,7 @@ id: UC-REQ1
 name: Create Vault for Market
 feature: FEAT-REPZ
 status: implemented
-version: 6
+version: 7
 actor: Oracle
 ---
 
@@ -233,7 +233,8 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditio
 
 **Outcomes:**
 - The vault's `minimumFirstLiquidity == newMin`
-- Future mints while `activeLiquidity == 0` are gated by the new value
+- The first mint, when none has happened yet (`nextPositionId == 0`), is gated by the new value
+- After the first mint the value is stored and no mint reads it
 
 **Side Effects:**
 - `MinimumFirstLiquidityUpdated(oldMin, newMin)` event emitted by the vault

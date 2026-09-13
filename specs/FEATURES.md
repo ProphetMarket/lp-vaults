@@ -25,11 +25,11 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
-| FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation that consumes a per-intent escrow, with v3-style tick initialization and fee-snapshot anchoring | implemented |
+| FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation that consumes a per-intent escrow, with v3-style tick initialization, fee-snapshot anchoring, and a clamped mint tick on every position | implemented |
 | FEAT-U079 | Collect Fees on a Position | LP withdraws accumulated trading fees from a position using the v3 feeGrowthInside accumulator with snapshot-based double-counting prevention | implemented |
 | FEAT-JAIJ | LP Escape Hatch | LP-initiated recovery of the USDC escrowed against a mint intent that the Operator did not mint, in one call by the LP's Safe or one relayed call with the owner key's signature, in every vault phase | implemented |
 | FEAT-3ZRI | Escrow Deposit for Mint Intent | Operator-gated escrow of an LP's USDC from the LP's Safe against a signed mint intent, recorded per intentId with the Safe, the amount, and the intent hash, so the mint and the reclaim spend exactly what was recorded | implemented |
-| FEAT-K1M2 | Merge Positions | Operator-called housekeeping to combine same-range same-owner positions into a single record preserving liquidity and fees | implemented |
+| FEAT-K1M2 | Merge Positions | Operator-called housekeeping to combine distinct same-range same-owner same-mint-tick positions into a single record preserving liquidity and fees | implemented |
 
 ## @fees
 
