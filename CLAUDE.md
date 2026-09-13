@@ -95,6 +95,7 @@ Mirrors `ctf-exchange/src/ProphetCTFExchange.sol` exactly. Do not invent new rol
 - Invariants on every state-machine property. Required invariants:
   - `Σ position.liquidity over in-range positions == activeLiquidity`
   - `ticks[t].liquidityGross == Σ |liquidityNet| of positions referencing t`
+  - `Σ position.liquidity over all positions == Σ ticks[t].liquidityGross over the distinct referenced ticks / 2` — a merge conserves liquidity, and a burn removes it from the record and from both ticks at once. This is the summed form of the `liquidityGross` invariant, kept as its own named check (`invariant_mergeConservesLiquidity`) because audit issue 6.14 asked for it.
   - `Σ claimable fees over all positions + Σ fees paid out by collect ≤ Σ amounts passed to notifyFees`, with no slack, because every rounding on this path rounds down. When every position has been in range since its mint and nothing was collected, this bound matches `feeGrowthGlobalX128 × activeLiquidity / 2^128` up to rounding dust. The per-instant form alone does not hold once a position leaves range with unclaimed fees, so the invariant test proves the conservation form.
 - No `console.log` in production code. Foundry's linter catches this.
 

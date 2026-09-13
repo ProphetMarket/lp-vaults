@@ -172,7 +172,7 @@ Called once by the factory immediately after cloning. Stores all per-vault confi
 | `conditionalTokens_` | `address` | Gnosis ConditionalTokens (ERC-1155) address |
 | `tickSpacing_` | `int24` | Tick increment; all position bounds must align to this |
 | `factory_` | `address` | Factory that deployed this clone — must equal `msg.sender` |
-| `minimumFirstLiquidity_` | `uint128` | Floor for the first mint while `activeLiquidity == 0` |
+| `minimumFirstLiquidity_` | `uint128` | Floor for the first mint, when `nextPositionId == 0` |
 | `version_` | `uint256` | Factory's `implementationVersion` at deploy time; stored for off-chain identification |
 | `conditionId_` | `bytes32` | ConditionalTokens condition ID of the market; stored as `conditionId` |
 | `yesTokenId_` | `uint256` | Index set 1 (YES) position ID; stored as `yesTokenId` |
@@ -274,7 +274,7 @@ function setMinimumFirstLiquidity(uint128 newMin) external onlyOracle
 
 **Actor:** Oracle
 
-Updates the floor applied to the first mint on an empty vault (when `activeLiquidity == 0`). Callable at any time; takes effect on the next mint attempt while `activeLiquidity == 0`.
+Updates the floor applied to the first mint (when `nextPositionId == 0`). Callable at any time. The value matters only before the first mint. After it, the setter still succeeds and no mint reads the value (decision C15 in `audits/audit-fixes-ranged.md`).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -395,18 +395,18 @@ sequenceDiagram
     participant Vault as LPVault
 
     Operator->>Vault: mintPositionFor(lp, tL, tU, amount, intentId, deadline)
-    Note right of Vault: Checks:<br/>phase == Active, not paused<br/>usdcAmount > 0<br/>tickLower < tickUpper<br/>both ticks aligned to tickSpacing<br/>intentId not used before<br/>escrow exists, names lp, hash matches<br/>liquidity >= minFirstLiq (if activeLiquidity==0)
+    Note right of Vault: Checks:<br/>phase == Active, not paused<br/>usdcAmount > 0<br/>tickLower < tickUpper<br/>both ticks aligned to tickSpacing<br/>intentId not used before<br/>escrow exists, names lp, hash matches<br/>liquidity >= minFirstLiq (if nextPositionId == 0)
     Note right of Vault: Mark intentId as used<br/>delete pendingDeposits[intentId]<br/>totalEscrowed -= amount
     Note right of Vault: Compute liquidity = usdcAmount * PRECISION / rangeWidth
     Note right of Vault: Init ticks if new; update liquidityGross / liquidityNet
     Note right of Vault: Snapshot feeGrowthInsideLastX128 at mint time
-    Note right of Vault: Create positions[positionId] with owner = lp
+    Note right of Vault: Create positions[positionId] with owner = lp,<br/>mintTick = currentTick clamped into [tL, tU]
     Note right of Vault: Increment activeLiquidity if position is in-range
     Note right of Vault: PositionMinted event emitted (no USDC moves)
     Vault-->>Operator: positionId
 ```
 
-**Events:** `PositionMinted(uint256 indexed positionId, address indexed owner, int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 usdcAmount, bytes32 intentId)`
+**Events:** `PositionMinted(uint256 indexed positionId, address indexed owner, int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity, uint256 usdcAmount, bytes32 intentId)`. The `positions(uint256)` getter returns `(owner, tickLower, tickUpper, mintTick, liquidity, feeGrowthInsideLastX128, tokensOwed)`, seven words. `mintTick` is `currentTick` at the mint, clamped to `tickLower` when the price was below the range and to `tickUpper` when it was at or above it (FR-AFPO).
 
 **Reverts:**
 - `NotOperator()` — caller is not an operator
@@ -582,11 +582,11 @@ function mergePositions(uint256[] calldata positionIds)
 
 **Actor:** Operator
 
-Combines two or more same-range same-owner positions into the first entry (`positionIds[0]`). Rolls up uncollected fees into the survivor's `tokensOwed`, sums liquidity, and zeroes consumed positions. Tick state is unchanged (net liquidity on the range is the same).
+Combines two or more distinct positions with the same owner, range, and mint tick into the first entry (`positionIds[0]`). Rolls up uncollected fees into the survivor's `tokensOwed`, sums liquidity, and zeroes consumed positions. Tick state is unchanged (net liquidity on the range is the same). This joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC, which audit-fix step R9 adds as `mergeCompleteSets()`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `positionIds` | `uint256[]` | Array of position IDs to merge; must have at least 2 elements; all must share the same owner, `tickLower`, and `tickUpper` |
+| `positionIds` | `uint256[]` | Array of distinct position IDs to merge; must have at least 2 elements; all must share the same owner, `tickLower`, `tickUpper`, and `mintTick` |
 
 ```mermaid
 sequenceDiagram
@@ -594,13 +594,13 @@ sequenceDiagram
     participant Vault as LPVault
 
     Operator->>Vault: mergePositions([posA, posB, posC])
-    Note right of Vault: Checks:<br/>not paused<br/>positionIds.length >= 2
+    Note right of Vault: Checks:<br/>not paused<br/>positionIds.length >= 2<br/>no repeated ID (pairwise, before any read)
 
     Note right of Vault: Load survivor = positions[posA]
     Note right of Vault: feeGrowthInside = current value for range
 
     loop for each consumed position (posB, posC, ...)
-        Note right of Vault: Check: same owner, same tickLower, same tickUpper
+        Note right of Vault: Check: same owner, same tickLower, same tickUpper<br/>Check: same mintTick
         Note right of Vault: consumedFees = consumed.liquidity<br/>    x (feeGrowthInside - consumed.feeGrowthInsideLastX128)<br/>    / 2^128
         Note right of Vault: totalLiquidity += consumed.liquidity<br/>totalOwed += consumed.tokensOwed + consumedFees
         Note right of Vault: consumed.liquidity = 0<br/>consumed.tokensOwed = 0<br/>consumed.feeGrowthInsideLastX128 = 0
@@ -616,7 +616,9 @@ sequenceDiagram
 - `NotOperator()` — caller is not an operator
 - `TradingIsPaused()` — vault is paused
 - `InsufficientPositions()` — fewer than 2 position IDs provided
+- `DuplicatePositionId()` — an ID appears twice in `positionIds`
 - `RangeMismatch()` — any consumed position has a different owner, `tickLower`, or `tickUpper` than the survivor
+- `MintTickMismatch()` — any consumed position has a different `mintTick` than the survivor
 
 ---
 

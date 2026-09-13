@@ -92,7 +92,7 @@ sequenceDiagram
 ```
 
 **Key invariants during the lifecycle:**
-- `activeLiquidity == 0` until the first mint. The `minFirstLiq` floor prevents inflation attacks on this first mint.
+- `nextPositionId == 0` until the first mint. The `minFirstLiq` floor applies to that one mint and prevents inflation attacks on it. `activeLiquidity` can return to zero later without re-applying the floor.
 - `notifyFees` reverts if `activeLiquidity == 0` — fees cannot be distributed into the void.
 - After `startWindDown()`, only exit paths remain open: `collect`, `reclaimDeposit`, `reclaimDepositFor`, and `emergencyCancelAll`.
 - `Oracle` and `Operator` **must** be different wallets — the constructor enforces this.
@@ -129,9 +129,9 @@ sequenceDiagram
     Note right of Vault: pendingDeposits[intentId] = (Safe, amount, hash)<br/>totalEscrowed += amount<br/>DepositEscrowed emitted
 
     Operator->>Vault: mintPositionFor(lp, tL, tU,<br/>usdcAmount, intentId, deadline)
-    Note right of Vault: Checks:<br/>• phase == Active, not paused<br/>• intentId not used<br/>• escrow names lp, hash matches<br/>• liquidity ≥ minFirstLiq (if activeLiquidity==0)
+    Note right of Vault: Checks:<br/>• phase == Active, not paused<br/>• intentId not used<br/>• escrow names lp, hash matches<br/>• liquidity ≥ minFirstLiq (if nextPositionId == 0)
     Vault-->>Operator: positionId
-    Note right of Vault: escrow deleted, totalEscrowed -= amount<br/>position[positionId] created, owner = Safe<br/>tick state updated<br/>activeLiquidity adjusted (if in-range)
+    Note right of Vault: escrow deleted, totalEscrowed -= amount<br/>position[positionId] created, owner = Safe,<br/>mintTick = clamped currentTick<br/>tick state updated<br/>activeLiquidity adjusted (if in-range)
 ```
 
 **When to call:** After the LP's owner key has signed the intent and the Safe has approved the vault. The Operator escrows first, then mints. Between the two calls the Safe can reclaim the escrow at any moment (2.6), so the Operator mints promptly.
@@ -221,7 +221,7 @@ sequenceDiagram
 
 ### 2.5 Merge Positions (`mergePositions`)
 
-Operator housekeeping: combines two or more same-range same-owner positions into one, preserving total liquidity and rolling up uncollected fees.
+Operator housekeeping: combines two or more distinct positions with the same owner, range, and mint tick into one, preserving total liquidity and rolling up uncollected fees. This joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC that audit-fix step R9 adds.
 
 ```mermaid
 sequenceDiagram
@@ -230,7 +230,8 @@ sequenceDiagram
     participant Vault as LPVault
 
     Operator->>Vault: mergePositions([posA, posB, posC])
-    Note right of Vault: Checks (per consumed position):<br/>• same owner as survivor<br/>• same tickLower and tickUpper
+    Note right of Vault: Check: no repeated ID (pairwise, before any read)
+    Note right of Vault: Checks (per consumed position):<br/>• same owner as survivor<br/>• same tickLower and tickUpper<br/>• same mintTick
 
     Note right of Vault: Compute uncollected fees for each:<br/>fees = liquidity × (feeGrowthInside - feeGrowthInsideLast) ÷ 2^128
     Note right of Vault: Survivor (posA):<br/>  liquidity = sum of all<br/>  tokensOwed += all uncollected fees<br/>  feeGrowthInsideLastX128 = current value
