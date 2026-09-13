@@ -170,6 +170,9 @@ contract LPVault {
         address owner;
         int24 tickLower;
         int24 tickUpper;
+        // FR-AFPO: currentTick at the mint, clamped into [tickLower, tickUpper] (ADR-AFPP). Packs
+        // into the first slot with owner and the two bounds, so the mint writes no new slot.
+        int24 mintTick;
         uint128 liquidity;
         uint256 feeGrowthInsideLastX128;
         uint256 tokensOwed;
@@ -304,6 +307,9 @@ contract LPVault {
     error VaultCancelled();
     error RangeMismatch();
     error InsufficientPositions();
+    // FEAT-K1M2, audit issue 6.14 and decision C16: one error per merge rejection
+    error DuplicatePositionId();
+    error MintTickMismatch();
     error TradingIsPaused();
     error NotConditionalTokens();
     error UnknownTokenId();
@@ -355,6 +361,7 @@ contract LPVault {
         address indexed owner,
         int24 tickLower,
         int24 tickUpper,
+        int24 mintTick,
         uint128 liquidity,
         uint256 usdcAmount,
         bytes32 intentId
@@ -466,7 +473,7 @@ contract LPVault {
     /// @param conditionalTokens_ Gnosis ConditionalTokens (ERC-1155) address
     /// @param tickSpacing_ Minimum tick increment for positions
     /// @param factory_ Factory contract address — must equal msg.sender
-    /// @param minimumFirstLiquidity_ Floor for the first mint when activeLiquidity == 0
+    /// @param minimumFirstLiquidity_ Floor for the first mint, when nextPositionId == 0
     /// @param version_ Implementation version from the factory's counter
     /// @param conditionId_ ConditionalTokens condition ID of the market
     /// @param yesTokenId_ Index set 1 (YES) position ID of (usdc, conditionId)
@@ -590,6 +597,9 @@ contract LPVault {
     /// @notice Updates the minimum liquidity required for the first mint in this vault.
     /// @dev Only callable by the oracle. Zero is rejected to maintain the invariant
     ///      that minimumFirstLiquidity > 0 at all times.
+    ///      The value matters only before the first mint: the floor applies when
+    ///      nextPositionId == 0 (decision C15, audit issue 6.9). After the first mint the
+    ///      setter still succeeds and changes a value that no mint reads (FR-RG4W).
     /// @param newMin New floor value — must be greater than zero
     function setMinimumFirstLiquidity(uint128 newMin) external onlyOracle {
         if (newMin == 0) revert ZeroFloor();
@@ -822,6 +832,16 @@ contract LPVault {
     ///      The mint makes no external call. The nonReentrant guard stays as defense in depth
     ///      (NFR-T7B7), so a later revision that adds an external call cannot inherit an
     ///      unguarded function.
+    ///      The Operator also chooses the position's mint tick, through the order of its
+    ///      updateTick and mintPositionFor calls, because the mint reads currentTick. The clamp
+    ///      bounds the value to the position's range (FR-AFPO, ADR-AFPP). Under the claim model
+    ///      (decision C26) the mint tick anchors which levels hold USDC and which hold outcome
+    ///      tokens, so LPs must trust the Operator to report the tick it quoted from before it
+    ///      mints.
+    ///
+    ///      MEV analysis: the mint tick is set from the vault's own currentTick, which only the
+    ///      Operator moves, so no third party can front-run it. A stale or wrong report is
+    ///      Operator behavior, covered by the trust statement above.
     /// @param lp The LP's Safe — must be the escrow's recorded depositor
     /// @param tickLower Lower tick bound — must be < tickUpper and aligned to tickSpacing
     /// @param tickUpper Upper tick bound — must be > tickLower and aligned to tickSpacing
@@ -872,8 +892,10 @@ contract LPVault {
         uint256 rangeWidth = uint256(int256(tickUpper - tickLower));
         uint128 liquidity = _toUint128(usdcAmount * LIQUIDITY_PRECISION / rangeWidth);
 
-        // First-mint floor check (FR-RFS7 from FEAT-REPZ)
-        if (activeLiquidity == 0 && liquidity < minimumFirstLiquidity) {
+        // First-mint floor check (FR-RFS7 from FEAT-REPZ). nextPositionId only grows and no ID is
+        // reused, so the floor applies exactly once. activeLiquidity returns to zero whenever the
+        // price enters a range with no position, so it cannot mark the first mint (audit issue 6.9).
+        if (nextPositionId == 0 && liquidity < minimumFirstLiquidity) {
             revert BelowMinimumFirstLiquidity();
         }
 
@@ -891,12 +913,20 @@ contract LPVault {
         // Snapshot feeGrowthInside at mint time to prevent retroactive fee claims
         uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(tickLower, tickUpper);
 
+        // The mint tick anchors the claim (decision C26). Outside the range it clamps to the
+        // nearer bound, so every position minted on one side of its range holds the same mix and
+        // can merge (FR-AFPO, ADR-AFPP).
+        int24 mintTick = currentTick;
+        if (mintTick < tickLower) mintTick = tickLower;
+        else if (mintTick > tickUpper) mintTick = tickUpper;
+
         // Create the position record
         positionId = nextPositionId++;
         positions[positionId] = Position({
             owner: lp,
             tickLower: tickLower,
             tickUpper: tickUpper,
+            mintTick: mintTick,
             liquidity: liquidity,
             feeGrowthInsideLastX128: feeGrowthInsideX128,
             tokensOwed: 0
@@ -909,7 +939,7 @@ contract LPVault {
 
         // No interaction: the USDC entered the vault at depositForIntent
 
-        emit PositionMinted(positionId, lp, tickLower, tickUpper, liquidity, usdcAmount, intentId);
+        emit PositionMinted(positionId, lp, tickLower, tickUpper, mintTick, liquidity, usdcAmount, intentId);
     }
 
     // ──────────────────────────────────────────────
@@ -1192,18 +1222,22 @@ contract LPVault {
     // ──────────────────────────────────────────────
 
     // SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC: operator-gated position merge
-    /// @notice Combines two or more positions with identical owner, tickLower, and
-    ///         tickUpper into a single survivor position (positionIds[0]), preserving
-    ///         total liquidity and rolling up accrued fees.
+    /// @notice Combines two or more positions with identical owner, tickLower, tickUpper,
+    ///         and mintTick into a single survivor position (positionIds[0]), preserving
+    ///         total liquidity and rolling up accrued fees. This joins LP position records;
+    ///         it is not the complete-set merge of outcome tokens into USDC.
     /// @dev OPERATOR TRUST ASSUMPTION: The Operator can merge any positions that share
-    ///      the same owner and range. LPs must trust that the Operator only merges
+    ///      the same owner, range, and mint tick, and it can name each position only once:
+    ///      a repeated ID reverts DuplicatePositionId (audit issue 6.14), and a different
+    ///      mint tick reverts MintTickMismatch, because the mint tick is part of what a
+    ///      claim holds under decision C26. LPs must trust that the Operator only merges
     ///      positions for legitimate housekeeping (reducing storage and gas costs for
     ///      overlapping positions).
     ///      No USDC moves during merge — uncollected fees from consumed positions are
     ///      rolled into the survivor's tokensOwed. Tick state (liquidityGross,
     ///      liquidityNet) is unchanged since total liquidity on the range stays the same.
-    /// @param positionIds Array of position IDs to merge — must have >= 2 elements,
-    ///        all sharing the same owner, tickLower, and tickUpper
+    /// @param positionIds Array of distinct position IDs to merge — must have >= 2 elements,
+    ///        all sharing the same owner, tickLower, tickUpper, and mintTick
     function mergePositions(uint256[] calldata positionIds)
         external
         onlyOperator
@@ -1219,11 +1253,21 @@ contract LPVault {
         // At least two positions required to merge
         if (positionIds.length < 2) revert InsufficientPositions();
 
+        // SC-AFPQ, FR-AFPS: a repeated ID would alias the survivor and a consumed position onto
+        // one storage slot and double its liquidity (audit issue 6.14). The check is pairwise over
+        // calldata, before any position is read, because a merge joins a handful of positions.
+        for (uint256 i = 0; i < positionIds.length; i++) {
+            for (uint256 j = i + 1; j < positionIds.length; j++) {
+                if (positionIds[i] == positionIds[j]) revert DuplicatePositionId();
+            }
+        }
+
         // Load the survivor (first position in the array)
         Position storage survivor = positions[positionIds[0]];
         address ownerAddr = survivor.owner;
         int24 tickLower = survivor.tickLower;
         int24 tickUpper = survivor.tickUpper;
+        int24 mintTick = survivor.mintTick;
 
         // Compute current feeGrowthInside for this range (same formula as collect)
         uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(tickLower, tickUpper);
@@ -1255,6 +1299,8 @@ contract LPVault {
             if (consumed.owner != ownerAddr || consumed.tickLower != tickLower || consumed.tickUpper != tickUpper) {
                 revert RangeMismatch();
             }
+            // SC-AFPR, FR-AFPT: two mint ticks hold two asset mixes under the claim model (C26)
+            if (consumed.mintTick != mintTick) revert MintTickMismatch();
 
             // Compute uncollected fees for the consumed position.
             // unchecked: same wraparound-cancellation as survivorFees above, and the
