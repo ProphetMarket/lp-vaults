@@ -4,7 +4,7 @@ name: Update Tick and Cross Ticks
 module: contracts
 domain: "@ticks"
 status: implemented
-version: 2
+version: 3
 refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR, FEAT-JXQO]
 ---
 
@@ -71,6 +71,18 @@ Linked to: UC-TVS1
 Fit Criterion: Given initialized ticks at 100 and 500 (no initialized ticks in between), updateTick from 50 to 600 crosses exactly two ticks without iterating 400 intermediate positions.
 Linked to: UC-TVS1
 
+**FR-5IDE** `When updateTick searches for the next initialized tick, the system shall bound that search to the bitmap word containing newTick, inclusive, so that ticks initialized beyond newTick are never scanned.`
+Fit Criterion: Given currentTick = 100, a single initialized tick at 8388590, and no initialized ticks between 100 and 300, updateTick(300) succeeds with ticksCrossed = 0 and reads only the bitmap words spanning 100 to 300. Given instead an initialized tick at 260, inside the same word as the target 300, updateTick(300) crosses it, which confirms that the bound includes the target's own word.
+Linked to: UC-TVS1
+
+**FR-5IDF** `If no initialized tick exists within the bounded search range in either direction, then the system shall report "not found" and complete the call without reverting, including when the bounded range reaches the highest or lowest addressable bitmap word.`
+Fit Criterion: Given currentTick = 8388000 with no initialized ticks at or above it, updateTick(8388600) succeeds with ticksCrossed = 0 instead of reverting with an arithmetic panic. Given currentTick = -8388400, inside the lowest bitmap word, with no initialized ticks at or below it, updateTick(-8388600) succeeds with ticksCrossed = 0.
+Linked to: UC-TVS1
+
+**FR-A2ZS** `The system shall keep activeLiquidity equal to the sum of the liquidity of every position whose range contains currentTick, and each tick's liquidityGross equal to the sum of the liquidity of every position that references that tick, after any sequence of mints, tick updates, and merges.`
+Fit Criterion: Given random sequences of mints near the current tick and against both extreme bitmap words, tick moves of at most 2,000 ticks, and merges of two distinct positions with the same range, the invariant test `test/invariants/TickState.t.sol` holds, and no `updateTick` in those sequences reverts for an undocumented reason.
+Linked to: UC-TVS1
+
 ## Non-Functional Requirements
 
 **NFR-TVSK** Performance: `updateTick with zero initialized ticks crossed shall consume less than 50,000 gas on Polygon.`
@@ -79,9 +91,14 @@ Linked to: UC-TVS1
 
 **NFR-TVSM** Security: OPERATOR TRUST ASSUMPTION — The Operator can report any tick value. LPs trust the Operator to report the CLOB mid-price accurately. A malicious or compromised Operator could report a false tick, causing incorrect fee distribution between positions. This matches the ProphetCTFExchange trust model.
 
+**NFR-5IDG** Security: `The gas cost of updateTick shall be bounded by the distance between currentTick and newTick, and shall be independent of where any other party has initialized ticks outside that range.` An LP can initialize a tick at any aligned position by signing a mint intent. An unbounded search lets one planted tick at the edge of the scale push a later legitimate updateTick past the block gas limit: 76,618,321 gas for a move of 200 ticks, measured on 2026-09-12. The bound is as tight as the Operator's reported newTick, which is a trusted input under NFR-TVSM. This requirement removes third-party control over the search cost. It does not change the Operator trust assumption. A large single jump across a real gap of uninitialized ticks still reads one word per 256 ticks, so the Operator chunks large jumps across several calls, as ADR-TVUW already requires for crossings. No on-chain enforcement of that chunking is specified.
+
 ## Acceptance
 
 - For any sequence of updateTick calls, feeGrowthInsideX128 computed for a position spanning ticks [a, b) correctly reflects fees accrued only while currentTick was in [a, b)
 - After any updateTick, activeLiquidity equals the sum of liquidity from all positions whose range contains the new currentTick
 - Multiple sequential chunked updateTick calls produce the same final state as a single hypothetical call crossing the same ticks (chunking equivalence)
 - TickBitmap correctly tracks initialization state including word-boundary edge cases
+- For any tick initialized strictly outside the range spanned by currentTick and newTick, updateTick produces the same state transition and the same gas cost as it would if that tick did not exist
+- The next-initialized-tick search terminates and reports a result for every reachable combination of start tick and target tick, including targets and starts in the highest and lowest addressable bitmap words
+- The tick invariant test (`test/invariants/TickState.t.sol`) holds

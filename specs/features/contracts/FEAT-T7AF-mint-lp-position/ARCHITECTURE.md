@@ -3,7 +3,7 @@ id: FEAT-T7AF
 name: Mint LP Position
 use_cases: [UC-T7AG]
 scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AR, SC-3XU5, SC-3XU6, SC-8L1C, SC-3Z9J, SC-45IE, SC-3Z9K]
-last_update: 2026-09-12
+last_update: 2026-09-13
 ---
 
 # Architecture: Mint LP Position
@@ -124,6 +124,7 @@ erDiagram
 | `src/LPVault.sol` | Per-market vault -- position minting from an escrow, tick initialization, fee growth computation | `mintPositionFor()`, `_requireValidRange()`, `_mintIntentHash()`, `_initializeTick()`, `_computeFeeGrowthInside()`, `MINT_INTENT_TYPEHASH`, `IntentMismatch`, `DepositNotEscrowed` |
 | `test/fixtures/LPVaultFixture.sol` | Test fixture -- `_escrowAndMint` is the one way every test mints | `_escrowAndMint()`, `_signMintIntent()` |
 | `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp.t.sol` | Integration tests for all 16 scenarios | SC-T7AH through SC-T7AR, SC-8L1C, SC-3Z9J, SC-45IE, SC-3Z9K |
+| `test/invariants/TickState.t.sol` | Invariant test for the tick state machine: the two liquidity invariants this Data Model states, over random mints, tick moves, and merges | `TickStateHandler`, `invariant_activeLiquidityEqualsInRangeLiquidity`, `invariant_liquidityGrossEqualsReferencingLiquidity`, `invariant_updateTickRevertsOnlyForDocumentedReasons`, `invariant_zeroCrossingMoveGasStaysBounded` |
 
 ## Event Topology
 

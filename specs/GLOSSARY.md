@@ -17,6 +17,10 @@
 
 **Tick** -- A discrete price slot in the order book. The prediction market price space [0, 1] is divided into ticks at the vault's `tickSpacing` granularity (e.g., 1000 ticks at 0.001 spacing). Ticks are the unit of the fee accumulator system.
 
+**Tick bitmap** -- The vault's record of which ticks are initialized: `tickBitmap[int16 word] => uint256`, one bit per tick, bit `n` of word `w` set when tick `w × 256 + n` has liquidity. `updateTick` reads it to find the next initialized tick without walking every tick.
+
+**Bitmap word** -- One `uint256` entry of the tick bitmap, covering 256 consecutive ticks. The word index is the tick divided by 256, rounded down, and it spans `int16`: word −32768 holds the lowest ticks and word 32767 the highest. The tick search stops at the word that holds the Operator's target.
+
 **Position** -- A per-LP record stored in the vault: `(owner, tickLower, tickUpper, liquidity, feeGrowthInsideLastX128, tokensOwed)`. Each LP can hold multiple positions per vault with different ranges.
 
 **feeGrowthGlobalX128** -- Vault-wide cumulative fees per unit of active liquidity since vault inception, scaled by 2^128 (Q128 fixed-point). Incremented on every `notifyFees` call.

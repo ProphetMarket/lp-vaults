@@ -3,7 +3,7 @@ id: UC-TVS1
 name: Update Current Tick
 feature: FEAT-TVS0
 status: implemented
-version: 3
+version: 4
 actor: Operator
 ---
 
@@ -94,7 +94,7 @@ The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the 
 
 **Steps:**
 1. Operator calls updateTick(300)
-2. System queries TickBitmap and finds no initialized ticks in range
+2. System queries TickBitmap over the words spanning 100 to 300 only, and finds no initialized ticks in range
 3. System stores currentTick = 300 and lastOperatorActivityTimestamp = block.timestamp
 4. System emits TickUpdated(100, 300, 0)
 
@@ -186,5 +186,141 @@ The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the 
 **Side Effects:**
 - No state changes
 - No events emitted
+
+---
+
+### SC-5IDH: Initialized tick far above the target is never searched
+
+**Given:**
+- currentTick = 100
+- A single position at [8388590, 8388600), minted with 1000 USDC, so ticks 8388590 and 8388600 are initialized in bitmap word 32767
+- No initialized ticks between 100 and 300
+
+**Steps:**
+1. Operator calls updateTick(300)
+2. System searches for the next initialized tick only across the bitmap words spanning 100 to 300, and stops at the word containing 300 instead of continuing toward the extreme
+3. System finds no initialized tick within that bounded range
+4. System stores currentTick = 300 and lastOperatorActivityTimestamp = block.timestamp
+5. System emits TickUpdated(100, 300, 0)
+
+**Outcomes:**
+- currentTick is 300
+- activeLiquidity is unchanged
+- The ticks at 8388590 and 8388600 are not crossed and their state is untouched
+- The call completes within the block gas limit whatever the distance to the planted tick
+
+**Side Effects:**
+- `TickUpdated` event emitted with payload `oldTick=100, newTick=300, ticksCrossed=0`
+- `lastOperatorActivityTimestamp` updated to `block.timestamp`
+- No tick state modified
+- `ticks[8388590]` and `ticks[8388600]` are neither read as crossing candidates nor written
+
+---
+
+### SC-5IDI: Initialized tick far below the target is never searched
+
+**Given:**
+- currentTick = 300
+- A single position at [-8388600, -8388590), minted with 1000 USDC, so ticks -8388600 and -8388590 are initialized in bitmap word -32768
+- No initialized ticks between 100 and 300
+
+**Steps:**
+1. Operator calls updateTick(100)
+2. System searches for the next initialized tick only across the bitmap words spanning 300 down to 100, and stops at the word containing 100 instead of continuing toward the extreme
+3. System finds no initialized tick within that bounded range
+4. System stores currentTick = 100 and lastOperatorActivityTimestamp = block.timestamp
+5. System emits TickUpdated(300, 100, 0)
+
+**Outcomes:**
+- currentTick is 100
+- activeLiquidity is unchanged
+- The ticks at -8388600 and -8388590 are not crossed and their state is untouched
+- The call completes within the block gas limit whatever the distance to the planted tick
+
+**Side Effects:**
+- `TickUpdated` event emitted with payload `oldTick=300, newTick=100, ticksCrossed=0`
+- `lastOperatorActivityTimestamp` updated to `block.timestamp`
+- No tick state modified
+- `ticks[-8388600]` and `ticks[-8388590]` are neither read as crossing candidates nor written
+
+---
+
+### SC-5IDJ: Initialized tick inside the target's own word is still crossed
+
+**Given:**
+- currentTick = 100
+- A position at [260, 600), minted with 3400 USDC, so liquidity = 10e18 and tick 260 has liquidityNet = +10e18
+- Tick 260 shares bitmap word 1 with the target tick 300
+- activeLiquidity = 0
+
+**Steps:**
+1. Operator calls updateTick(300)
+2. System searches up to and including the bitmap word containing 300 and locates the initialized tick at 260
+3. System crosses tick 260: flips feeGrowthOutsideX128 and adds +10e18 to activeLiquidity
+4. System stores currentTick = 300 and lastOperatorActivityTimestamp = block.timestamp
+5. System emits TickUpdated(100, 300, 1)
+
+**Outcomes:**
+- currentTick is 300
+- activeLiquidity is 10e18
+- Tick 260 was crossed, because the search bound includes the target's own word
+- Tick 600 was not crossed
+
+**Side Effects:**
+- `TickUpdated` event emitted with payload `oldTick=100, newTick=300, ticksCrossed=1`
+- `lastOperatorActivityTimestamp` updated to `block.timestamp`
+- `ticks[260].feeGrowthOutsideX128` flipped
+- `activeLiquidity` storage updated to 10e18
+
+---
+
+### SC-5IDL: Target in the highest bitmap word with no initialized ticks
+
+**Given:**
+- currentTick = 8388000, in bitmap word 32765, below the highest bitmap word (32767)
+- The target 8388600 sits in the highest bitmap word
+- No initialized ticks at or above currentTick
+
+**Steps:**
+1. Operator calls updateTick(8388600)
+2. System searches toward the target, steps into the highest bitmap word, checks it, and stops there without stepping past it
+3. System reports no initialized tick found instead of reverting with an arithmetic panic
+4. System stores currentTick = 8388600 and lastOperatorActivityTimestamp = block.timestamp
+5. System emits TickUpdated(8388000, 8388600, 0)
+
+**Outcomes:**
+- currentTick is 8388600
+- activeLiquidity is unchanged
+- The call succeeds: reaching the highest word is reported as "not found", never as a revert
+
+**Side Effects:**
+- `TickUpdated` event emitted with payload `oldTick=8388000, newTick=8388600, ticksCrossed=0`
+- `lastOperatorActivityTimestamp` updated to `block.timestamp`
+- No tick state modified
+
+---
+
+### SC-A2ZT: Start inside the lowest bitmap word with no initialized ticks
+
+**Given:**
+- currentTick = -8388400, inside the lowest bitmap word (-32768)
+- No initialized ticks at or below currentTick
+
+**Steps:**
+1. Operator calls updateTick(-8388600)
+2. System checks the start word, finds no set bit at or below the start, finds that the start word is the lowest word, and stops without stepping below it
+3. System reports no initialized tick found instead of reverting with an arithmetic panic
+4. System stores currentTick = -8388600 and lastOperatorActivityTimestamp = block.timestamp
+5. System emits TickUpdated(-8388400, -8388600, 0)
+
+**Outcomes:**
+- currentTick is -8388600
+- activeLiquidity is unchanged
+- The call succeeds: the step before the loop is guarded at the lowest word
+
+**Side Effects:**
+- `TickUpdated` event emitted with payload `oldTick=-8388400, newTick=-8388600, ticksCrossed=0`
+- `lastOperatorActivityTimestamp` updated to `block.timestamp`
+- No tick state modified
 
 ---
