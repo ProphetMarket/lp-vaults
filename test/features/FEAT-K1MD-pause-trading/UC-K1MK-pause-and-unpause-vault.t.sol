@@ -182,8 +182,7 @@ contract PauseTradingUnpauseTest is PauseTradingTestBase {
         vault.unpauseTrading();
 
         uint256 feeGrowthBefore = vault.feeGrowthGlobalX128();
-        vm.prank(operatorAddr);
-        vault.notifyFees(100);
+        _notifyFees(vault, operatorAddr, 100);
         assertGt(vault.feeGrowthGlobalX128(), feeGrowthBefore, "feeGrowth should increase after unpause");
     }
 }
@@ -230,12 +229,9 @@ contract PauseTradingAccessControlTest is PauseTradingTestBase {
 contract PauseTradingCollectTest is PauseTradingTestBase {
     // SC-K1MO: collect succeeds while paused
     function test_collectSucceedsWhilePaused() public {
-        // Distribute fees so the position has something to collect
-        vm.prank(operatorAddr);
-        vault.notifyFees(500);
-
-        // Fund vault with USDC for fee payout (notifyFees doesn't move USDC)
-        mockUsdc.mint(address(vault), 500);
+        // Distribute fees so the position has something to collect. notifyFees takes
+        // the 500 USDC from the Operator wallet, so the vault holds the payout.
+        _notifyFees(vault, operatorAddr, 500);
 
         _pause();
 

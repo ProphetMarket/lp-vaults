@@ -69,12 +69,10 @@ contract CollectFeesTestBase is LPVaultFixture {
         vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
     }
 
-    /// @dev Distributes fees into the vault via the Operator and funds the vault
-    ///      so it has USDC to pay out on collect.
+    /// @dev Distributes fees via the Operator. notifyFees takes the USDC from the
+    ///      Operator wallet, so the vault holds what collect pays out.
     function _distributeFees(uint256 amount) internal {
-        mockUsdc.mint(address(vault), amount);
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
+        _notifyFees(vault, operatorAddr, amount);
     }
 }
 

@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-TOGS: Operator Notify Fee Revenue
 // Integration tests for every scenario in this use case.
-// Covers: SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY
+// Covers: SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY, SC-ASNK
 
 import {Test} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
@@ -40,6 +40,7 @@ contract NotifyFeesTestBase is LPVaultFixture {
     uint256 constant Q128 = 2 ** 128;
 
     event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
+    event Transfer(address indexed from, address indexed to, uint256 value);
 
     function setUp() public virtual {
         lp = _safeOf(vm.addr(LP_PK));
@@ -103,10 +104,12 @@ contract NotifyFeesTestBase is LPVaultFixture {
 // SC-TOGT: Successful fee notification with active liquidity
 // What: When the Operator calls notifyFees(amount) on a vault with active
 //       liquidity, feeGrowthGlobalX128 increases by mulDiv(amount, Q128,
-//       activeLiquidity), a FeesNotified event is emitted, and no USDC
-//       moves during the call.
+//       activeLiquidity), amount USDC moves from the Operator wallet to the
+//       vault in the same call, and a FeesNotified event is emitted after
+//       the USDC Transfer log.
 // Why:  This is the primary happy path. The Q128 accumulator math must be
-//       exact — any error compounds across every subsequent collect.
+//       exact — any error compounds across every subsequent collect. The
+//       pull is decision C19: a credit cannot exist without the USDC behind it.
 // Example: activeLiquidity = 10e18, amount = 500. Expected delta =
 //          mulDiv(500, 2^128, 10e18) ≈ 1.7e22.
 // ──────────────────────────────────────────────
@@ -119,8 +122,7 @@ contract NotifyFeesSuccessTest is NotifyFeesTestBase {
         uint128 activeL = vault.activeLiquidity();
         uint256 expectedDelta = _refMulDiv(amount, Q128, uint256(activeL));
 
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
+        _notifyFees(vault, operatorAddr, amount);
 
         assertEq(vault.feeGrowthGlobalX128(), before_ + expectedDelta, "feeGrowthGlobalX128 delta incorrect");
     }
@@ -129,6 +131,8 @@ contract NotifyFeesSuccessTest is NotifyFeesTestBase {
     function test_emitsFeesNotifiedEvent() public {
         uint128 activeL = vault.activeLiquidity();
         uint256 expectedGlobal = vault.feeGrowthGlobalX128() + _refMulDiv(amount, Q128, uint256(activeL));
+        // Fund before expectEmit: the cheatcode watches the next call, which must be the report
+        _fundSafe(mockUsdc, operatorAddr, address(vault), amount);
 
         vm.expectEmit(false, false, false, true, address(vault));
         emit FeesNotified(amount, expectedGlobal);
@@ -137,14 +141,35 @@ contract NotifyFeesSuccessTest is NotifyFeesTestBase {
         vault.notifyFees(amount);
     }
 
-    // SC-TOGT: vault USDC balance unchanged during the call (no transfers)
-    function test_noUsdcTransferDuringNotify() public {
+    // SC-TOGT / FR-ASNL: the call moves amount USDC from the Operator wallet to the vault
+    function test_usdcMovesFromOperatorToVault() public {
         uint256 vaultBalBefore = mockUsdc.balanceOf(address(vault));
+        _fundSafe(mockUsdc, operatorAddr, address(vault), amount);
+        uint256 operatorBalBefore = mockUsdc.balanceOf(operatorAddr);
 
         vm.prank(operatorAddr);
         vault.notifyFees(amount);
 
-        assertEq(mockUsdc.balanceOf(address(vault)), vaultBalBefore, "vault USDC balance should not change");
+        assertEq(
+            mockUsdc.balanceOf(address(vault)), vaultBalBefore + amount, "vault USDC balance should rise by amount"
+        );
+        assertEq(mockUsdc.balanceOf(operatorAddr), operatorBalBefore - amount, "Operator balance should fall by amount");
+    }
+
+    // SC-TOGT / FR-ASNL: the USDC Transfer log precedes the FeesNotified log in the same call
+    function test_transferLogPrecedesFeesNotified() public {
+        uint128 activeL = vault.activeLiquidity();
+        uint256 expectedGlobal = vault.feeGrowthGlobalX128() + _refMulDiv(amount, Q128, uint256(activeL));
+        _fundSafe(mockUsdc, operatorAddr, address(vault), amount);
+
+        // Two expectEmit calls in a row require the two logs in this order
+        vm.expectEmit(true, true, false, true, address(mockUsdc));
+        emit Transfer(operatorAddr, address(vault), amount);
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit FeesNotified(amount, expectedGlobal);
+
+        vm.prank(operatorAddr);
+        vault.notifyFees(amount);
     }
 
     // SC-TOGT: a successful notification refreshes the Operator silence timer.
@@ -154,8 +179,7 @@ contract NotifyFeesSuccessTest is NotifyFeesTestBase {
         // Move well past vault creation so a stale timer would be obvious
         vm.warp(block.timestamp + 1 days);
 
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
+        _notifyFees(vault, operatorAddr, amount);
 
         assertEq(
             vault.lastOperatorActivityTimestamp(),
@@ -168,8 +192,7 @@ contract NotifyFeesSuccessTest is NotifyFeesTestBase {
     function test_positionStateUnchanged() public {
         (address owner, int24 tl, int24 tu,, uint128 liq, uint256 feeGrowthLast, uint256 owed) = vault.positions(0);
 
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
+        _notifyFees(vault, operatorAddr, amount);
 
         (address owner2, int24 tl2, int24 tu2,, uint128 liq2, uint256 feeGrowthLast2, uint256 owed2) =
             vault.positions(0);
@@ -185,7 +208,8 @@ contract NotifyFeesSuccessTest is NotifyFeesTestBase {
 // ──────────────────────────────────────────────
 // SC-TOGU: Sequential notifications accumulate correctly
 // What: Two back-to-back notifyFees calls produce the sum of the individual
-//       Q128 deltas, and each emits its own FeesNotified event.
+//       Q128 deltas, each takes its own USDC from the Operator wallet, and
+//       each emits its own FeesNotified event.
 // Why:  The accumulator is additive. Getting this wrong (e.g., overwriting
 //       instead of incrementing) would erase prior fee history.
 // Example: A=200, B=300, L=10e18.
@@ -201,12 +225,20 @@ contract NotifyFeesSequentialTest is NotifyFeesTestBase {
         uint256 deltaA = _refMulDiv(amountA, Q128, uint256(activeL));
         uint256 deltaB = _refMulDiv(amountB, Q128, uint256(activeL));
 
-        vm.startPrank(operatorAddr);
-        vault.notifyFees(amountA);
-        vault.notifyFees(amountB);
-        vm.stopPrank();
+        _notifyFees(vault, operatorAddr, amountA);
+        _notifyFees(vault, operatorAddr, amountB);
 
         assertEq(vault.feeGrowthGlobalX128(), deltaA + deltaB, "cumulative feeGrowthGlobal should be sum of deltas");
+    }
+
+    // SC-TOGU: the vault's USDC balance rises by A + B, one transfer per call
+    function test_vaultBalanceRisesByBothAmounts() public {
+        uint256 vaultBalBefore = mockUsdc.balanceOf(address(vault));
+
+        _notifyFees(vault, operatorAddr, amountA);
+        _notifyFees(vault, operatorAddr, amountB);
+
+        assertEq(mockUsdc.balanceOf(address(vault)), vaultBalBefore + amountA + amountB, "vault should hold A + B");
     }
 
     // SC-TOGU: two separate FeesNotified events with correct cumulative values
@@ -214,6 +246,8 @@ contract NotifyFeesSequentialTest is NotifyFeesTestBase {
         uint128 activeL = vault.activeLiquidity();
         uint256 deltaA = _refMulDiv(amountA, Q128, uint256(activeL));
         uint256 deltaB = _refMulDiv(amountB, Q128, uint256(activeL));
+        // Fund both reports up front: expectEmit watches the next call, which must be the report
+        _fundSafe(mockUsdc, operatorAddr, address(vault), amountA + amountB);
 
         vm.expectEmit(false, false, false, true, address(vault));
         emit FeesNotified(amountA, deltaA);
@@ -358,8 +392,7 @@ contract NotifyFeesTruncationDustTest is NotifyFeesTestBase {
         uint256 amount = 7;
         uint256 expectedDelta = _refMulDiv(amount, Q128, uint256(activeL));
 
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
+        _notifyFees(vault, operatorAddr, amount);
 
         assertEq(vault.feeGrowthGlobalX128(), expectedDelta, "should match floor division");
     }
@@ -369,13 +402,66 @@ contract NotifyFeesTruncationDustTest is NotifyFeesTestBase {
         uint128 activeL = vault.activeLiquidity();
         uint256 amount = 7;
 
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
+        _notifyFees(vault, operatorAddr, amount);
 
         uint256 increment = vault.feeGrowthGlobalX128();
         // Reverse the Q128 computation: (increment * activeLiquidity) / Q128 <= amount
         uint256 backComputed = (increment * uint256(activeL)) / Q128;
         assertLe(backComputed, amount, "back-computed amount should not exceed notified amount");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-ASNK: Revert when the Operator did not fund the report
+// What: When the Operator wallet cannot cover the reported amount, either
+//       because it holds too little USDC (case A) or because it approved the
+//       vault for less than the amount (case B), notifyFees reverts with
+//       TransferFailed. The accumulator increment that ran before the pull
+//       rolls back, so nothing records the unfunded credit.
+// Why:  This is the property R8 exists for (decision C19, audit issue 6.6):
+//       no fee credit exists without the USDC that backs it. The mock's
+//       transferFrom underflows on a missing balance or allowance, so the
+//       low-level call fails and _safeTransferFrom reverts TransferFailed,
+//       the same error the real USDC contract produces through its revert.
+// Example: amount = 500. Case A: the Operator holds 0. Case B: the Operator
+//          holds 500 and approved 499.
+// ──────────────────────────────────────────────
+contract NotifyFeesUnfundedTest is NotifyFeesTestBase {
+    uint256 amount = 500;
+
+    // SC-ASNK case A: no balance and no approval
+    function test_revertsWhenOperatorHoldsNoUsdc() public {
+        assertEq(mockUsdc.balanceOf(operatorAddr), 0, "precondition: the Operator holds no USDC");
+        uint256 globalBefore = vault.feeGrowthGlobalX128();
+        uint256 timerBefore = vault.lastOperatorActivityTimestamp();
+        uint256 vaultBalBefore = mockUsdc.balanceOf(address(vault));
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.TransferFailed.selector);
+        vault.notifyFees(amount);
+
+        assertEq(vault.feeGrowthGlobalX128(), globalBefore, "feeGrowthGlobalX128 must be unchanged");
+        assertEq(vault.lastOperatorActivityTimestamp(), timerBefore, "a reverted report is not proof of life");
+        assertEq(mockUsdc.balanceOf(address(vault)), vaultBalBefore, "vault balance must be unchanged");
+        assertEq(mockUsdc.balanceOf(operatorAddr), 0, "Operator balance must be unchanged");
+    }
+
+    // SC-ASNK case B: the balance is there, the approval is one short
+    function test_revertsWhenApprovalIsBelowAmount() public {
+        mockUsdc.mint(operatorAddr, amount);
+        vm.prank(operatorAddr);
+        mockUsdc.approve(address(vault), amount - 1);
+        uint256 globalBefore = vault.feeGrowthGlobalX128();
+        uint256 vaultBalBefore = mockUsdc.balanceOf(address(vault));
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.TransferFailed.selector);
+        vault.notifyFees(amount);
+
+        assertEq(vault.feeGrowthGlobalX128(), globalBefore, "feeGrowthGlobalX128 must be unchanged");
+        assertEq(mockUsdc.balanceOf(address(vault)), vaultBalBefore, "vault balance must be unchanged");
+        assertEq(mockUsdc.balanceOf(operatorAddr), amount, "Operator balance must be unchanged");
     }
 }
 
@@ -404,8 +490,9 @@ contract NotifyFeesMulDivOverflowTest is NotifyFeesTestBase {
 
         uint256 expectedDelta = _refMulDiv(amount, Q128, uint256(activeL));
 
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
+        // The helper mints the fuzzed amount to the Operator per call, so the mock's
+        // balance never overflows even near the mulDiv ceiling.
+        _notifyFees(vault, operatorAddr, amount);
 
         assertEq(vault.feeGrowthGlobalX128(), expectedDelta, "fuzz: feeGrowthGlobal should match reference mulDiv");
     }
@@ -414,6 +501,7 @@ contract NotifyFeesMulDivOverflowTest is NotifyFeesTestBase {
     // This exercises the `require(prod1 < denominator)` boundary inside _mulDiv.
     // With activeLiquidity = 10e18 and amount = type(uint256).max, the result
     // (amount * 2^128 / 10e18) overflows uint256, so the require must trip.
+    // The call stays unfunded: mulDiv reverts before the USDC pull runs.
     // Also cross-validates the test's reference mulDiv against production behavior
     // on the same input — both must revert with the same condition.
     function test_revertsWhenMulDivResultOverflows() public {

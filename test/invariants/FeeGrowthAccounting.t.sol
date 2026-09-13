@@ -11,6 +11,10 @@ pragma solidity 0.8.20;
 // require the unchecked wraparound fixed in _computeFeeGrowthInside,
 // collect(), and _crossTick() to hold without ever reverting or
 // fabricating/destroying fees.
+//
+// Since R8 (decision C19) the file also proves the backing form: notifyFees
+// takes the USDC it credits, so the vault's balance covers escrow, principal,
+// and every claimable fee, with no exchange fill (see invariant_feeCreditsAreBacked).
 
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {LPVaultFactory} from "../../src/LPVaultFactory.sol";
@@ -36,6 +40,9 @@ contract FeeGrowthAccountingHandler is LPVaultFixture {
     uint256[] public positionIds;
     uint256 internal intentNonce;
     uint256 public totalFeesNotified;
+    /// @dev USDC that successful mints left in the vault as principal. A failed mint leaves
+    ///      an escrow instead, which the vault's own totalEscrowed covers.
+    uint256 public totalPrincipalMinted;
 
     constructor(LPVault vault_, MockERC20 mockUsdc_, address operatorAddr_) {
         vault = vault_;
@@ -75,13 +82,16 @@ contract FeeGrowthAccountingHandler is LPVaultFixture {
         vm.prank(operatorAddr);
         try vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE) returns (uint256 id) {
             positionIds.push(id);
+            totalPrincipalMinted += usdcAmount;
         } catch {}
     }
 
+    // Funds the Operator wallet, never the vault: the vault takes the USDC inside
+    // notifyFees (decision C19), which is what invariant_feeCreditsAreBacked proves.
     function notifyFees(uint256 amountSeed) public {
         if (vault.activeLiquidity() == 0) return;
         uint256 amount = bound(amountSeed, 1, 10e18);
-        mockUsdc.mint(address(vault), amount);
+        _fundSafe(mockUsdc, operatorAddr, address(vault), amount);
         vm.prank(operatorAddr);
         try vault.notifyFees(amount) {
             totalFeesNotified += amount;
@@ -145,7 +155,42 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, LPVaultFixture {
     // guarantee. The conservation form is what the wraparound fix must
     // actually protect: no arithmetic bug may fabricate or destroy fees.
     function invariant_claimableFeesNeverExceedTotalDistributed() public view {
-        uint256 totalClaimable = 0;
+        // No slack: notifyFees rounds the global increment down (mulDiv floor
+        // division), and every payout rounds down, so the sum of what positions
+        // can claim never rises above what was notified. Any excess is a bug.
+        assertLe(
+            _totalClaimable() + handler.totalFeesPaidOut(),
+            handler.totalFeesNotified(),
+            "claimable + already-paid-out fees must not exceed total fees ever notified"
+        );
+    }
+
+    // The backing form of the fee invariant (CLAUDE.md required invariants, R8,
+    // decision C19): every fee credit is backed by USDC the vault holds beyond
+    // escrow and principal, because notifyFees takes the USDC it credits. The
+    // handler funds the Operator wallet and never the vault, so this holds only
+    // because the vault pulls; before R8 the handler minted to the vault itself,
+    // and the same assertion would have passed for the wrong reason.
+    //
+    // Qualifier: with no exchange fill. initialize() grants the exchange a max
+    // USDC approval, and every fill turns vault USDC into outcome tokens
+    // (decision C8), so on chain the balance falls below escrow plus principal
+    // as soon as trading starts. This harness deploys no exchange, so here the
+    // bound holds exactly. The per-call form holds on chain without the
+    // qualifier: each FeesNotified is preceded by a Transfer of amount into
+    // the vault in the same transaction.
+    function invariant_feeCreditsAreBacked() public view {
+        assertGe(
+            mockUsdc.balanceOf(address(vault)),
+            vault.totalEscrowed() + handler.totalPrincipalMinted() + _totalClaimable(),
+            "vault USDC must cover escrow, minted principal, and every claimable fee"
+        );
+    }
+
+    /// @dev The sum of every position's currently-claimable fees, computed the way
+    ///      collect() would pay them: the wraparound-cancelling delta times liquidity,
+    ///      rounded down, plus the tokensOwed a merge rolled up.
+    function _totalClaimable() internal view returns (uint256 totalClaimable) {
         uint256 count = handler.positionCount();
 
         for (uint256 i = 0; i < count; i++) {
@@ -169,15 +214,6 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, LPVaultFixture {
             }
             totalClaimable += claimable + tokensOwed;
         }
-
-        // No slack: notifyFees rounds the global increment down (mulDiv floor
-        // division), and every payout rounds down, so the sum of what positions
-        // can claim never rises above what was notified. Any excess is a bug.
-        assertLe(
-            totalClaimable + handler.totalFeesPaidOut(),
-            handler.totalFeesNotified(),
-            "claimable + already-paid-out fees must not exceed total fees ever notified"
-        );
     }
 
     /// @dev Mirrors LPVault._computeFeeGrowthInside() exactly (including the

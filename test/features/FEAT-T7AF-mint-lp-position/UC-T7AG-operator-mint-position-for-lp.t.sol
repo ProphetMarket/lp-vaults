@@ -361,14 +361,6 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
         return _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
     }
 
-    /// @dev notifyFees moves no USDC, so funding the vault is enough for the
-    ///      accumulator to advance.
-    function _notifyFees(uint256 amount) internal {
-        mockUsdc.mint(address(vault), amount);
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
-    }
-
     /// @dev Builds the staleness condition described in the class comment.
     ///      Every position gives exactly 10e18 liquidity, which meets the
     ///      fixture's minimumFirstLiquidity.
@@ -376,13 +368,13 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
         posP1 = _mintPosition(int24(0), int24(300), 3000, keccak256("wide"));
         posP2 = _mintPosition(int24(100), int24(200), 1000, keccak256("pre-init"));
 
-        _notifyFees(1000);
+        _notifyFees(vault, operatorAddr, 1000);
         g1 = vault.feeGrowthGlobalX128();
 
         vm.prank(operatorAddr);
         vault.updateTick(int24(150));
 
-        _notifyFees(500);
+        _notifyFees(vault, operatorAddr, 500);
         g2 = vault.feeGrowthGlobalX128();
         assertGt(g2, g1, "precondition: the second notifyFees must advance the global");
     }

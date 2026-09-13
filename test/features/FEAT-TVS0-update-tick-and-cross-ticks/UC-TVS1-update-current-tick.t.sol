@@ -62,8 +62,7 @@ contract UpdateTickTestBase is LPVaultFixture {
         _mintPosition(int24(100), int24(200), 2000, keccak256("pos-b"));
 
         // Notify 500 USDC fees → feeGrowthGlobalX128 = mulDiv(500, 2^128, 10e18)
-        vm.prank(operatorAddr);
-        vault.notifyFees(500);
+        _notifyFees(vault, operatorAddr, 500);
     }
 
     function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId) internal {
@@ -197,8 +196,7 @@ contract UpdateTickRightToLeftTest is UpdateTickTestBase {
         // Second fee batch — activeLiquidity is now 20e18 (after L-to-R cross)
         // so the increment is mulDiv(750, Q128, 20e18) — strictly smaller than G1
         // but additive, so G2 > G1 and (G2 - G1) != G2 and (G2 - G1) != 0.
-        vm.prank(operatorAddr);
-        vault.notifyFees(750);
+        _notifyFees(vault, operatorAddr, 750);
         uint256 g2 = vault.feeGrowthGlobalX128();
         assertGt(g2, g1, "precondition: G2 > G1");
 
@@ -648,9 +646,7 @@ contract CrossTickWraparoundTest is CrossTickWraparoundTestBase {
         super.setUp();
 
         // Give feeGrowthGlobalX128 a modest, known value...
-        mockUsdc.mint(address(vault), 100);
-        vm.prank(operatorAddr);
-        vault.notifyFees(100);
+        _notifyFees(vault, operatorAddr, 100);
 
         // ...then force tick 200 (the position's upper bound, about to be
         // crossed) to a feeGrowthOutsideX128 that exceeds the current global.
@@ -893,8 +889,7 @@ contract BoundedTickSearchTargetWordTest is BoundedTickSearchTestBase {
         // Give feeGrowthGlobalX128 a nonzero value, so a flip is observable.
         // notifyFees needs active liquidity, so a second position in range at 100 pays for it.
         _plant(int24(0), int24(200), 200);
-        vm.prank(operatorAddr);
-        vault.notifyFees(100);
+        _notifyFees(vault, operatorAddr, 100);
         uint256 global = vault.feeGrowthGlobalX128();
         assertGt(global, 0, "precondition: feeGrowthGlobalX128 should be nonzero");
         (,, uint256 outside600Before) = vault.ticks(int24(600));

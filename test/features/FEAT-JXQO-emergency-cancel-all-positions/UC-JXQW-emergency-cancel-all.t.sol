@@ -67,9 +67,7 @@ contract EmergencyCancelTestBase is LPVaultFixture {
         positionIdA = _escrowAndMint(vault, operatorAddr, LP_A_PK, int24(0), int24(100), 1000, keccak256("mint-a-1"));
 
         // Distribute fees so position has accrued fees
-        mockUsdc.mint(address(vault), 500);
-        vm.prank(operatorAddr);
-        vault.notifyFees(500);
+        _notifyFees(vault, operatorAddr, 500);
     }
 
     /// @dev Warps block.timestamp past the emergency cancel timelock.
@@ -238,9 +236,7 @@ contract MultiLPDistributionTest is EmergencyCancelTestBase {
         positionIdB = _escrowAndMint(vault, operatorAddr, LP_B_PK, int24(0), int24(100), 2000, keccak256("mint-b-1"));
 
         // Distribute more fees
-        mockUsdc.mint(address(vault), 1000);
-        vm.prank(operatorAddr);
-        vault.notifyFees(1000);
+        _notifyFees(vault, operatorAddr, 1000);
 
         _warpPastTimelock();
     }
@@ -384,7 +380,6 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
 
     // SC-JXR1: notifyFees reverts with VaultCancelled
     function test_notifyFeesReverts() public {
-        mockUsdc.mint(address(vault), 100);
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.VaultCancelled.selector);
         vault.notifyFees(100);
@@ -449,10 +444,8 @@ contract OperatorActivityResetsTimelockTest is EmergencyCancelTestBase {
 
     // SC-JXR2: notifyFees resets lastOperatorActivityTimestamp
     function test_notifyFeesResetsTimestamp() public {
-        // Fund and call notifyFees — this should reset the timer
-        mockUsdc.mint(address(vault), 100);
-        vm.prank(operatorAddr);
-        vault.notifyFees(100);
+        // Fund the Operator and call notifyFees — this should reset the timer
+        _notifyFees(vault, operatorAddr, 100);
 
         assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "timestamp should be reset");
     }
@@ -460,9 +453,7 @@ contract OperatorActivityResetsTimelockTest is EmergencyCancelTestBase {
     // SC-JXR2: emergencyCancelAll reverts after operator activity resets timer
     function test_emergencyCancelRevertsAfterOperatorActivity() public {
         // Operator acts — resets the timer
-        mockUsdc.mint(address(vault), 100);
-        vm.prank(operatorAddr);
-        vault.notifyFees(100);
+        _notifyFees(vault, operatorAddr, 100);
 
         // Immediately try to cancel — should revert because timer was just reset
         vm.prank(lpA);
@@ -671,7 +662,6 @@ contract HeartbeatAccessAndPhaseTest is EmergencyCancelTestBase {
         vm.expectRevert(LPVault.TradingIsPaused.selector);
         vault.updateTick(int24(10));
 
-        mockUsdc.mint(address(vault), 100);
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.TradingIsPaused.selector);
         vault.notifyFees(100);
@@ -812,12 +802,6 @@ contract EmergencyCancelWraparoundTestBase is LPVaultFixture {
         return _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
     }
 
-    function _notifyFees(uint256 amount) internal {
-        mockUsdc.mint(address(vault), amount);
-        vm.prank(operatorAddr);
-        vault.notifyFees(amount);
-    }
-
     /// @dev Overwrites positions[id].feeGrowthInsideLastX128 directly, bypassing
     ///      the normal mint/collect/merge write paths.
     function _setFeeGrowthInsideLast(uint256 id, uint256 value) internal {
@@ -856,7 +840,7 @@ contract EmergencyCancelWraparoundTest is EmergencyCancelWraparoundTestBase {
         // An ordinary, unrelated position so the vault has activeLiquidity
         // and something else to pay out alongside the wrapped one.
         posOrdinary = _mintPosition(int24(0), int24(1000), 5000, keccak256("ordinary"));
-        _notifyFees(1000);
+        _notifyFees(vault, operatorAddr, 1000);
 
         // A position whose snapshot models the exact wrapped value
         // _computeFeeGrowthInside can legitimately produce: near

@@ -60,9 +60,7 @@ contract StartWindDownTestBase is LPVaultFixture {
         positionId = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 1000, keccak256("setup-mint"));
 
         // Distribute fees so the position has something to collect
-        mockUsdc.mint(address(vault), 500);
-        vm.prank(operatorAddr);
-        vault.notifyFees(500);
+        _notifyFees(vault, operatorAddr, 500);
     }
 
     /// @dev Transitions the vault to WindDown using the real startWindDown() function.

@@ -420,15 +420,13 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
         posA = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 500, keccak256("mint-a"));
 
         // Distribute 600 USDC fees while posA is the only in-range position
-        vm.prank(operatorAddr);
-        vault.notifyFees(600);
+        _notifyFees(vault, operatorAddr, 600);
 
         // Mint posB: 500 USDC on [0, 100) → liq = 5e18, activeLiquidity = 10e18
         posB = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 500, keccak256("mint-b"));
 
         // Distribute 400 USDC fees split between posA and posB (200 each)
-        vm.prank(operatorAddr);
-        vault.notifyFees(400);
+        _notifyFees(vault, operatorAddr, 400);
     }
 
     // SC-K1MC: survivor tokensOwed includes both positions' uncollected fees
@@ -484,8 +482,8 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
-        // Fund vault with enough USDC to pay out fees (notifyFees doesn't move USDC)
-        mockUsdc.mint(address(vault), expectedTotal);
+        // The vault holds the 1000 USDC that the two reports took from the Operator,
+        // which covers the rolled-up fee amount.
 
         // Collect as LP — should receive the full rolled-up fee amount
         uint256 lpBalBefore = mockUsdc.balanceOf(lp);
