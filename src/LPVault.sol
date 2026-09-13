@@ -1096,15 +1096,25 @@ contract LPVault {
     // Fee notification (FEAT-TOGR, UC-TOGS)
     // ──────────────────────────────────────────────
 
-    // SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY: operator-gated fee accumulator update
-    /// @notice Increments the global fee accumulator by the Q128-scaled share of new fee revenue.
-    /// @dev OPERATOR TRUST ASSUMPTION: The Operator is trusted to have deposited at least
-    ///      `amount` USDC into the vault before calling. The contract does not verify the
-    ///      vault's USDC balance — an Operator who calls notifyFees without funding it creates
-    ///      an accounting mismatch that would strand LP claims. This matches the CTF Exchange
-    ///      trust model where the operator manages fee sweeps.
+    // SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY, SC-ASNK: operator-gated fee accumulator
+    // update that takes the USDC it credits from the caller (FR-ASNL, FR-ASNM)
+    /// @notice Increments the global fee accumulator by the Q128-scaled share of new fee revenue,
+    ///         and takes that revenue from the caller in the same call.
+    /// @dev OPERATOR TRUST ASSUMPTION: The Operator funds every report in the same call. The
+    ///      vault takes `amount` USDC from the Operator wallet with transferFrom, so no credit
+    ///      exists without the USDC behind it, and a report the Operator cannot fund reverts
+    ///      `TransferFailed`. The Operator can still under-report: the vault cannot know what
+    ///      the exchange earned off-chain, so a report smaller than the true income, or no
+    ///      report at all, stays inside the trust model. Operational need: each Operator
+    ///      wallet holds a standing USDC approval to each vault it reports to (see
+    ///      DEPLOYMENT.md). No solvency assertion runs here (decision C6): the report is a
+    ///      receipt, not a gate. Decision C19, ADR-ASNR in FEAT-TOGR.
+    ///
+    ///      Checks-effects-interactions (NFR-ASNN): the phase, amount, and liquidity checks
+    ///      run first, the accumulator write second, and the USDC pull last, under the
+    ///      inline reentrancy guard because the pull is an external call.
     /// @param amount The amount of USDC fee revenue to distribute across active liquidity
-    function notifyFees(uint256 amount) external onlyOperator whenNotPaused touchesHeartbeat {
+    function notifyFees(uint256 amount) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
         // Cancelled vaults have already distributed all funds
         if (phase == 3) revert VaultCancelled();
 
@@ -1121,6 +1131,12 @@ contract LPVault {
         // precision, truncating downward. The dust is economically negligible
         // (< 1/2^128 USDC per unit of liquidity per call).
         feeGrowthGlobalX128 += _mulDiv(amount, Q128, uint256(activeL));
+
+        // --- Interactions (external call last, per checks-effects-interactions) ---
+
+        // Take the USDC that the credit above represents. A failed pull reverts the whole
+        // call, so the accumulator never records income the vault did not receive (C19).
+        _safeTransferFrom(usdc, msg.sender, address(this), amount);
 
         emit FeesNotified(amount, feeGrowthGlobalX128);
     }
