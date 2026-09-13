@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-T7AG: Operator Mint Position for LP
 // Integration tests for every scenario in this use case.
-// Covers: SC-T7AH, SC-T7AI, SC-T7AJ, SC-8L1C, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-3Z9J, SC-45IE, SC-3Z9K, SC-T7AR, SC-3XU5, SC-3XU6
+// Covers: SC-T7AH, SC-T7AI, SC-T7AJ, SC-8L1C, SC-AFPN, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-AFPM, SC-T7AP, SC-3Z9J, SC-45IE, SC-3Z9K, SC-T7AR, SC-3XU5, SC-3XU6
 
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -43,6 +43,7 @@ contract MintPositionTestBase is LPVaultFixture {
         address indexed owner,
         int24 tickLower,
         int24 tickUpper,
+        int24 mintTick,
         uint128 liquidity,
         uint256 usdcAmount,
         bytes32 intentId
@@ -115,10 +116,11 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function test_positionRecordIsCorrect() public {
         uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (address owner, int24 tl, int24 tu, uint128 liq,, uint256 owed) = vault.positions(posId);
+        (address owner, int24 tl, int24 tu, int24 mintTick, uint128 liq,, uint256 owed) = vault.positions(posId);
         assertEq(owner, lp, "position owner should be the LP's Safe");
         assertEq(tl, tickLower, "tickLower should match");
         assertEq(tu, tickUpper, "tickUpper should match");
+        assertEq(mintTick, int24(50), "mintTick should be currentTick, which is inside the range");
         // liquidity = 600 * 1e18 / (80 - 20) = 10e18
         assertEq(liq, uint128(10e18), "liquidity should be usdcAmount * PRECISION / rangeWidth");
         assertEq(owed, 0, "tokensOwed should be 0 at mint");
@@ -131,7 +133,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
         // feeGrowthInside = global(1000) - below(1000) - above(0) = 0
         // below: currentTick(50) >= tickLower(20) → ticks[20].feeGrowthOutside = 1000 (just initialized)
         // above: currentTick(50) < tickUpper(80) → ticks[80].feeGrowthOutside = 0 (just initialized)
-        (,,,, uint256 feeGrowthLast,) = vault.positions(posId);
+        (,,,,, uint256 feeGrowthLast,) = vault.positions(posId);
         assertEq(feeGrowthLast, 0, "feeGrowthInsideLast should be 0 (no retroactive fees)");
     }
 
@@ -188,10 +190,10 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
         assertEq(vault.totalEscrowed(), 0, "totalEscrowed should fall by the escrowed amount");
     }
 
-    // SC-T7AH: PositionMinted event emitted with the Safe as owner
+    // SC-T7AH: PositionMinted event emitted with the Safe as owner and the mint tick
     function test_emitsPositionMintedEvent() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionMinted(0, lp, tickLower, tickUpper, uint128(10e18), usdcAmount, intentId);
+        emit PositionMinted(0, lp, tickLower, tickUpper, int24(50), uint128(10e18), usdcAmount, intentId);
 
         _mint(tickLower, tickUpper, usdcAmount, intentId);
     }
@@ -257,7 +259,7 @@ contract MintPositionOutOfRangeTest is MintPositionTestBase {
         uint256 vaultBefore = mockUsdc.balanceOf(address(vault));
         uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (address owner,,, uint128 liq,,) = vault.positions(posId);
+        (address owner,,,, uint128 liq,,) = vault.positions(posId);
         assertEq(owner, lp, "position owner should be the LP's Safe");
         // liquidity = 300 * 1e18 / 30 = 10e18
         assertEq(liq, uint128(10e18), "liquidity should be correct");
@@ -391,7 +393,7 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
 
         uint256 posId = _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
 
-        (address owner,,, uint128 liquidity,,) = vault.positions(posId);
+        (address owner,,,, uint128 liquidity,,) = vault.positions(posId);
         assertEq(owner, lp, "position should be minted to the LP's Safe");
         assertGt(liquidity, 0, "minted position should have nonzero liquidity");
         assertEq(vault.activeLiquidity(), activeBefore, "activeLiquidity unchanged: currentTick 150 >= tickUpper 100");
@@ -402,7 +404,7 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
     function test_snapshotStoresWrappedFeeGrowthInside() public {
         uint256 posId = _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
 
-        (,,,, uint256 feeGrowthInsideLast,) = vault.positions(posId);
+        (,,,,, uint256 feeGrowthInsideLast,) = vault.positions(posId);
         uint256 expectedWrapped = type(uint256).max - (g2 - g1) + 1;
         assertEq(feeGrowthInsideLast, expectedWrapped, "snapshot should be 2^256 - (G2 - G1)");
     }
@@ -419,6 +421,62 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
         assertEq(outside50, g2, "tick 50 feeGrowthOutside should equal the current global G2");
         assertEq(outside100, g1, "tick 100 feeGrowthOutside should stay at the stale G1");
         assertEq(gross100After, gross100Before + uint128(10e18), "tick 100 liquidityGross should accumulate");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-AFPN: Mint tick clamps into the range when the price is outside it
+// What: A position records currentTick as its mintTick when the price is
+//       inside its range, tickLower when the price is below the range, and
+//       tickUpper when the price is at or above it. The event carries the
+//       same value as the record.
+// Why:  FR-AFPO and ADR-AFPP: the claim model (decision C26) values a claim
+//       from its mint tick, and the clamp gives two positions minted on the
+//       same side of their range the same mint tick, so they can merge.
+// Example: currentTick = 50. [60, 90) stores 60, [0, 30) stores 30,
+//          [20, 80) stores 50.
+// ──────────────────────────────────────────────
+contract MintTickClampTest is MintPositionTestBase {
+    function setUp() public override {
+        super.setUp();
+        _setCurrentTick(int24(50));
+    }
+
+    function _mintTickOf(uint256 posId) internal view returns (int24 mintTick) {
+        (,,, mintTick,,,) = vault.positions(posId);
+    }
+
+    // SC-AFPN: below the range, the mint tick clamps up to tickLower
+    function test_whenPriceIsBelowTheRangeThenMintTickIsTickLower() public {
+        uint256 posId = _escrowAndMint(vault, operatorAddr, LP_PK, int24(60), int24(90), 300, keccak256("below"));
+        assertEq(_mintTickOf(posId), int24(60), "mintTick should clamp up to tickLower");
+    }
+
+    // SC-AFPN: at or above the range, the mint tick clamps down to tickUpper
+    function test_whenPriceIsAboveTheRangeThenMintTickIsTickUpper() public {
+        uint256 posId = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(30), 300, keccak256("above"));
+        assertEq(_mintTickOf(posId), int24(30), "mintTick should clamp down to tickUpper");
+    }
+
+    // SC-AFPN: inside the range, the mint tick is currentTick, and only this position is in range
+    function test_whenPriceIsInsideTheRangeThenMintTickIsCurrentTick() public {
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(60), int24(90), 300, keccak256("below"));
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(30), 300, keccak256("above"));
+        uint256 posId = _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, keccak256("inside"));
+
+        assertEq(_mintTickOf(posId), int24(50), "mintTick should be currentTick");
+        (,,,, uint128 liquidity,,) = vault.positions(posId);
+        assertEq(vault.activeLiquidity(), liquidity, "only the in-range position counts toward activeLiquidity");
+    }
+
+    // SC-AFPN: the event carries the clamped value the record stores
+    function test_eventCarriesTheClampedMintTick() public {
+        bytes32 intentId = keccak256("event-below");
+        _escrowIntent(int24(60), int24(90), 300, intentId);
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionMinted(0, lp, int24(60), int24(90), int24(60), uint128(10e18), 300, intentId);
+        _mint(int24(60), int24(90), 300, intentId);
     }
 }
 
@@ -529,12 +587,17 @@ contract MintPositionAccessControlTest is MintPositionTestBase {
 
 // ──────────────────────────────────────────────
 // SC-T7AO: First mint below minimum liquidity
-// What: When activeLiquidity == 0 and the computed liquidity from the mint
+// SC-AFPM: Small mint succeeds after active liquidity returns to zero
+// What: When nextPositionId == 0 and the computed liquidity from the mint
 //       falls below minimumFirstLiquidity, the call reverts with
-//       BelowMinimumFirstLiquidity, and the escrow stays in place.
+//       BelowMinimumFirstLiquidity, and the escrow stays in place. Once one
+//       position exists the floor never applies again, even when the price
+//       sits in a range with no position and activeLiquidity is zero.
 // Why:  FR-RFS7 from FEAT-REPZ prevents a tiny first position from
 //       manipulating the fee accumulator (the v3 analog of the ERC-4626
-//       first-depositor inflation attack).
+//       first-depositor inflation attack). Audit issue 6.9 (decision C15):
+//       the old activeLiquidity == 0 condition re-applied the floor whenever
+//       the price entered an empty range, which blocked small LPs.
 // ──────────────────────────────────────────────
 contract MintPositionFirstMintFloorTest is MintPositionTestBase {
     // SC-T7AO: first mint with liquidity below floor reverts, and the escrow survives for a reclaim
@@ -560,6 +623,51 @@ contract MintPositionFirstMintFloorTest is MintPositionTestBase {
         _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(10), 100, keccak256("ok"));
 
         assertGt(vault.activeLiquidity(), 0, "activeLiquidity should be non-zero after first mint");
+    }
+
+    /// @dev One floor-sized position over [100, 200) at tick 150 (1000 USDC / 100 ticks = 10e18),
+    ///      then a move to 250, where no position exists, so activeLiquidity returns to zero.
+    function _mintFloorSizedThenLeaveEveryRange() internal {
+        _setCurrentTick(int24(150));
+        _escrowAndMint(vault, operatorAddr, LP_PK, int24(100), int24(200), 1000, keccak256("floor-sized"));
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(250));
+        assertEq(vault.activeLiquidity(), 0, "the move out of every range must empty activeLiquidity");
+    }
+
+    // SC-AFPM: a 1-USDC mint over [0, 10) (liquidity 1e17 < 10e18) succeeds once a position exists
+    function test_whenActiveLiquidityReturnsToZeroThenSmallMintSucceeds() public {
+        _mintFloorSizedThenLeaveEveryRange();
+
+        bytes32 intentId = keccak256("small-after-first");
+        _escrowIntent(int24(0), int24(10), 1, intentId);
+        uint256 posId = _mint(int24(0), int24(10), 1, intentId);
+
+        (,,,, uint128 liquidity,,) = vault.positions(posId);
+        assertEq(liquidity, uint128(1e17), "the small position must exist with its computed liquidity");
+        assertEq(vault.activeLiquidity(), 0, "the small position is out of range, so activeLiquidity stays 0");
+    }
+
+    // FR-RFS7: the floor rejects a random small amount as the first mint, and accepts the same
+    // amount once one position exists and the price has left every range
+    function testFuzz_floorAppliesToTheFirstMintOnly(uint256 usdcAmount) public {
+        // liquidity = usdcAmount * 1e18 / 10 < 10e18 for every amount in [1, 99]
+        usdcAmount = bound(usdcAmount, 1, 99);
+        bytes32 intentId = keccak256(abi.encode("fuzz-small", usdcAmount));
+        _escrowIntent(int24(0), int24(10), usdcAmount, intentId);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.BelowMinimumFirstLiquidity.selector);
+        vault.mintPositionFor(lp, int24(0), int24(10), usdcAmount, intentId, FAR_DEADLINE);
+
+        _mintFloorSizedThenLeaveEveryRange();
+
+        // The failed mint left the escrow in place, so the same intent mints now
+        uint256 posId = _mint(int24(0), int24(10), usdcAmount, intentId);
+        (,,,, uint128 liquidity,,) = vault.positions(posId);
+        assertEq(
+            liquidity, uint128(usdcAmount * LIQUIDITY_PRECISION / 10), "the small mint must succeed after the first"
+        );
     }
 }
 
@@ -679,7 +787,7 @@ contract MintPositionEscrowChecksTest is MintPositionTestBase {
         vm.prank(operatorAddr);
         uint256 posId = vault.mintPositionFor(lp, int24(20), int24(80), 600, lateIntent, deadline);
 
-        (address owner,,,,,) = vault.positions(posId);
+        (address owner,,,,,,) = vault.positions(posId);
         assertEq(owner, lp, "the mint should succeed after the deposit's deadline passed");
     }
 }

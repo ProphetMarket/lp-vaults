@@ -153,7 +153,7 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, LPVaultFixture {
             (
                 ,
                 int24 tickLower,
-                int24 tickUpper,
+                int24 tickUpper,,
                 uint128 liquidity,
                 uint256 feeGrowthInsideLastX128,
                 uint256 tokensOwed

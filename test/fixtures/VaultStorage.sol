@@ -12,11 +12,11 @@ import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 library VaultStorage {
     using stdStorage for StdStorage;
 
-    /// @dev Overwrites positions[positionId].feeGrowthInsideLastX128, the fifth field of a Position.
+    /// @dev Overwrites positions[positionId].feeGrowthInsideLastX128, the sixth field of a Position.
     function setFeeGrowthInsideLast(StdStorage storage store, address vault, uint256 positionId, uint256 value)
         internal
     {
-        store.target(vault).sig("positions(uint256)").with_key(positionId).depth(4).checked_write(value);
+        store.target(vault).sig("positions(uint256)").with_key(positionId).depth(5).checked_write(value);
     }
 
     /// @dev Overwrites ticks[tick].feeGrowthOutsideX128, the third field of a TickInfo.

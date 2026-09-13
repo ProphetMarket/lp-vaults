@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-K1M8: Merge Same-Range Positions
 // Integration tests for every scenario in this use case.
-// Covers: SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC
+// Covers: SC-K1M9, SC-K1MA, SC-K1MB, SC-AFPQ, SC-AFPR, SC-K1MC, FR-AFPU
 
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -84,14 +84,14 @@ contract MergePositionsSuccessTest is MergePositionsTestBase {
     // SC-K1M9: survivor liquidity equals sum of both positions
     function test_survivorLiquidityEqualsSumOfBoth() public {
         // Both positions: 500 USDC on [0, 100) → each has 5e18 liquidity
-        (,,, uint128 liqA,,) = vault.positions(posA);
-        (,,, uint128 liqB,,) = vault.positions(posB);
+        (,,,, uint128 liqA,,) = vault.positions(posA);
+        (,,,, uint128 liqB,,) = vault.positions(posB);
         uint128 expectedLiq = liqA + liqB;
 
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
-        (,,, uint128 survivorLiq,,) = vault.positions(posA);
+        (,,,, uint128 survivorLiq,,) = vault.positions(posA);
         assertEq(survivorLiq, expectedLiq, "survivor liquidity should equal sum");
         assertEq(survivorLiq, 10e18, "survivor liquidity should be 10e18");
     }
@@ -101,7 +101,7 @@ contract MergePositionsSuccessTest is MergePositionsTestBase {
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
-        (,,, uint128 consumedLiq,,) = vault.positions(posB);
+        (,,,, uint128 consumedLiq,,) = vault.positions(posB);
         assertEq(consumedLiq, 0, "consumed position liquidity should be zero");
     }
 
@@ -160,15 +160,15 @@ contract MergePositionsRangeMismatchTest is MergePositionsTestBase {
 
     // SC-K1MA: no state change on revert (positions unchanged)
     function test_noStateChangeOnMismatch() public {
-        (,,, uint128 liqABefore,,) = vault.positions(posA);
-        (,,, uint128 liqCBefore,,) = vault.positions(posC);
+        (,,,, uint128 liqABefore,,) = vault.positions(posA);
+        (,,,, uint128 liqCBefore,,) = vault.positions(posC);
 
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.RangeMismatch.selector);
         vault.mergePositions(_buildIds(posA, posC));
 
-        (,,, uint128 liqAAfter,,) = vault.positions(posA);
-        (,,, uint128 liqCAfter,,) = vault.positions(posC);
+        (,,,, uint128 liqAAfter,,) = vault.positions(posA);
+        (,,,, uint128 liqCAfter,,) = vault.positions(posC);
         assertEq(liqAAfter, liqABefore, "posA liquidity unchanged after revert");
         assertEq(liqCAfter, liqCBefore, "posC liquidity unchanged after revert");
     }
@@ -199,6 +199,190 @@ contract MergePositionsInsufficientInputTest is MergePositionsTestBase {
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.InsufficientPositions.selector);
         vault.mergePositions(ids);
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-AFPQ: Revert on a repeated position ID
+// What: When the Operator names one position twice, the call reverts with
+//       DuplicatePositionId before any position is read, and the position
+//       keeps its liquidity.
+// Why:  Audit issue 6.14 (decision C16): with [a, a] the survivor and the
+//       consumed position were one storage slot, so a's liquidity was added
+//       to itself and written back as 2L with no new capital.
+// Example: posA = 5e18. mergePositions([posA, posA]) reverts; posA stays 5e18.
+// ──────────────────────────────────────────────
+contract MergePositionsDuplicateIdTest is MergePositionsTestBase {
+    // SC-AFPQ: a repeated ID reverts and the position keeps its liquidity
+    function test_whenAnIdRepeatsThenMergeRevertsAndLiquidityIsUnchanged() public {
+        (,,,, uint128 liqBefore,,) = vault.positions(posA);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.DuplicatePositionId.selector);
+        vault.mergePositions(_buildIds(posA, posA));
+
+        (,,,, uint128 liqAfter,,) = vault.positions(posA);
+        assertEq(liqAfter, liqBefore, "posA liquidity must not double");
+    }
+
+    // SC-AFPQ: a repeat anywhere in a longer array is caught before any position is read
+    function test_whenAnIdRepeatsLaterInTheArrayThenMergeReverts() public {
+        uint256[] memory ids = new uint256[](3);
+        ids[0] = posA;
+        ids[1] = posB;
+        ids[2] = posA;
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.DuplicatePositionId.selector);
+        vault.mergePositions(ids);
+    }
+
+    // SC-3XUQ: a merge rejected for a repeated ID is not proof of life
+    function test_whenAnIdRepeatsThenSilenceTimerIsUntouched() public {
+        uint256 before = vault.lastOperatorActivityTimestamp();
+        vm.warp(block.timestamp + 1 days);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.DuplicatePositionId.selector);
+        vault.mergePositions(_buildIds(posA, posA));
+
+        assertEq(vault.lastOperatorActivityTimestamp(), before, "a reverted merge must not refresh the heartbeat");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-AFPR: Revert on a different mint tick
+// What: Two positions with the same owner and range but different mint ticks
+//       do not merge: the call reverts with MintTickMismatch and both stay.
+// Why:  FR-AFPT (decision C16): under the claim model (C26) the mint tick
+//       anchors which levels hold USDC and which hold outcome tokens, so two
+//       mint ticks are two asset mixes and one record cannot represent both.
+// Example: posA minted at tick 0, the tick moves to 50, posC minted at 50 over
+//          the same range → mergePositions([posA, posC]) reverts.
+// ──────────────────────────────────────────────
+contract MergePositionsMintTickMismatchTest is MergePositionsTestBase {
+    uint256 posC;
+
+    function setUp() public override {
+        super.setUp();
+
+        // posA and posB were minted at tick 0. Move to 50 and mint the same range again.
+        vm.prank(operatorAddr);
+        vault.updateTick(int24(50));
+        posC = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 500, keccak256("mint-c-at-50"));
+    }
+
+    // SC-AFPR: the two mint ticks differ and the merge reverts
+    function test_whenMintTicksDifferThenMergeReverts() public {
+        (,,, int24 mintTickA,,,) = vault.positions(posA);
+        (,,, int24 mintTickC,,,) = vault.positions(posC);
+        assertEq(mintTickA, int24(0), "posA was minted at tick 0");
+        assertEq(mintTickC, int24(50), "posC was minted at tick 50");
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.MintTickMismatch.selector);
+        vault.mergePositions(_buildIds(posA, posC));
+    }
+
+    // SC-AFPR: both positions keep their liquidity
+    function test_whenMintTicksDifferThenNoStateChanges() public {
+        (,,,, uint128 liqABefore,,) = vault.positions(posA);
+        (,,,, uint128 liqCBefore,,) = vault.positions(posC);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.MintTickMismatch.selector);
+        vault.mergePositions(_buildIds(posA, posC));
+
+        (,,,, uint128 liqAAfter,,) = vault.positions(posA);
+        (,,,, uint128 liqCAfter,,) = vault.positions(posC);
+        assertEq(liqAAfter, liqABefore, "posA liquidity unchanged after revert");
+        assertEq(liqCAfter, liqCBefore, "posC liquidity unchanged after revert");
+    }
+
+    // SC-K1M9: the two positions that share the mint tick still merge
+    function test_whenMintTicksMatchThenMergeSucceeds() public {
+        vm.prank(operatorAddr);
+        vault.mergePositions(_buildIds(posA, posB));
+
+        (,,,, uint128 survivorLiq,,) = vault.positions(posA);
+        assertEq(survivorLiq, uint128(10e18), "posA and posB share mint tick 0 and merge");
+    }
+}
+
+// ──────────────────────────────────────────────
+// FR-AFPU: Merge conserves liquidity
+// What: Over a random count of same-range positions with random amounts, the
+//       survivor's liquidity after the merge equals the sum of the merged
+//       positions before it, every consumed position holds zero, and a
+//       repeated ID injected at a random place reverts with no change.
+// Why:  Audit issue 6.14 asked for a fuzzed merge invariant (FR-2J6X in
+//       audit-solutions.md): inflation must be structurally impossible, not
+//       only spot-checked.
+// ──────────────────────────────────────────────
+contract MergePositionsConservationFuzzTest is MergePositionsTestBase {
+    /// @dev Mints `count` extra positions over [0, 100) at tick 0 with amounts derived from the
+    ///      seed, and returns every position ID (posA and posB included) with the sum of their
+    ///      liquidity read from the vault.
+    function _mintRandomSet(uint256 count, uint256 seed) internal returns (uint256[] memory ids, uint256 sum) {
+        ids = new uint256[](count + 2);
+        ids[0] = posA;
+        ids[1] = posB;
+        for (uint256 i = 0; i < count; i++) {
+            uint256 amount = bound(uint256(keccak256(abi.encode(seed, i))), 1, 1_000_000);
+            ids[i + 2] = _escrowAndMint(
+                vault, operatorAddr, LP_PK, int24(0), int24(100), amount, keccak256(abi.encode("fuzz-mint", seed, i))
+            );
+        }
+        for (uint256 i = 0; i < ids.length; i++) {
+            (,,,, uint128 liquidity,,) = vault.positions(ids[i]);
+            sum += liquidity;
+        }
+    }
+
+    // FR-AFPU: the survivor equals the sum before the merge and every consumed position is zero
+    function testFuzz_survivorEqualsTheSumOfTheMergedPositions(uint256 count, uint256 seed) public {
+        count = bound(count, 0, 6);
+        (uint256[] memory ids, uint256 sumBefore) = _mintRandomSet(count, seed);
+
+        vm.prank(operatorAddr);
+        vault.mergePositions(ids);
+
+        (,,,, uint128 survivorLiq,,) = vault.positions(ids[0]);
+        assertEq(uint256(survivorLiq), sumBefore, "survivor liquidity must equal the sum before the merge");
+        for (uint256 i = 1; i < ids.length; i++) {
+            (,,,, uint128 consumedLiq,,) = vault.positions(ids[i]);
+            assertEq(consumedLiq, 0, "every consumed position must hold zero");
+        }
+    }
+
+    // FR-AFPS: one repeated ID at a random place reverts and no liquidity moves
+    function testFuzz_repeatedIdAnywhereRevertsWithoutChange(uint256 count, uint256 seed, uint256 from, uint256 to)
+        public
+    {
+        count = bound(count, 0, 6);
+        (uint256[] memory ids,) = _mintRandomSet(count, seed);
+        from = bound(from, 0, ids.length - 1);
+        to = bound(to, 0, ids.length - 1);
+        if (from == to) to = (to + 1) % ids.length;
+        uint256[] memory liqBefore = new uint256[](ids.length);
+        for (uint256 i = 0; i < ids.length; i++) {
+            (,,,, uint128 liquidity,,) = vault.positions(ids[i]);
+            liqBefore[i] = liquidity;
+        }
+        uint256[] memory withRepeat = new uint256[](ids.length);
+        for (uint256 i = 0; i < ids.length; i++) {
+            withRepeat[i] = ids[i];
+        }
+        withRepeat[to] = ids[from];
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.DuplicatePositionId.selector);
+        vault.mergePositions(withRepeat);
+
+        for (uint256 i = 0; i < ids.length; i++) {
+            (,,,, uint128 liquidity,,) = vault.positions(ids[i]);
+            assertEq(liquidity, liqBefore[i], "no position may change on a rejected merge");
+        }
     }
 }
 
@@ -252,8 +436,8 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
         // Compute expected uncollected fees for each position using reference math.
         // posA: sole recipient of 600, half of 400 → ~800.
         // posB: half of 400 → ~200.
-        (,,, uint128 liqA, uint256 feeGrowthLastA, uint256 owedA) = vault.positions(posA);
-        (,,, uint128 liqB, uint256 feeGrowthLastB, uint256 owedB) = vault.positions(posB);
+        (,,,, uint128 liqA, uint256 feeGrowthLastA, uint256 owedA) = vault.positions(posA);
+        (,,,, uint128 liqB, uint256 feeGrowthLastB, uint256 owedB) = vault.positions(posB);
 
         // feeGrowthInside for [0, 100) equals feeGrowthGlobal (both ticks below currentTick=0)
         uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
@@ -266,7 +450,7 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
-        (,,,,, uint256 survivorOwed) = vault.positions(posA);
+        (,,,,,, uint256 survivorOwed) = vault.positions(posA);
         assertEq(survivorOwed, expectedOwed, "survivor tokensOwed should include both positions' fees");
         assertGt(survivorOwed, 0, "survivor should have nonzero owed fees");
     }
@@ -280,7 +464,7 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
-        (,,,, uint256 survivorFeeGrowthLast,) = vault.positions(posA);
+        (,,,,, uint256 survivorFeeGrowthLast,) = vault.positions(posA);
         assertEq(
             survivorFeeGrowthLast, expectedFeeGrowthInside, "survivor feeGrowthInsideLast should equal current value"
         );
@@ -289,8 +473,8 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
     // SC-K1MC: collect after merge returns correct total (no loss, no double-counting)
     function test_collectAfterMergeReturnsCorrectTotal() public {
         // Compute expected total fees before merge
-        (,,, uint128 liqA, uint256 feeGrowthLastA, uint256 owedA) = vault.positions(posA);
-        (,,, uint128 liqB, uint256 feeGrowthLastB, uint256 owedB) = vault.positions(posB);
+        (,,,, uint128 liqA, uint256 feeGrowthLastA, uint256 owedA) = vault.positions(posA);
+        (,,,, uint128 liqB, uint256 feeGrowthLastB, uint256 owedB) = vault.positions(posB);
         uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
         uint256 feesA = uint256(liqA) * (feeGrowthGlobal - feeGrowthLastA) / Q128;
         uint256 feesB = uint256(liqB) * (feeGrowthGlobal - feeGrowthLastB) / Q128;
@@ -443,7 +627,7 @@ contract MergePositionsWraparoundSurvivorTest is MergePositionsWraparoundTestBas
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posSurvivor, posConsumed));
 
-        (,,, uint128 survivorLiq,,) = vault.positions(posSurvivor);
+        (,,,, uint128 survivorLiq,,) = vault.positions(posSurvivor);
         assertEq(survivorLiq, 10e18, "survivor liquidity should be the sum of both positions");
     }
 
@@ -457,7 +641,7 @@ contract MergePositionsWraparoundSurvivorTest is MergePositionsWraparoundTestBas
         vm.prank(operatorAddr);
         vault.mergePositions(ids);
 
-        (,,, uint128 consumedLiq,,) = vault.positions(posConsumed);
+        (,,,, uint128 consumedLiq,,) = vault.positions(posConsumed);
         assertEq(consumedLiq, 0, "consumed position liquidity should be zeroed");
     }
 }
@@ -489,8 +673,8 @@ contract MergePositionsWraparoundConsumedTest is MergePositionsWraparoundTestBas
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posSurvivor, posConsumed));
 
-        (,,, uint128 survivorLiq,,) = vault.positions(posSurvivor);
-        (,,, uint128 consumedLiq,,) = vault.positions(posConsumed);
+        (,,,, uint128 survivorLiq,,) = vault.positions(posSurvivor);
+        (,,,, uint128 consumedLiq,,) = vault.positions(posConsumed);
         assertEq(survivorLiq, 10e18, "survivor liquidity should be the sum of both positions");
         assertEq(consumedLiq, 0, "consumed position liquidity should be zeroed");
     }

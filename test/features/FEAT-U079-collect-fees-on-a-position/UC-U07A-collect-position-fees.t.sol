@@ -121,7 +121,7 @@ contract CollectFeesFirstCollectTest is CollectFeesTestBase {
         vm.prank(lp);
         vault.collect(positionId);
 
-        (,,,, uint256 feeGrowthInsideLast,) = vault.positions(positionId);
+        (,,,,, uint256 feeGrowthInsideLast,) = vault.positions(positionId);
         uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
         assertEq(feeGrowthInsideLast, feeGrowthGlobal, "snapshot should equal current feeGrowthInside");
     }
@@ -152,12 +152,12 @@ contract CollectFeesFirstCollectTest is CollectFeesTestBase {
 
     // SC-U07B: position liquidity, tickLower, tickUpper remain unchanged
     function test_positionLiquidityUnchanged() public {
-        (address ownerBefore, int24 tlBefore, int24 tuBefore, uint128 liqBefore,,) = vault.positions(positionId);
+        (address ownerBefore, int24 tlBefore, int24 tuBefore,, uint128 liqBefore,,) = vault.positions(positionId);
 
         vm.prank(lp);
         vault.collect(positionId);
 
-        (address ownerAfter, int24 tlAfter, int24 tuAfter, uint128 liqAfter,,) = vault.positions(positionId);
+        (address ownerAfter, int24 tlAfter, int24 tuAfter,, uint128 liqAfter,,) = vault.positions(positionId);
         assertEq(ownerAfter, ownerBefore, "owner unchanged");
         assertEq(tlAfter, tlBefore, "tickLower unchanged");
         assertEq(tuAfter, tuBefore, "tickUpper unchanged");
@@ -196,12 +196,12 @@ contract CollectFeesZeroOwedTest is CollectFeesTestBase {
     // SC-U07C: no FeesCollected event emitted (verified by unchanged balances
     // and snapshot — if no transfer and no state change, no event was meaningful)
     function test_snapshotUnchangedOnZeroCollect() public {
-        (,,,, uint256 snapshotBefore,) = vault.positions(positionId);
+        (,,,,, uint256 snapshotBefore,) = vault.positions(positionId);
 
         vm.prank(lp);
         vault.collect(positionId);
 
-        (,,,, uint256 snapshotAfter,) = vault.positions(positionId);
+        (,,,,, uint256 snapshotAfter,) = vault.positions(positionId);
         assertEq(snapshotAfter, snapshotBefore, "snapshot should not change when zero fees");
     }
 }
@@ -355,7 +355,7 @@ contract CollectFeesAntiDoubleCountTest is CollectFeesTestBase {
         vm.prank(lp);
         vault.collect(positionId);
 
-        (,,,, uint256 feeGrowthInsideLast,) = vault.positions(positionId);
+        (,,,,, uint256 feeGrowthInsideLast,) = vault.positions(positionId);
         uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
         assertEq(feeGrowthInsideLast, feeGrowthGlobal, "snapshot should reflect latest feeGrowthInside");
     }
@@ -370,7 +370,7 @@ contract CollectFeesAntiDoubleCountTest is CollectFeesTestBase {
         // Round 2: more fees arrive. Compute the expected delta from the
         // (already-updated) snapshot to the new feeGrowthGlobal.
         _distributeFees(secondFees);
-        (,,,, uint256 snapshot,) = vault.positions(positionId);
+        (,,,,, uint256 snapshot,) = vault.positions(positionId);
         uint256 delta = vault.feeGrowthGlobalX128() - snapshot;
         uint256 expectedOwed = uint256(positionLiquidity) * delta / Q128;
 
@@ -562,7 +562,7 @@ contract FeeGrowthWraparoundCollectTest is FeeGrowthWraparoundTestBase {
         vm.prank(operatorAddr);
         vault.updateTick(int24(75));
 
-        (,,, uint128 posLiquidity,,) = vault.positions(posId);
+        (,,,, uint128 posLiquidity,,) = vault.positions(posId);
         uint256 feeGrowthBefore = vault.feeGrowthGlobalX128();
 
         _distributeFees(200);
@@ -584,7 +584,7 @@ contract FeeGrowthWraparoundCollectTest is FeeGrowthWraparoundTestBase {
     // fix applies uniformly regardless of which side of the range the stale
     // tick sits on, not merely that the call doesn't revert.
     function test_preexistingPositionSharingStaleTickStillCollectible() public {
-        (,,, uint128 posP2Liquidity,,) = vault.positions(posP2);
+        (,,,, uint128 posP2Liquidity,,) = vault.positions(posP2);
         (,, uint256 tick100Outside) = vault.ticks(int24(100));
         uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
 

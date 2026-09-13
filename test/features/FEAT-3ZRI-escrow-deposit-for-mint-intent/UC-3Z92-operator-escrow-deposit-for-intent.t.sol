@@ -150,7 +150,7 @@ contract EscrowDepositSuccessTest is EscrowDepositTestBase {
         vm.prank(operatorAddr);
         uint256 posId = vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE);
 
-        (address owner,,,,,) = vault.positions(posId);
+        (address owner,,,,,,) = vault.positions(posId);
         assertEq(owner, lp, "the position should belong to the Safe");
     }
 }

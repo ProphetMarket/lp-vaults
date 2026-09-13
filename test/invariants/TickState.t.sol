@@ -3,6 +3,7 @@ pragma solidity 0.8.20;
 
 // FEAT-TVS0: Update Tick and Cross Ticks (FR-A2ZS, FR-5IDF, NFR-5IDG)
 // FEAT-T7AF: Mint LP Position (the two liquidity invariants in its Data Model)
+// FEAT-K1M2: Merge Positions (FR-AFPU, the merge conservation invariant)
 // Invariants required by CLAUDE.md's Foundry conventions (an invariant on every
 // state-machine property), for the tick state machine under mints, tick moves,
 // and merges, with the target-bounded bitmap search:
@@ -11,6 +12,12 @@ pragma solidity 0.8.20;
 //   3. updateTick reverts only for a documented reason (never an arithmetic panic, FR-5IDF)
 //   4. a move of at most 2,000 ticks costs less than 200,000 gas plus 30,000 per tick it
 //      crossed, so a zero-crossing move stays under 200,000 (NFR-5IDG)
+//   5. Σ position.liquidity over all positions == Σ liquidityGross over the distinct
+//      referenced ticks / 2, so a merge never creates or loses liquidity (FR-AFPU). This
+//      is the summed form of invariant 2, kept as its own named check because audit
+//      issue 6.14 asked for it.
+//   6. mergePositions([a, a]) always reverts DuplicatePositionId (FR-AFPS), so the
+//      rejection is documented in the run and not mistaken for a gap
 // A search that skipped a legitimate crossing would break invariant 1 without a
 // revert, and a search that scanned to the end of the scale would break 3 or 4,
 // so the proof of the bounded search lives here. Every expected value is read
@@ -68,6 +75,11 @@ contract TickStateHandler is LPVaultFixture {
     /// @dev How many moves succeeded, so the gas ceiling proves something.
     uint256 public completedMoves;
 
+    /// @dev How many mergeDuplicate calls ran, and the first revert selector that was not
+    ///      DuplicatePositionId. Zero while every duplicate merge was rejected as documented.
+    uint256 public duplicateMergeAttempts;
+    bytes4 public undocumentedDuplicateMergeRevert;
+
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
     constructor(LPVault vault_, MockERC20 mockUsdc_, address operatorAddr_) {
@@ -87,7 +99,7 @@ contract TickStateHandler is LPVaultFixture {
         int24 tickLower;
         int24 tickUpper;
         if (positionIds.length > 0 && placementSeed % 4 == 0) {
-            (, tickLower, tickUpper,,,) = vault.positions(positionIds[placementSeed % positionIds.length]);
+            (, tickLower, tickUpper,,,,) = vault.positions(positionIds[placementSeed % positionIds.length]);
         } else {
             int24 width = int24(int256(bound(widthSeed, 1, 50))) * SPACING;
             int256 low;
@@ -153,22 +165,21 @@ contract TickStateHandler is LPVaultFixture {
         }
     }
 
-    /// @dev Merges two distinct positions that share a range, when such a pair exists. The IDs
-    ///      are distinct on purpose: mergePositions([a, a]) doubles the survivor's liquidity with
-    ///      no tick change, which is audit issue 6.14 and belongs to R7. R7 adds that call here
-    ///      as a documented rejection.
+    /// @dev Merges two distinct positions that share a range and a mint tick, when such a pair
+    ///      exists. The pair matches on the mint tick too, because mergePositions rejects a
+    ///      different mint tick (FR-AFPT) and a range-only pick would rarely merge after a move.
     function merge(uint256 seedA, uint256 seedB) public {
         uint256 count = positionIds.length;
         if (count < 2) return;
         uint256 a = positionIds[seedA % count];
-        (, int24 lowerA, int24 upperA,,,) = vault.positions(a);
+        (, int24 lowerA, int24 upperA, int24 mintTickA,,,) = vault.positions(a);
         uint256 b = 0;
         bool foundPair = false;
         for (uint256 i = 0; i < count; i++) {
             uint256 candidate = positionIds[(seedB % count + i) % count];
             if (candidate == a) continue;
-            (, int24 lowerB, int24 upperB,,,) = vault.positions(candidate);
-            if (lowerB == lowerA && upperB == upperA) {
+            (, int24 lowerB, int24 upperB, int24 mintTickB,,,) = vault.positions(candidate);
+            if (lowerB == lowerA && upperB == upperA && mintTickB == mintTickA) {
                 b = candidate;
                 foundPair = true;
                 break;
@@ -181,6 +192,28 @@ contract TickStateHandler is LPVaultFixture {
         ids[1] = b;
         vm.prank(operatorAddr);
         try vault.mergePositions(ids) {} catch {}
+    }
+
+    /// @dev Calls mergePositions([a, a]) on a random position, the audit issue 6.14 input. The
+    ///      call must revert DuplicatePositionId every time (FR-AFPS): the handler records the
+    ///      attempt and the first selector that is not that error, and invariant 6 reads both.
+    function mergeDuplicate(uint256 seed) public {
+        uint256 count = positionIds.length;
+        if (count == 0) return;
+        uint256 a = positionIds[seed % count];
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = a;
+        ids[1] = a;
+        duplicateMergeAttempts++;
+        vm.prank(operatorAddr);
+        try vault.mergePositions(ids) {
+            if (undocumentedDuplicateMergeRevert == bytes4(0)) undocumentedDuplicateMergeRevert = bytes4(0xffffffff);
+        } catch (bytes memory reason) {
+            bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0xffffffff);
+            if (undocumentedDuplicateMergeRevert == bytes4(0) && selector != LPVault.DuplicatePositionId.selector) {
+                undocumentedDuplicateMergeRevert = selector;
+            }
+        }
     }
 
     /// @dev The ticksCrossed of the one TickUpdated log a successful move emits.
@@ -298,9 +331,50 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         );
     }
 
-    /// @dev At least one move completed in the run, so the gas ceiling proved something.
+    // FR-AFPU: the sum of every position's liquidity equals half the sum of liquidityGross over
+    // the distinct ticks the positions reference, because every position references exactly two
+    // ticks. A merge that created or lost liquidity would break it, since a merge never touches
+    // tick state. This is the summed form of invariant 2, read from vault state only.
+    function invariant_mergeConservesLiquidity() public view {
+        PositionView[] memory all = _positions();
+        uint256 positionSum = 0;
+        uint256 grossSum = 0;
+        for (uint256 i = 0; i < all.length; i++) {
+            positionSum += all[i].liquidity;
+            if (_firstReferenceIndex(all, all[i].tickLower) == i) grossSum += _liquidityGrossAt(all[i].tickLower);
+            if (_firstReferenceIndex(all, all[i].tickUpper) == i) grossSum += _liquidityGrossAt(all[i].tickUpper);
+        }
+        assertEq(positionSum * 2, grossSum, "a merge must conserve the sum of position liquidity");
+    }
+
+    // FR-AFPS: every mergePositions([a, a]) in the run reverted DuplicatePositionId, so a merge
+    // can never count one position twice. This check is a documented rejection, not a gap.
+    function invariant_duplicateMergeAlwaysRejected() public view {
+        assertEq(
+            handler.undocumentedDuplicateMergeRevert(),
+            bytes4(0),
+            "mergePositions([a, a]) succeeded or reverted with a selector other than DuplicatePositionId"
+        );
+    }
+
+    /// @dev At least one move completed in the run, so the gas ceiling proved something, and at
+    ///      least one duplicate merge was attempted, so invariant 6 proved something.
     function afterInvariant() public view {
         assertGt(handler.completedMoves(), 0, "the run must include at least one completed move");
+        assertGt(handler.duplicateMergeAttempts(), 0, "the run must include at least one duplicate merge attempt");
+    }
+
+    /// @dev The index of the first position that references `tick`, so each tick is counted once.
+    function _firstReferenceIndex(PositionView[] memory all, int24 tick) internal pure returns (uint256) {
+        for (uint256 i = 0; i < all.length; i++) {
+            if (all[i].tickLower == tick || all[i].tickUpper == tick) return i;
+        }
+        revert("a referenced tick must have a referencing position");
+    }
+
+    function _liquidityGrossAt(int24 tick) internal view returns (uint256) {
+        (uint128 liquidityGross,,) = vault.ticks(tick);
+        return liquidityGross;
     }
 
     /// @dev Every position record the vault holds, from 0 to nextPositionId - 1.
@@ -308,7 +382,7 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         uint256 count = vault.nextPositionId();
         all = new PositionView[](count);
         for (uint256 i = 0; i < count; i++) {
-            (, int24 tickLower, int24 tickUpper, uint128 liquidity,,) = vault.positions(i);
+            (, int24 tickLower, int24 tickUpper,, uint128 liquidity,,) = vault.positions(i);
             all[i] = PositionView(tickLower, tickUpper, liquidity);
         }
     }

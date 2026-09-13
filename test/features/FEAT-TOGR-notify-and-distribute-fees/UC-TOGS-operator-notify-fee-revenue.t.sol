@@ -166,12 +166,13 @@ contract NotifyFeesSuccessTest is NotifyFeesTestBase {
 
     // SC-TOGT: no position-level state changes
     function test_positionStateUnchanged() public {
-        (address owner, int24 tl, int24 tu, uint128 liq, uint256 feeGrowthLast, uint256 owed) = vault.positions(0);
+        (address owner, int24 tl, int24 tu,, uint128 liq, uint256 feeGrowthLast, uint256 owed) = vault.positions(0);
 
         vm.prank(operatorAddr);
         vault.notifyFees(amount);
 
-        (address owner2, int24 tl2, int24 tu2, uint128 liq2, uint256 feeGrowthLast2, uint256 owed2) = vault.positions(0);
+        (address owner2, int24 tl2, int24 tu2,, uint128 liq2, uint256 feeGrowthLast2, uint256 owed2) =
+            vault.positions(0);
         assertEq(owner2, owner, "position owner unchanged");
         assertEq(tl2, tl, "tickLower unchanged");
         assertEq(tu2, tu, "tickUpper unchanged");

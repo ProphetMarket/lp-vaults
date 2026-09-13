@@ -116,7 +116,7 @@ contract SuccessfulEmergencyCancelTest is EmergencyCancelTestBase {
         vm.prank(lpA);
         vault.emergencyCancelAll();
 
-        (,,, uint128 liquidity,,) = vault.positions(positionIdA);
+        (,,,, uint128 liquidity,,) = vault.positions(positionIdA);
         assertEq(liquidity, 0, "position liquidity should be zeroed");
     }
 
@@ -282,9 +282,9 @@ contract MultiLPDistributionTest is EmergencyCancelTestBase {
         vm.prank(lpA);
         vault.emergencyCancelAll();
 
-        (,,, uint128 liq0,,) = vault.positions(positionIdA);
-        (,,, uint128 liq1,,) = vault.positions(positionIdA2);
-        (,,, uint128 liq2,,) = vault.positions(positionIdB);
+        (,,,, uint128 liq0,,) = vault.positions(positionIdA);
+        (,,,, uint128 liq1,,) = vault.positions(positionIdA2);
+        (,,,, uint128 liq2,,) = vault.positions(positionIdB);
         assertEq(liq0, 0, "positionA1 liquidity zeroed");
         assertEq(liq1, 0, "positionA2 liquidity zeroed");
         assertEq(liq2, 0, "positionB liquidity zeroed");
@@ -885,8 +885,8 @@ contract EmergencyCancelWraparoundTest is EmergencyCancelWraparoundTestBase {
         vm.prank(lp);
         vault.emergencyCancelAll();
 
-        (,,, uint128 liqOrdinary,,) = vault.positions(posOrdinary);
-        (,,, uint128 liqWrapped,,) = vault.positions(posWrapped);
+        (,,,, uint128 liqOrdinary,,) = vault.positions(posOrdinary);
+        (,,,, uint128 liqWrapped,,) = vault.positions(posWrapped);
         assertEq(liqOrdinary, 0, "ordinary position liquidity should be zeroed");
         assertEq(liqWrapped, 0, "wrapped-snapshot position liquidity should be zeroed");
 

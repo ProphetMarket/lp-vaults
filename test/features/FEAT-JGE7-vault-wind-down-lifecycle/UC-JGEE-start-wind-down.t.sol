@@ -103,7 +103,7 @@ contract SuccessfulWindDownTest is StartWindDownTestBase {
     // SC-JGEF: no other state is modified (positions, ticks, fees unchanged)
     function test_noSideEffectsOnPositionState() public {
         // Snapshot position state before wind-down
-        (address ownerBefore, int24 tlBefore, int24 tuBefore, uint128 liqBefore, uint256 feeGrowthBefore,) =
+        (address ownerBefore, int24 tlBefore, int24 tuBefore,, uint128 liqBefore, uint256 feeGrowthBefore,) =
             vault.positions(positionId);
         uint256 feeGrowthGlobalBefore = vault.feeGrowthGlobalX128();
         uint128 activeLiqBefore = vault.activeLiquidity();
@@ -113,7 +113,7 @@ contract SuccessfulWindDownTest is StartWindDownTestBase {
         vault.startWindDown();
 
         // Verify nothing changed except phase
-        (address ownerAfter, int24 tlAfter, int24 tuAfter, uint128 liqAfter, uint256 feeGrowthAfter,) =
+        (address ownerAfter, int24 tlAfter, int24 tuAfter,, uint128 liqAfter, uint256 feeGrowthAfter,) =
             vault.positions(positionId);
         assertEq(ownerAfter, ownerBefore, "owner unchanged");
         assertEq(tlAfter, tlBefore, "tickLower unchanged");
@@ -276,9 +276,9 @@ contract ExitPathsSucceedInWindDownTest is StartWindDownTestBase {
     // SC-JGEK: collect emits FeesCollected event in WindDown
     function test_collectEmitsEventInWindDown() public {
         uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
-        (,,,, uint256 feeGrowthInsideLast,) = vault.positions(positionId);
+        (,,,,, uint256 feeGrowthInsideLast,) = vault.positions(positionId);
         uint256 feeGrowthDelta = feeGrowthGlobal - feeGrowthInsideLast;
-        (,,, uint128 liquidity,,) = vault.positions(positionId);
+        (,,,, uint128 liquidity,,) = vault.positions(positionId);
         uint256 expectedOwed = uint256(liquidity) * feeGrowthDelta / Q128;
 
         vm.expectEmit(true, true, false, true, address(vault));
@@ -293,7 +293,7 @@ contract ExitPathsSucceedInWindDownTest is StartWindDownTestBase {
         vm.prank(lp);
         vault.collect(positionId);
 
-        (,,,,, uint256 tokensOwed) = vault.positions(positionId);
+        (,,,,,, uint256 tokensOwed) = vault.positions(positionId);
         assertEq(tokensOwed, 0, "tokensOwed should be zeroed after collect");
     }
 
