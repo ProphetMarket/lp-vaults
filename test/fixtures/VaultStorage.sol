@@ -26,4 +26,18 @@ library VaultStorage {
         // forge-lint: disable-next-line(unsafe-typecast)
         store.target(vault).sig("ticks(int24)").with_key(bytes32(uint256(int256(tick)))).depth(2).checked_write(value);
     }
+
+    /// @dev Overwrites currentTick. The write moves no liquidity: `activeLiquidity` and every
+    ///      tick record stay as they are, so a test calls it only when no position is in range at
+    ///      the old tick and none at the new tick. Otherwise the next crossing runs `_addDelta` on
+    ///      a stale `activeLiquidity` and reverts `SafeCastOverflow` for a reason unrelated to the
+    ///      search. It exists so a search test can start inside an extreme bitmap word: a real
+    ///      move from 0 to 8,388,000 reads 32,766 words, which is the large jump that NFR-5IDG
+    ///      leaves to chunking.
+    function setCurrentTick(StdStorage storage store, address vault, int24 tick) internal {
+        // The slot holds the sign-extended word, so a negative tick reads back as written.
+        // casting to 'uint256' is safe because the two's complement bit pattern is the stored word
+        // forge-lint: disable-next-line(unsafe-typecast)
+        store.target(vault).sig("currentTick()").checked_write(bytes32(uint256(int256(tick))));
+    }
 }

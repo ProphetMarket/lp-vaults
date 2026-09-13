@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-TVS1: Update Current Tick
 // Integration tests for every scenario in this use case.
-// Covers: SC-TVS2, SC-TVS3, SC-TVS4, SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8
+// Covers: SC-TVS2, SC-TVS3, SC-TVS4, SC-TVS5, SC-TVS6, SC-TVS7, SC-TVS8, SC-5IDH, SC-5IDI, SC-5IDJ, SC-5IDL, SC-A2ZT
 
 import {Test, Vm} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -660,10 +660,9 @@ contract CrossTickWraparoundTest is CrossTickWraparoundTestBase {
     // FR-TVSA: crossing tick 200 succeeds instead of reverting. The target
     // is exactly tick 200 (not beyond it) so the crossing loop's outer
     // `while (tick < newTick)` condition is satisfied the instant tick 200
-    // is reached -- exercising only _crossTick's flip on tick 200, without
-    // the loop needing to search for any further initialized tick above it
-    // (this vault has none, which is an unrelated, separate pre-existing
-    // issue in _nextInitializedTick's empty-scan path, out of scope here).
+    // is reached -- exercising only _crossTick's flip on tick 200. This
+    // vault has no initialized tick above 200, and the search stops at the
+    // target's word (FR-5IDE), so no scan past 200 runs.
     function test_crossingSucceedsDespiteOutsideExceedingGlobal() public {
         vm.prank(operatorAddr);
         vault.updateTick(int24(200));
@@ -692,5 +691,442 @@ contract CrossTickWraparoundTest is CrossTickWraparoundTestBase {
         // crossing L-to-R removes it from activeLiquidity. Position liquidity
         // = usdcAmount(1000) * LIQUIDITY_PRECISION(1e18) / rangeWidth(200) = 5e18.
         assertEq(vault.activeLiquidity(), before_ - 5e18, "activeLiquidity should drop by the position's liquidity");
+    }
+}
+
+// ──────────────────────────────────────────────
+// Base test contract for the bounded tick search (FR-5IDE, FR-5IDF, NFR-5IDG).
+// Deploys a fresh vault with minimumFirstLiquidity = 1 and no positions, so
+// every scenario states exact numbers from one mint, and the first-mint floor
+// never rejects a plant. Positions are planted through _escrowAndMint at
+// currentTick = 0, out of range, and only then is the start tick written to
+// storage, so activeLiquidity stays consistent at both ticks.
+//
+// The existing UpdateTickTestBase keeps its three positions and its floor of
+// 10e18 and serves no contract below: a storage-written tick above its
+// positions would leave activeLiquidity stale.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchTestBase is LPVaultFixture {
+    LPVaultFactory factory;
+    LPVault vault;
+    MockERC20 mockUsdc;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+    address exchangeAddr = makeAddr("exchange");
+
+    uint256 constant LP_PK = 0xA11CE;
+
+    /// @dev The Polygon block gas limit. A move that a planted tick pushed past
+    ///      it is the denial of service of audit issue 6.10.
+    uint256 constant POLYGON_BLOCK_GAS_LIMIT = 30_000_000;
+
+    event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
+
+    function setUp() public virtual {
+        LPVault impl = new LPVault();
+        mockUsdc = new MockERC20();
+        _deployConditionalTokens();
+        factory = _deployFactory(
+            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
+        );
+        vault = LPVault(_createVault(factory, oracleAddr, keccak256("bounded-search"), int24(10), uint128(1)));
+    }
+
+    /// @dev Writes the start tick. Call it after every plant, and only with no position in range
+    ///      at the old tick or at the new one (see VaultStorage.setCurrentTick).
+    function _setCurrentTick(int24 tick) internal {
+        VaultStorage.setCurrentTick(stdstore, address(vault), tick);
+    }
+
+    /// @dev Plants one position, which initializes its two ticks in the bitmap.
+    function _plant(int24 tickLower, int24 tickUpper, uint256 usdcAmount) internal returns (uint256) {
+        return _escrowAndMint(
+            vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, keccak256(abi.encode(tickLower, tickUpper))
+        );
+    }
+
+    /// @dev Runs one Operator move and returns the gas the call used.
+    function _move(int24 newTick) internal returns (uint256 gasUsed) {
+        vm.prank(operatorAddr);
+        uint256 before = gasleft();
+        vault.updateTick(newTick);
+        gasUsed = before - gasleft();
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-5IDH: Initialized tick far above the target is never searched
+// What: One position at [8388590, 8388600) puts two bits in the highest
+//       bitmap word (32767). From currentTick = 100 the Operator moves to
+//       300. The search stops at the word that holds 300 and never reads
+//       toward word 32767.
+// Why:  Audit issue 6.10, upward. Without the bound the move reads more than
+//       32,000 words and costs 76,618,321 gas, past the Polygon block limit.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchFarAboveTest is BoundedTickSearchTestBase {
+    function setUp() public override {
+        super.setUp();
+        _plant(int24(8388590), int24(8388600), 1000);
+        _setCurrentTick(int24(100));
+    }
+
+    // SC-5IDH: the move succeeds with zero crossings and stays under the block gas limit
+    function test_whenTickIsPlantedFarAboveThenMoveCompletesWithinBlockGasLimit() public {
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(int24(100), int24(300), 0);
+
+        uint256 gasUsed = _move(int24(300));
+
+        assertEq(vault.currentTick(), int24(300), "currentTick should be 300");
+        assertLt(gasUsed, POLYGON_BLOCK_GAS_LIMIT, "the move must fit in one Polygon block");
+    }
+
+    // SC-5IDH: activeLiquidity is unchanged and the planted ticks are untouched
+    function test_whenTickIsPlantedFarAboveThenPlantedTicksAreUntouched() public {
+        (uint128 gLower, int128 nLower, uint256 oLower) = vault.ticks(int24(8388590));
+        (uint128 gUpper, int128 nUpper, uint256 oUpper) = vault.ticks(int24(8388600));
+
+        _move(int24(300));
+
+        assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
+        (uint128 gLowerAfter, int128 nLowerAfter, uint256 oLowerAfter) = vault.ticks(int24(8388590));
+        (uint128 gUpperAfter, int128 nUpperAfter, uint256 oUpperAfter) = vault.ticks(int24(8388600));
+        assertEq(gLowerAfter, gLower, "tick 8388590 liquidityGross must not move");
+        assertEq(nLowerAfter, nLower, "tick 8388590 liquidityNet must not move");
+        assertEq(oLowerAfter, oLower, "tick 8388590 feeGrowthOutside must not move");
+        assertEq(gUpperAfter, gUpper, "tick 8388600 liquidityGross must not move");
+        assertEq(nUpperAfter, nUpper, "tick 8388600 liquidityNet must not move");
+        assertEq(oUpperAfter, oUpper, "tick 8388600 feeGrowthOutside must not move");
+    }
+
+    // SC-5IDH: the heartbeat is refreshed
+    function test_whenTickIsPlantedFarAboveThenHeartbeatRefreshes() public {
+        vm.warp(4000);
+        _move(int24(300));
+        assertEq(vault.lastOperatorActivityTimestamp(), 4000, "lastOperatorActivityTimestamp should be 4000");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-5IDI: Initialized tick far below the target is never searched
+// What: One position at [-8388600, -8388590) puts two bits in the lowest
+//       bitmap word (-32768). From currentTick = 300 the Operator moves down
+//       to 100. The search stops at the word that holds 100.
+// Why:  Audit issue 6.10, downward.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchFarBelowTest is BoundedTickSearchTestBase {
+    function setUp() public override {
+        super.setUp();
+        _plant(int24(-8388600), int24(-8388590), 1000);
+        _setCurrentTick(int24(300));
+    }
+
+    // SC-5IDI: the move succeeds with zero crossings and stays under the block gas limit
+    function test_whenTickIsPlantedFarBelowThenMoveCompletesWithinBlockGasLimit() public {
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(int24(300), int24(100), 0);
+
+        uint256 gasUsed = _move(int24(100));
+
+        assertEq(vault.currentTick(), int24(100), "currentTick should be 100");
+        assertLt(gasUsed, POLYGON_BLOCK_GAS_LIMIT, "the move must fit in one Polygon block");
+    }
+
+    // SC-5IDI: activeLiquidity is unchanged and the planted ticks are untouched
+    function test_whenTickIsPlantedFarBelowThenPlantedTicksAreUntouched() public {
+        (uint128 gLower, int128 nLower, uint256 oLower) = vault.ticks(int24(-8388600));
+        (uint128 gUpper, int128 nUpper, uint256 oUpper) = vault.ticks(int24(-8388590));
+
+        _move(int24(100));
+
+        assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
+        (uint128 gLowerAfter, int128 nLowerAfter, uint256 oLowerAfter) = vault.ticks(int24(-8388600));
+        (uint128 gUpperAfter, int128 nUpperAfter, uint256 oUpperAfter) = vault.ticks(int24(-8388590));
+        assertEq(gLowerAfter, gLower, "tick -8388600 liquidityGross must not move");
+        assertEq(nLowerAfter, nLower, "tick -8388600 liquidityNet must not move");
+        assertEq(oLowerAfter, oLower, "tick -8388600 feeGrowthOutside must not move");
+        assertEq(gUpperAfter, gUpper, "tick -8388590 liquidityGross must not move");
+        assertEq(nUpperAfter, nUpper, "tick -8388590 liquidityNet must not move");
+        assertEq(oUpperAfter, oUpper, "tick -8388590 feeGrowthOutside must not move");
+    }
+
+    // SC-5IDI: the heartbeat is refreshed
+    function test_whenTickIsPlantedFarBelowThenHeartbeatRefreshes() public {
+        vm.warp(5000);
+        _move(int24(100));
+        assertEq(vault.lastOperatorActivityTimestamp(), 5000, "lastOperatorActivityTimestamp should be 5000");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-5IDJ: Initialized tick inside the target's own word is still crossed
+// What: A position at [260, 600) with 3400 USDC gives liquidity 10e18 and
+//       puts tick 260 in bitmap word 1, the word that also holds the target
+//       300. The move from 100 to 300 crosses 260 and not 600.
+// Why:  A bound that stopped one word short of the target would skip a
+//       legitimate crossing. This proves the bound includes the target's word.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchTargetWordTest is BoundedTickSearchTestBase {
+    function setUp() public override {
+        super.setUp();
+        _plant(int24(260), int24(600), 3400);
+        _setCurrentTick(int24(100));
+    }
+
+    // SC-5IDJ: tick 260 is crossed and activeLiquidity becomes 10e18
+    function test_whenTickIsInTargetWordThenItIsCrossed() public {
+        assertEq(vault.activeLiquidity(), 0, "precondition: activeLiquidity should be 0");
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(int24(100), int24(300), 1);
+
+        _move(int24(300));
+
+        assertEq(vault.currentTick(), int24(300), "currentTick should be 300");
+        assertEq(vault.activeLiquidity(), 10e18, "activeLiquidity should be 10e18 after crossing tick 260");
+    }
+
+    // SC-5IDJ: tick 260's feeGrowthOutside flipped, tick 600's did not
+    function test_whenTickIsInTargetWordThenOnlyThatTickFlips() public {
+        // Give feeGrowthGlobalX128 a nonzero value, so a flip is observable.
+        // notifyFees needs active liquidity, so a second position in range at 100 pays for it.
+        _plant(int24(0), int24(200), 200);
+        vm.prank(operatorAddr);
+        vault.notifyFees(100);
+        uint256 global = vault.feeGrowthGlobalX128();
+        assertGt(global, 0, "precondition: feeGrowthGlobalX128 should be nonzero");
+        (,, uint256 outside600Before) = vault.ticks(int24(600));
+
+        _move(int24(300));
+
+        (,, uint256 outside260) = vault.ticks(int24(260));
+        (,, uint256 outside600) = vault.ticks(int24(600));
+        assertEq(outside260, global, "tick 260 feeGrowthOutside should flip to feeGrowthGlobal");
+        assertEq(outside600, outside600Before, "tick 600 must not be crossed");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-5IDL: Target in the highest bitmap word with no initialized ticks
+// What: No positions. currentTick is written to 8388000 (word 32765) and the
+//       Operator moves to 8388600 (word 32767, the highest). The search steps
+//       into word 32767, checks it, and stops instead of stepping past it.
+// Why:  Audit issue 6.12, upward: the loop reached word 32767 and wordPos++
+//       overflowed with an arithmetic panic.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchHighestWordTest is BoundedTickSearchTestBase {
+    function setUp() public override {
+        super.setUp();
+        _setCurrentTick(int24(8388000));
+    }
+
+    // SC-5IDL: the move succeeds with zero crossings
+    function test_whenTargetIsInHighestWordThenMoveSucceeds() public {
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(int24(8388000), int24(8388600), 0);
+
+        _move(int24(8388600));
+
+        assertEq(vault.currentTick(), int24(8388600), "currentTick should be 8388600");
+        assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
+    }
+
+    // SC-5IDL: the heartbeat is refreshed
+    function test_whenTargetIsInHighestWordThenHeartbeatRefreshes() public {
+        vm.warp(6000);
+        _move(int24(8388600));
+        assertEq(vault.lastOperatorActivityTimestamp(), 6000, "lastOperatorActivityTimestamp should be 6000");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-A2ZT: Start inside the lowest bitmap word with no initialized ticks
+// What: No positions. currentTick is written to -8388400, inside the lowest
+//       word (-32768), and the Operator moves down to -8388600. The start
+//       word has no set bit, and the search stops at the lowest word instead
+//       of stepping below it.
+// Why:  Audit issue 6.12, downward: the wordPos-- before the loop overflowed
+//       with an arithmetic panic when the start sat in the lowest word.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchLowestWordTest is BoundedTickSearchTestBase {
+    function setUp() public override {
+        super.setUp();
+        _setCurrentTick(int24(-8388400));
+    }
+
+    // SC-A2ZT: the move succeeds with zero crossings
+    function test_whenStartIsInLowestWordThenMoveSucceeds() public {
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(int24(-8388400), int24(-8388600), 0);
+
+        _move(int24(-8388600));
+
+        assertEq(vault.currentTick(), int24(-8388600), "currentTick should be -8388600");
+        assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
+    }
+
+    // SC-A2ZT: the heartbeat is refreshed
+    function test_whenStartIsInLowestWordThenHeartbeatRefreshes() public {
+        vm.warp(7000);
+        _move(int24(-8388600));
+        assertEq(vault.lastOperatorActivityTimestamp(), 7000, "lastOperatorActivityTimestamp should be 7000");
+    }
+}
+
+// ──────────────────────────────────────────────
+// FR-5IDE, FR-5IDF: fuzz tests over both search directions
+// What: Random start ticks and moves, with a plant far outside the fuzz
+//       window or no plant at all, in both directions and in both extreme
+//       words, and a plant inside the target's word whose crossing count the
+//       test computes. Every precondition of VaultStorage.setCurrentTick
+//       holds: the start tick and the target never fall inside a planted
+//       range, so no position is in range at either tick.
+// Why:  The scenarios pin exact values. The fuzz tests prove the search
+//       terminates and reports the right result across the whole scale.
+//       They assert success and crossing counts, not gas: the gas ceiling
+//       lives in test/invariants/TickState.t.sol.
+// ──────────────────────────────────────────────
+contract BoundedTickSearchFuzzTest is BoundedTickSearchTestBase {
+    /// @dev The ticks of bitmap word 32767, the highest.
+    int24 constant HIGHEST_WORD_FIRST_TICK = 8388352;
+    int24 constant HIGHEST_WORD_LAST_TICK = 8388607;
+    /// @dev The ticks of bitmap word -32768, the lowest.
+    int24 constant LOWEST_WORD_FIRST_TICK = -8388608;
+    int24 constant LOWEST_WORD_LAST_TICK = -8388353;
+
+    // FR-5IDE: an upward move past empty words completes with zero crossings
+    // whatever sits in the highest word. Start in [-8,000,000, 7,999,999], move
+    // in [1, 200,000], target clamped to 8,000,000; the plant at
+    // [8388590, 8388600) is outside the window.
+    function testFuzz_upwardMoveCompletesPastEmptyWords(int256 startSeed, uint256 moveSeed) public {
+        _plant(int24(8388590), int24(8388600), 1000);
+        int24 start = int24(bound(startSeed, -8_000_000, 7_999_999));
+        int256 targetWide = int256(start) + int256(bound(moveSeed, 1, 200_000));
+        int24 target = int24(targetWide > 8_000_000 ? int256(8_000_000) : targetWide);
+        _setCurrentTick(start);
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(start, target, 0);
+
+        _move(target);
+
+        assertEq(vault.currentTick(), target, "currentTick should equal the target");
+        assertEq(vault.activeLiquidity(), 0, "activeLiquidity must stay 0");
+    }
+
+    // FR-5IDE: a downward move past empty words completes with zero crossings
+    // whatever sits in the lowest word. Start in [-7,999,999, 8,000,000], move
+    // in [1, 200,000], target clamped to -8,000,000; the plant at
+    // [-8388600, -8388590) is outside the window.
+    function testFuzz_downwardMoveCompletesPastEmptyWords(int256 startSeed, uint256 moveSeed) public {
+        _plant(int24(-8388600), int24(-8388590), 1000);
+        int24 start = int24(bound(startSeed, -7_999_999, 8_000_000));
+        int256 targetWide = int256(start) - int256(bound(moveSeed, 1, 200_000));
+        int24 target = int24(targetWide < -8_000_000 ? int256(-8_000_000) : targetWide);
+        _setCurrentTick(start);
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(start, target, 0);
+
+        _move(target);
+
+        assertEq(vault.currentTick(), target, "currentTick should equal the target");
+        assertEq(vault.activeLiquidity(), 0, "activeLiquidity must stay 0");
+    }
+
+    // FR-5IDF: every move inside the highest word completes, in both directions.
+    // No plant, so the search reaches the extreme word and must stop there.
+    function testFuzz_movesInsideHighestWordComplete(int256 startSeed, int256 targetSeed) public {
+        int24 start = int24(bound(startSeed, HIGHEST_WORD_FIRST_TICK, HIGHEST_WORD_LAST_TICK));
+        int24 target = int24(bound(targetSeed, HIGHEST_WORD_FIRST_TICK, HIGHEST_WORD_LAST_TICK));
+        vm.assume(start != target);
+        _setCurrentTick(start);
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(start, target, 0);
+
+        _move(target);
+
+        assertEq(vault.currentTick(), target, "currentTick should equal the target");
+    }
+
+    // FR-5IDF: every move inside the lowest word completes, in both directions.
+    function testFuzz_movesInsideLowestWordComplete(int256 startSeed, int256 targetSeed) public {
+        int24 start = int24(bound(startSeed, LOWEST_WORD_FIRST_TICK, LOWEST_WORD_LAST_TICK));
+        int24 target = int24(bound(targetSeed, LOWEST_WORD_FIRST_TICK, LOWEST_WORD_LAST_TICK));
+        vm.assume(start != target);
+        _setCurrentTick(start);
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(start, target, 0);
+
+        _move(target);
+
+        assertEq(vault.currentTick(), target, "currentTick should equal the target");
+    }
+
+    // FR-5IDE: a tick inside the target's own word is crossed exactly when the
+    // target reaches it. One plant at [L, L + 10) with L a multiple of 10 in
+    // [1000, 5000], liquidity 1000 * 1e18 / 10 = 100e18. The start L - 300 is
+    // below the plant, so the plant is out of range when the start is written.
+    // The target ranges over the whole word of L, which is always above the
+    // start, so the crossing count is 0 below L, 1 inside [L, L + 10), and 2
+    // at or above L + 10.
+    function testFuzz_tickInsideTargetWordIsCrossed(uint256 lowerSeed, int256 targetSeed) public {
+        int24 lower = int24(int256(bound(lowerSeed, 100, 500) * 10));
+        int24 upper = lower + 10;
+        _plant(lower, upper, 1000);
+        int24 start = lower - 300;
+        _setCurrentTick(start);
+
+        int24 wordFirstTick = (lower >> 8) << 8;
+        int24 target = int24(bound(targetSeed, wordFirstTick, wordFirstTick + 255));
+        assertGt(target, start, "precondition: the target is above the start");
+
+        uint256 expectedCrossings = (target >= lower ? 1 : 0) + (target >= upper ? 1 : 0);
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(start, target, expectedCrossings);
+
+        _move(target);
+
+        assertEq(vault.currentTick(), target, "currentTick should equal the target");
+        assertEq(
+            vault.activeLiquidity(),
+            expectedCrossings == 1 ? 100e18 : 0,
+            "activeLiquidity holds the plant exactly while the target is inside its range"
+        );
+    }
+
+    // FR-5IDE: the downward mirror. The start L + 300 is above the plant, at
+    // least one word above L, so the search must step down into a lower word
+    // to find the plant. Moving down crosses a tick t when target < t <= start,
+    // so the count is 0 at or above L + 10, 1 inside [L, L + 10), and 2 below L.
+    function testFuzz_tickInsideTargetWordIsCrossedDownward(uint256 lowerSeed, int256 targetSeed) public {
+        int24 lower = int24(int256(bound(lowerSeed, 100, 500) * 10));
+        int24 upper = lower + 10;
+        _plant(lower, upper, 1000);
+        int24 start = lower + 300;
+        _setCurrentTick(start);
+
+        int24 wordFirstTick = (lower >> 8) << 8;
+        int24 target = int24(bound(targetSeed, wordFirstTick, wordFirstTick + 255));
+        assertLt(target, start, "precondition: the target is below the start");
+
+        uint256 expectedCrossings = (target < upper ? 1 : 0) + (target < lower ? 1 : 0);
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(start, target, expectedCrossings);
+
+        _move(target);
+
+        assertEq(vault.currentTick(), target, "currentTick should equal the target");
+        assertEq(
+            vault.activeLiquidity(),
+            expectedCrossings == 1 ? 100e18 : 0,
+            "activeLiquidity holds the plant exactly while the target is inside its range"
+        );
     }
 }
