@@ -3,7 +3,7 @@ id: UC-JGEE
 name: Start Wind Down
 feature: FEAT-JGE7
 status: implemented
-version: 3
+version: 4
 actor: Oracle
 ---
 
@@ -131,19 +131,20 @@ Oracle calls `startWindDown()` on the vault.
 - LP has an existing position with accumulated fees
 
 **Steps:**
-1. LP calls `collect(positionId)` on the vault
-2. System computes owed fees and transfers USDC to LP
-3. LP calls `burnPosition(positionId)` on the vault
-4. System removes position liquidity and returns capital to LP
+1. The LP's Safe calls `collect(positionId)` on the vault
+2. The vault merges any pairs, computes the fees owed, and transfers USDC to the Safe
+3. The Safe calls `burnPosition(positionId)` on the vault
+4. The vault removes the position's liquidity from both ticks, deletes the position, merges any pairs, and pays the Safe the claim's USDC plus its one outcome token
 
 **Outcomes:**
-- Fees collected and position burned successfully -- same behavior as Active phase
-- LP receives owed USDC
+- Fees collected and the position burned, the same as in Active phase
+- The Safe receives the USDC and any token
 
 **Side Effects:**
 - Position `tokensOwed` zeroed after collect
-- Position liquidity removed from tick state after burn
-- USDC transferred to LP
+- Position liquidity removed from tick state after burn, and `activeLiquidity` reduced by it
+- The position record is deleted after the burn
+- USDC transferred to the Safe
 - `reclaimDeposit(intentId)` and `reclaimDepositFor` also succeed in WindDown, and `depositForIntent` reverts `VaultNotActive` (no new escrow after the wind-down)
 - No new positions created
 

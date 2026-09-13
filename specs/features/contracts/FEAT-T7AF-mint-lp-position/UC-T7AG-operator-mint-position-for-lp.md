@@ -3,7 +3,7 @@ id: UC-T7AG
 name: Operator Mint Position for LP
 feature: FEAT-T7AF
 status: implemented
-version: 5
+version: 6
 actor: Operator
 ---
 
@@ -202,17 +202,20 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 
 ---
 
-### SC-T7AK: Inverted range revert
+### SC-T7AK: Inverted or out-of-scale range revert
 
 **Given:**
-- The Operator calls `mintPositionFor` with tickLower = 80, tickUpper = 20
+- Case A: the Operator calls `mintPositionFor` with tickLower = 80, tickUpper = 20
+- Case B: tickLower = −10, tickUpper = 20
+- Case C: tickLower = 9990, tickUpper = 10010
 
 **Steps:**
 1. Operator submits the mint call
-2. System detects tickLower (80) >= tickUpper (20)
+2. System detects tickLower (80) >= tickUpper (20), or a tick outside the price scale [0, 10000]
 
 **Outcomes:**
-- Call reverts with InvalidRange error
+- Call reverts with InvalidRange error in every case
+- Every level of an accepted range has a price `tick / 10000`
 
 **Side Effects:**
 - No state changes

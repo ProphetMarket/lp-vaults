@@ -13,9 +13,15 @@
 
 **Use Case** -- A single interaction scenario within a feature, with defined preconditions, steps, and postconditions.
 
-**Actor** -- A role that interacts with the system: LP, Operator, Oracle, Admin, Keeper, or Factory Owner.
+**Actor** -- A role that interacts with the system: LP, Operator, Oracle, Admin, Keeper, Factory Owner, or Any Wallet.
 
-**Tick** -- A discrete price slot in the order book. The prediction market price space [0, 1] is divided into ticks at the vault's `tickSpacing` granularity (e.g., 1000 ticks at 0.001 spacing). Ticks are the unit of the fee accumulator system.
+**Tick** -- A discrete price slot in the order book. One tick is one basis point: the price of tick t is t / 10000, the exchange's own unit, and every position range lies inside [0, 10000] (`PRICE_TICK_ONE`). The vault's `tickSpacing` sets the width of a level, the slot the keeper posts one order for. Ticks are the unit of the fee accumulator system, and `currentTick` may be reported outside the scale, where no position exists.
+
+**Level** -- One tick-spacing-wide slot inside a position's range. The keeper posts one order per level. Under the claim model a level starts as USDC, buys YES when the price falls through it and it sits below the position's mint tick, buys NO when the price rises through it and it sits at or above the mint tick, and returns to USDC through a pair when the price crosses it back.
+
+**Claim** -- What a position holds under decision C26: USDC for its unfilled levels and for the part of each filled level that a fill did not spend, one outcome token for the band between its mint tick and the current tick, and its share of the spread. Valued by `_claim` in FEAT-7G40.
+
+**Complete set (pair)** -- One YES token plus one NO token of the vault's condition. The Conditional Tokens contract turns a pair into 1 USDC at any time through `mergePositions`, so a pair is worth exactly its USDC value. An outcome token has USDC's six decimals: 90 tokens are 90,000,000 units.
 
 **Tick bitmap** -- The vault's record of which ticks are initialized: `tickBitmap[int16 word] => uint256`, one bit per tick, bit `n` of word `w` set when tick `w × 256 + n` has liquidity. `updateTick` reads it to find the next initialized tick without walking every tick.
 
@@ -48,3 +54,7 @@
 **Deadline** -- The last `block.timestamp` at which a signed LP message is valid.
 
 **Reclaim intent** -- An EIP-712 message that the owner key signs to have the Operator relay a reclaim: the Safe, the `intentId`, and a deadline.
+
+**Burn intent** -- An EIP-712 message that the owner key signs to have the Operator relay a burn: the Safe, the `positionId`, and a deadline.
+
+**Collect intent** -- An EIP-712 message that the owner key signs to have the Operator relay a collect: the Safe, the `positionId`, a `nonce` (because a collect repeats), and a deadline.

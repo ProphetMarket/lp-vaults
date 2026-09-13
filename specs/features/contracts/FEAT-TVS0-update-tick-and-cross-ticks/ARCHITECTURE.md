@@ -70,6 +70,7 @@ erDiagram
 - `currentTick` is updated atomically with all tick crossings — partial crossing state is never observable
 - `lastOperatorActivityTimestamp` is monotonically non-decreasing
 - The number of initialized ticks crossed in a single call never exceeds 256
+- A tick's bitmap bit is set if and only if `ticks[t].liquidityGross > 0`; a burn that takes `liquidityGross` to zero clears the bit through `_clearTickBitmapBit` (FEAT-7G40 FR-7G4P, `invariant_zeroLiquidityTickHasNoBit` in `test/invariants/TickState.t.sol`)
 
 ## Component Inventory
 

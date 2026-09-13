@@ -1,0 +1,5 @@
+TODO:
+
+DONE:
+- 20260913T210551 [implemented] command:spec plan:20260913T210232-lp-exit-claim-model-merge-r9 — Reused the E3 use case (a0f3349) for audit-fix step R9, with one change: the merge works in every phase, because decision C9 keeps every exit open after a freeze and every payout merges pairs first. SC-6HCB gains the Cancelled phase as a third case, and SC-6HCC becomes "Merge works after an emergency cancel". The redemption use case (UC-6HBP) keeps its reserved IDs for Part 6 and is not in this tree. Source: exploration 20260913T154424-lp-exit-claim-model-merge-r9.
+- 20260911T022739 [implemented] command:spec plan:20260911T022346-outcome-token-identity-merge-redeem — Added the use case: any wallet merges the vault's matched YES and NO tokens into USDC through the ConditionalTokens contract (audit-fix plan step E3). Scenarios SC-6HC9, SC-6HCA, SC-6HCB, and SC-6HCC, requirements FR-6HBZ, FR-6HC0, FR-6HC1, FR-6HC2, and NFR-6HC3, and decision records ADR-6HCJ, ADR-6HCL, and ADR-6HCM. Source: exploration 20260910T223834-outcome-token-identity-merge-redeem.

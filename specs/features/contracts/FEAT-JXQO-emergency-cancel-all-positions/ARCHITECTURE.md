@@ -3,7 +3,7 @@ id: FEAT-JXQO
 name: Emergency Cancel All Positions
 use_cases: [UC-JXQW]
 scenarios: [SC-JXQX, SC-JXQY, SC-JXQZ, SC-JXR0, SC-JXR1, SC-JXR2, SC-3XTZ, SC-3XU0, SC-3XU1, SC-3XUO, SC-3XU2]
-last_update: 2026-09-12
+last_update: 2026-09-13
 ---
 
 # Architecture: Emergency Cancel All Positions
@@ -62,7 +62,7 @@ erDiagram
 
 **Invariants:**
 - `phase` transitions from Active(1) or WindDown(2) to Cancelled(3) -- never reverses
-- Once `phase == 3`, every external state-changing function reverts
+- Once `phase == 3`, every trading entry point reverts; every LP exit and the complete-set merge succeed
 - `EMERGENCY_CANCEL_TIMELOCK` is a constant (immutable after deployment)
 - `lastOperatorActivityTimestamp` increases monotonically (reset = set to current block.timestamp)
 - After `emergencyCancelAll()`, `activeLiquidity == 0` and every position has `liquidity == 0`
@@ -119,7 +119,7 @@ stateDiagram-v2
     s1 --> s3 : emergencyCancelAll() after silence timelock
     s2 --> s3 : emergencyCancelAll() after silence timelock
     note right of s3 : Terminal state
-    note right of s3 : All operations revert
+    note right of s3 : Trading reverts; exits stay open
 ```
 
 ## Code Map

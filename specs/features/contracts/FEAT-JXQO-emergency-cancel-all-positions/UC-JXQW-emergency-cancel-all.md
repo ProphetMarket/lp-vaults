@@ -3,7 +3,7 @@ id: UC-JXQW
 name: Emergency Cancel All
 feature: FEAT-JXQO
 status: implemented
-version: 4
+version: 5
 actor: LP
 ---
 
@@ -120,27 +120,31 @@ The silence timer this use case reads is refreshed by every successful Operator-
 
 ---
 
-### SC-JXR1: Terminal state gates off all operations
+### SC-JXR1: Terminal state gates off trading, and every exit stays open
 
 **Given:**
 - Vault phase is Cancelled (3) after a successful `emergencyCancelAll()`
+- The vault holds 10 YES and 10 NO
 
 **Steps:**
 1. Operator calls `mintPositionFor(...)` -- reverts
-2. LP calls `collect(positionId)` -- reverts
+2. LP's Safe calls `collect(positionId)` -- succeeds and pays zero, because the cancel zeroed the position
 3. Operator calls `notifyFees(amount)` -- reverts
 4. Operator calls `updateTick(newTick)` -- reverts
 5. Operator calls `mergePositions(...)` -- reverts
 6. Operator calls `heartbeat()` -- reverts
 7. Oracle calls `startWindDown()` -- reverts
 8. Position holder calls `emergencyCancelAll()` again -- reverts
+9. Any wallet calls `mergeCompleteSets()` -- succeeds and merges the 10 pairs
 
 **Outcomes:**
-- All calls revert with phase error
+- Every trading call reverts with the phase error
+- The collect and the merge succeed
 
 **Side Effects:**
-- No state change
-- No events emitted
+- No state change from the trading calls, and no event from them
+- `CompleteSetsMerged(caller, 10)` emitted by the merge; the vault gains 10 USDC
+- No `FeesCollected` event from the zero-paying collect
 
 ---
 

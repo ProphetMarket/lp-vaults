@@ -4,7 +4,7 @@ name: Escrow Deposit for Mint Intent
 module: contracts
 domain: "@positions"
 status: implemented
-version: 1
+version: 2
 refs: [FEAT-REPZ, FEAT-T7AF, FEAT-JAIJ]
 ---
 
@@ -61,8 +61,8 @@ Linked to: UC-3Z92
 Fit Criterion: Given `deadline = T`, a call at `block.timestamp = T + 1` reverts with `IntentExpired`, and a call at `block.timestamp = T` succeeds. The deadline applies once, at the deposit; the mint reads no clock (FEAT-T7AF FR-3Z9W). The check tolerates Polygon's ±15 second block timestamp variance, which the NatSpec documents.
 Linked to: UC-3Z92
 
-**FR-9OYL** `If tickLower >= tickUpper, or either tick is not a multiple of tickSpacing, then depositForIntent shall revert.`
-Fit Criterion: Given an inverted range, the call reverts with `InvalidRange`. Given a misaligned tick, the call reverts with `TickNotAligned`. No USDC moves. The vault never takes USDC for an intent that the mint always rejects.
+**FR-9OYL** `If tickLower >= tickUpper, or either tick is not a multiple of tickSpacing, or tickLower < 0, or tickUpper > PRICE_TICK_ONE, then depositForIntent shall revert.`
+Fit Criterion: Given an inverted range or a range outside [0, 10000], the call reverts with `InvalidRange`. Given a misaligned tick, the call reverts with `TickNotAligned`. No USDC moves. The vault never takes USDC for an intent that the mint always rejects (ADR-BMF7 in FEAT-T7AF).
 Linked to: UC-3Z92
 
 ### Escrow Accounting

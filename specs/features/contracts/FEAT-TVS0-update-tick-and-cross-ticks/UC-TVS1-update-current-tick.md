@@ -3,7 +3,7 @@ id: UC-TVS1
 name: Update Current Tick
 feature: FEAT-TVS0
 status: implemented
-version: 4
+version: 5
 actor: Operator
 ---
 
@@ -193,7 +193,7 @@ The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the 
 
 **Given:**
 - currentTick = 100
-- A single position at [8388590, 8388600), minted with 1000 USDC, so ticks 8388590 and 8388600 are initialized in bitmap word 32767
+- Ticks 8388590 and 8388600 are initialized in bitmap word 32767, planted in storage (`liquidityGross = 1` and the bitmap bit) because a mint is bounded to the price scale [0, 10000] (FEAT-T7AF FR-T7B2)
 - No initialized ticks between 100 and 300
 
 **Steps:**
@@ -221,7 +221,7 @@ The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the 
 
 **Given:**
 - currentTick = 300
-- A single position at [-8388600, -8388590), minted with 1000 USDC, so ticks -8388600 and -8388590 are initialized in bitmap word -32768
+- Ticks -8388600 and -8388590 are initialized in bitmap word -32768, planted in storage (`liquidityGross = 1` and the bitmap bit) because a mint is bounded to the price scale [0, 10000] (FEAT-T7AF FR-T7B2)
 - No initialized ticks between 100 and 300
 
 **Steps:**

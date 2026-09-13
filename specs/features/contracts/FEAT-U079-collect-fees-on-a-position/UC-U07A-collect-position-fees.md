@@ -3,7 +3,7 @@ id: UC-U07A
 name: Collect Position Fees
 feature: FEAT-U079
 status: implemented
-version: 2
+version: 3
 actor: LP
 ---
 
@@ -13,13 +13,13 @@ actor: LP
 
 ## Preconditions
 
-- Vault is initialized and in Active or WindDown phase
-- LP has an existing position with a valid positionId
+- Vault is initialized, in any phase
+- LP's Safe has an existing position with a valid positionId
 - The vault's fee accumulators (feeGrowthGlobalX128, per-tick feeGrowthOutsideX128) reflect the current fee state
 
 ## Trigger
 
-LP calls `collect(positionId)`.
+The LP's Safe calls `collect(positionId)`.
 
 ---
 
@@ -203,5 +203,75 @@ LP calls `collect(positionId)`.
 - `FeesCollected(P3, owner, owed)` event emitted
 - Position storage: `feeGrowthInsideLastX128` updated
 - USDC balance: vault decreases by `owed`, LP increases by `owed`
+
+---
+
+### SC-BMFD: Collect in the Cancelled phase does not revert
+
+**Given:**
+- A position holder called `emergencyCancelAll` after the timelock, so the vault phase is Cancelled (3) and every position's liquidity and `tokensOwed` are zero
+- The Safe owns one of those positions
+
+**Steps:**
+1. The Safe calls collect(positionId)
+2. System applies no phase check and verifies the caller is position.owner
+3. System computes owed = 0 from the zeroed record
+
+**Outcomes:**
+- Transaction succeeds without revert
+- LP receives no USDC, because at this step the cancel paid the position; after R10 the cancel is a freeze and the collect pays the fees
+
+**Side Effects:**
+- No USDC transfer
+- No FeesCollected event emitted
+- No phase change
+
+---
+
+### SC-BMFE: Collect merges the vault's pairs first
+
+**Given:**
+- The Safe's in-range position has accrued F > 0 in fees
+- The vault holds 50 YES and 50 NO from earlier round trips
+
+**Steps:**
+1. The Safe calls collect(positionId)
+2. System computes owed = F and reads both token balances
+3. System writes the snapshot, then merges the 50 pairs through the ConditionalTokens contract
+4. System transfers F USDC to the Safe
+
+**Outcomes:**
+- The vault holds 0 YES and 0 NO after the call
+- LP receives F in USDC
+
+**Side Effects:**
+- `CompleteSetsMerged(safe, 50)` emitted before `FeesCollected(positionId, safe, F)` in the log
+- `PositionsMerge` emitted by ConditionalTokens
+- USDC balance: vault gains 50 from the merge and pays F
+
+---
+
+### SC-BMFF: Collect keeps its unpaid remainder
+
+**Given:**
+- The Safe's position is owed 10 USDC in fees
+- Case A: the vault holds 4 USDC above `totalEscrowed`
+- Case B: the vault's USDC balance is below `totalEscrowed`
+
+**Steps:**
+1. The Safe calls collect(positionId)
+2. System computes owed = 10 and available = 4 (case A) or 0 (case B)
+3. System writes the snapshot and stores the remainder in tokensOwed
+4. System transfers the paid amount, when it is above zero
+
+**Outcomes:**
+- Case A: LP receives 4 USDC, `tokensOwed == 6`, and a later collect after the vault gains 6 USDC pays 6
+- Case B: LP receives nothing, the call does not revert, and `tokensOwed == 10`
+- The call never reverts on the comparison, and escrowed USDC is never paid (decision C7)
+
+**Side Effects:**
+- Case A: `FeesCollected(positionId, safe, 4)` emitted; position storage: `tokensOwed = 6`, `feeGrowthInsideLastX128` updated
+- Case B: no `FeesCollected` event, no USDC transfer; position storage: `tokensOwed = 10`, `feeGrowthInsideLastX128` updated
+- `totalEscrowed` unchanged
 
 ---

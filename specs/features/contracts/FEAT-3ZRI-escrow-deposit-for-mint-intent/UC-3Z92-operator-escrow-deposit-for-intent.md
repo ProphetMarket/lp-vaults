@@ -3,7 +3,7 @@ id: UC-3Z92
 name: Operator Escrow Deposit for Intent
 feature: FEAT-3ZRI
 status: implemented
-version: 1
+version: 2
 actor: Operator
 ---
 
@@ -257,18 +257,18 @@ Operator calls `depositForIntent(lp, tickLower, tickUpper, usdcAmount, intentId,
 
 ---
 
-### SC-9OYA: Revert on an inverted or misaligned range
+### SC-9OYA: Revert on an inverted, out-of-scale, or misaligned range
 
 **Given:**
 - Vault with tickSpacing = 10
-- The owner key signed a MintIntent with tickLower >= tickUpper, OR with a tick that is not a multiple of 10
+- The owner key signed a MintIntent with tickLower >= tickUpper, OR with tickLower < 0 or tickUpper > 10000, OR with a tick that is not a multiple of 10
 
 **Steps:**
 1. Operator submits the signed intent to `depositForIntent`
-2. System detects the inverted range, or the misaligned tick
+2. System detects the inverted range, the tick outside the price scale, or the misaligned tick
 
 **Outcomes:**
-- Call reverts with InvalidRange error for the inverted range, and with TickNotAligned error for the misaligned tick
+- Call reverts with InvalidRange error for the inverted range and for the range outside [0, 10000], and with TickNotAligned error for the misaligned tick
 - The vault never takes USDC it can only refund
 
 **Side Effects:**

@@ -4,7 +4,7 @@ name: Emergency Cancel All Positions
 module: contracts
 domain: "@vault"
 status: implemented
-version: 4
+version: 5
 refs: [FEAT-REPZ, FEAT-JGE7, FEAT-TVS0]
 ---
 
@@ -61,8 +61,8 @@ Linked to: UC-JXQW
 
 ### Cancelled Phase Gating
 
-**FR-JXQT** `While the vault phase is Cancelled (3), when any address calls any state-changing function other than a deposit reclaim, the system shall revert.`
-Fit Criterion: Given `phase == 3`, calls to `mintPositionFor`, `depositForIntent`, `collect`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat`, `startWindDown`, and `emergencyCancelAll` all revert. `reclaimDeposit` and `reclaimDepositFor` succeed (FEAT-JAIJ FR-9OYO), so the Cancelled phase never locks a pending deposit.
+**FR-JXQT** `While the vault phase is Cancelled (3), when any address calls a trading entry point, the system shall revert; every LP exit and the complete-set merge succeed.`
+Fit Criterion: Given `phase == 3`, calls to `mintPositionFor`, `depositForIntent`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat`, `startWindDown`, and `emergencyCancelAll` all revert. `reclaimDeposit`, `reclaimDepositFor`, `collect`, `collectFor`, `burnPosition`, `burnPositionFor`, and `mergeCompleteSets` do not revert on the phase (FEAT-JAIJ FR-9OYO, FEAT-U079 FR-U07O, FEAT-7G40 FR-7G4V, FEAT-6HBN FR-6HC1). At this step the cancel still zeroes every position, so a burn of a cancelled position reverts `PositionNotFound` and a collect pays zero; R10 makes the cancel a freeze, after which both pay in full. Decision C9.
 Linked to: UC-JXQW
 
 ## Non-Functional Requirements

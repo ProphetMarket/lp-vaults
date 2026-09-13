@@ -4,7 +4,7 @@ name: Vault Wind-Down Lifecycle
 module: contracts
 domain: "@vault"
 status: implemented
-version: 3
+version: 4
 refs: [FEAT-REPZ, FEAT-T7AF]
 ---
 
@@ -47,8 +47,8 @@ Linked to: UC-JGEE
 Fit Criterion: Given a vault in WindDown phase, `depositForIntent(...)` and `mintPositionFor(...)` both revert with `VaultNotActive` regardless of caller authorization, and an escrow made before the wind-down stays reclaimable (FR-JGEC).
 Linked to: UC-JGEE
 
-**FR-JGEC** `While the vault phase is WindDown, when the position owner calls burnPosition, collect, or reclaimDeposit, the system shall succeed as in Active phase.`
-Fit Criterion: Given a vault in WindDown phase with an existing position and an escrow, `burnPosition(posId)`, `collect(posId)`, `reclaimDeposit(intentId)`, and `reclaimDepositFor(...)` succeed with the same behavior as Active phase.
+**FR-JGEC** `While the vault phase is WindDown, when the position owner calls burnPosition, collect, or reclaimDeposit, or the Operator relays burnPositionFor, collectFor, or reclaimDepositFor, the system shall succeed as in Active phase.`
+Fit Criterion: Given a vault in WindDown phase with an existing position and an escrow, `burnPosition(posId)`, `collect(posId)`, `reclaimDeposit(intentId)`, `burnPositionFor(...)`, `collectFor(...)`, and `reclaimDepositFor(...)` succeed with the same behavior as Active phase. The burn pays the claim's USDC plus its one outcome token (FEAT-7G40 FR-7G4V).
 Linked to: UC-JGEE
 
 ## Non-Functional Requirements

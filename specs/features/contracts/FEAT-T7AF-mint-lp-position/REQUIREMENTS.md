@@ -4,7 +4,7 @@ name: Mint LP Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 4
+version: 5
 refs: [FEAT-REPZ, FEAT-3ZRI, FEAT-JAIJ]
 ---
 
@@ -104,8 +104,8 @@ Linked to: UC-T7AG
 
 ### Validation
 
-**FR-T7B2** `If tickLower >= tickUpper in a mint intent, then the system shall revert.`
-Fit Criterion: Given tickLower = 80 and tickUpper = 20, the call reverts with an InvalidRange error.
+**FR-T7B2** `If tickLower >= tickUpper, or tickLower < 0, or tickUpper > PRICE_TICK_ONE (10000) in a mint intent, then the system shall revert.`
+Fit Criterion: Given tickLower = 80 and tickUpper = 20, or tickLower = −10 and tickUpper = 20, or tickLower = 9990 and tickUpper = 10010, the call reverts with an `InvalidRange` error. Every level of an accepted range has a price `tick / 10000`, so the claim formula of FEAT-7G40 can value it (ADR-BMF7).
 Linked to: UC-T7AG
 
 **FR-T7B3** `If tickLower or tickUpper is not evenly divisible by the vault's tickSpacing, then the system shall revert.`
