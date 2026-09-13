@@ -496,7 +496,7 @@ function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentr
 
 **Actor:** Operator
 
-Synchronises the vault's price tick with the off-chain CLOB mid-price. Crosses every initialised tick between `currentTick` and `newTick`, flipping per-tick fee accumulators and adjusting `activeLiquidity`. A call with the current tick refreshes only `lastOperatorActivityTimestamp` and returns: no crossing, no bitmap read, no event. The keeper reports every 60 seconds and after fills, so this is the normal case.
+Synchronises the vault's price tick with the off-chain CLOB mid-price. Crosses every initialised tick between `currentTick` and `newTick`, flipping per-tick fee accumulators and adjusting `activeLiquidity`. The search for the next initialised tick reads only the bitmap words between `currentTick` and `newTick`, so the cost of a call follows the reported move and not where any LP initialised a tick. A call with the current tick refreshes only `lastOperatorActivityTimestamp` and returns: no crossing, no bitmap read, no event. The keeper reports every 60 seconds and after fills, so this is the normal case.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
