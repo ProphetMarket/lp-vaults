@@ -29,6 +29,8 @@ pragma solidity 0.8.20;
 // FEAT-6HBN: Complete-Set Merge and Resolution Redemption
 // UC-6HBO: Merge Complete Sets
 // UC-BMF8: Operator Collect Fees for LP
+// FEAT-9BQZ: Vault Solvency Ledger
+// UC-9BR0: Maintain Solvency Totals, UC-9BR1: Accumulate Principal Shift, UC-9BR2: Apply Payout Ratios
 
 /// @dev Minimal ERC-20 interface — approve for the exchange setup, balanceOf for the payout rule.
 interface IERC20 {
@@ -174,6 +176,12 @@ contract LPVault {
     /// @dev Current tick for the vault's market price
     int24 public currentTick;
 
+    /// @dev The liquidity of the in-range positions whose mint tick is at or below currentTick:
+    ///      the NO side of the claim model (decision C26), booked the way activeLiquidity is
+    ///      (a per-tick noLiquidityNet that _crossTick applies). Declared right after currentTick
+    ///      so the two pack into one slot, which a move writes anyway (FEAT-9BQZ, ADR-COEW).
+    uint128 public noSideLiquidity;
+
     /// @dev Counter for minting new positions
     uint256 public nextPositionId;
 
@@ -207,6 +215,10 @@ contract LPVault {
         uint128 liquidityGross;
         int128 liquidityNet;
         uint256 feeGrowthOutsideX128;
+        // FEAT-9BQZ: the liquidityNet of the NO sub-ranges [mintTick, tickUpper) that reference
+        // this tick, +L at a position's mint tick and -L at its tickUpper (ADR-COEW). Third slot;
+        // deleted with the record.
+        int128 noLiquidityNet;
     }
 
     /// @dev positionId => Position record
@@ -254,10 +266,26 @@ contract LPVault {
     mapping(bytes32 => PendingDeposit) public pendingDeposits;
 
     /// @dev Sum of every pendingDeposits[*].amount (FR-9OYM). USDC.balanceOf(vault) is always
-    ///      at least this much with no exchange fill. A burn and a collect pay from
-    ///      balance - totalEscrowed (see _availableUsdc), so escrowed USDC never pays an exit
-    ///      (decision C7).
+    ///      at least this much with no exchange fill. The USDC ratio's numerator is
+    ///      balance + pairs - totalEscrowed (see _availableUsdc), so escrowed USDC never pays an
+    ///      exit (decision C7).
     uint256 public totalEscrowed;
+
+    // ──────────────────────────────────────────────
+    // Solvency ledger (FEAT-9BQZ)
+    // ──────────────────────────────────────────────
+
+    /// @dev Running totals of what the vault owes to its live positions, each held in the
+    ///      claim's pre-division unit so that a mint and its burn cancel exactly (FR-9BR3,
+    ///      FR-9BR4, ADR-COEN). Truncated only in the getters below.
+    ///      USDC principal, in USDC units x PRICE_TICK_ONE x LIQUIDITY_PRECISION (USDC_CLAIM_SCALE).
+    uint256 public totalUsdcOwedScaled;
+    /// @dev YES tokens, in token units x LIQUIDITY_PRECISION. Never netted against NO (FR-9BR5).
+    uint256 public totalYesOwedScaled;
+    /// @dev NO tokens, in token units x LIQUIDITY_PRECISION. Never netted against YES (FR-9BR5).
+    uint256 public totalNoOwedScaled;
+    /// @dev Fees, in USDC units x 2^128.
+    uint256 public totalFeesOwedX128;
 
     // ──────────────────────────────────────────────
     // TickBitmap (FEAT-TVS0)
@@ -316,6 +344,12 @@ contract LPVault {
     ///      inside [0, PRICE_TICK_ONE] (FR-T7B2, FR-9OYL, ADR-BMF7 in FEAT-T7AF); tickSpacing
     ///      sets the width of a level. currentTick itself is unbounded.
     int24 public constant PRICE_TICK_ONE = 10_000;
+
+    /// @dev The unit of the USDC principal total and of the scaled USDC claim: one USDC unit per
+    ///      token per level at price 1.00. The one place the PRICE_TICK_ONE cast is written.
+    ///      casting to uint256 is safe because PRICE_TICK_ONE is the positive constant 10,000
+    // forge-lint: disable-next-line(unsafe-typecast)
+    uint256 internal constant USDC_CLAIM_SCALE = uint256(int256(PRICE_TICK_ONE)) * LIQUIDITY_PRECISION;
 
     /// @dev Q128 = 2^128. Scaling factor for fee accumulator fixed-point math.
     uint256 internal constant Q128 = 1 << 128;
@@ -390,9 +424,10 @@ contract LPVault {
     // SC-TVS2 through SC-TVS4: emitted on every successful tick update
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
-    // SC-U07B, SC-U07F, SC-U07G, SC-BMFG: emitted by both collect paths when the paid amount is
-    // nonzero; `amount` is what was paid, which a short vault may leave below what was owed
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
+    // SC-U07B, SC-U07F, SC-U07G, SC-BMFG, SC-COEZ, SC-COET: emitted by both collect paths whenever
+    // the owed amount is nonzero; amountPaid is amountOwed times the USDC ratio, so a short vault
+    // shows as amountPaid < amountOwed, as PositionBurned does for a burn (decision O2)
+    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
 
     // SC-6HC9, SC-BMF1, SC-BMFE: emitted when pairs merge into USDC, by the public call and by a
     // burn or a collect that merged first; never on a zero merge
@@ -864,7 +899,9 @@ contract LPVault {
     ///      bounds the value to the position's range (FR-AFPO, ADR-AFPP). Under the claim model
     ///      (decision C26) the mint tick anchors which levels hold USDC and which hold outcome
     ///      tokens, so LPs must trust the Operator to report the tick it quoted from before it
-    ///      mints.
+    ///      mints. The reported tick before a mint also fixes which side of the solvency ledger
+    ///      the position enters on: an in-range mint enters on the NO side of its mint tick
+    ///      (FEAT-9BQZ).
     ///
     ///      MEV analysis: the mint tick is set from the vault's own currentTick, which only the
     ///      Operator moves, so no third party can front-run it. A stale or wrong report is
@@ -926,15 +963,12 @@ contract LPVault {
             revert BelowMinimumFirstLiquidity();
         }
 
-        // Initialize ticks if they haven't been used before (liquidityGross == 0)
-        _initializeTick(tickLower);
-        _initializeTick(tickUpper);
-
-        // Update tick state: liquidityGross tracks total references, liquidityNet
-        // tracks the directional delta applied when the tick is crossed
-        ticks[tickLower].liquidityGross += liquidity;
+        // Update tick state: liquidityGross tracks total references (and initializes the tick on
+        // the first one), liquidityNet tracks the directional delta applied when the tick is
+        // crossed (FR-T7AV)
+        _addTickReference(tickLower, liquidity);
         ticks[tickLower].liquidityNet += _toInt128(liquidity);
-        ticks[tickUpper].liquidityGross += liquidity;
+        _addTickReference(tickUpper, liquidity);
         ticks[tickUpper].liquidityNet -= _toInt128(liquidity);
 
         // Snapshot feeGrowthInside at mint time to prevent retroactive fee claims
@@ -959,10 +993,19 @@ contract LPVault {
             tokensOwed: 0
         });
 
-        // Update active liquidity if the position is in-range
+        // Update active liquidity if the position is in-range. An in-range mint has
+        // mintTick == currentTick, so it enters on the NO side (FEAT-9BQZ FR-A2ZS).
         if (tickLower <= currentTick && currentTick < tickUpper) {
             activeLiquidity += liquidity;
+            noSideLiquidity += liquidity;
         }
+
+        // The ledger: a mint's claim is USDC only, because the clamped mint tick leaves the band
+        // empty (FR-9BR8), and its NO sub-range is [mintTick, tickUpper) (ADR-COEW)
+        // casting to uint256 is safe because PRICE_TICK_ONE is the positive constant 10,000
+        // forge-lint: disable-next-line(unsafe-typecast)
+        totalUsdcOwedScaled += uint256(liquidity) * rangeWidth * uint256(int256(PRICE_TICK_ONE));
+        _addNoSubRange(tickLower, tickUpper, mintTick, liquidity);
 
         // No interaction: the USDC entered the vault at depositForIntent
 
@@ -980,7 +1023,7 @@ contract LPVault {
     ///      Active, WindDown, and Cancelled, so LPs have an unbounded claim window. The
     ///      feeGrowthInsideLastX128 snapshot prevents double-counting: each collect only pays
     ///      fees that grew since the previous collect (or since mint). The body is shared with
-    ///      collectFor; see _collect for the merge and the pay-what-is-there rule.
+    ///      collectFor; see _collect for the merge and the ratio.
     /// @param positionId The ID of the position to collect fees from
     function collect(uint256 positionId) external nonReentrant {
         // --- Checks ---
@@ -1050,10 +1093,12 @@ contract LPVault {
     }
 
     /// @dev One body for both collect entry points. Reads first (the fees, both token balances,
-    ///      the USDC balance, and the amount to pay), effects second (the snapshot and the
-    ///      remainder), interactions last (the merge, then the transfer), per NFR-U07R. The
-    ///      amount to pay is known before the merge because a merge pays exactly min(yes, no)
-    ///      USDC. A zero-owed collect reads no balance and merges nothing (FR-U07K).
+    ///      the USDC balance, the ledger totals, and the amount to pay), effects second (the
+    ///      snapshot, tokensOwed to zero, and the fee total's debit), interactions last (the
+    ///      merge, then the transfer), per NFR-U07R. The amount to pay is known before the merge
+    ///      because a merge pays exactly min(yes, no) USDC. A zero-owed collect reads no balance
+    ///      and merges nothing (FR-U07K). The claim settles at the ratio with no remainder: a cut
+    ///      is final, and the LP chose the moment (ADR-COEN in FEAT-9BQZ).
     function _collect(uint256 positionId, Position storage p) internal {
         // --- Reads ---
 
@@ -1070,41 +1115,45 @@ contract LPVault {
         // wrong delta both forms return a wrong number. The product stays in this
         // block and never goes through _mulDiv by convention, so every fee site
         // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
-        uint256 owed;
+        uint256 x;
         unchecked {
-            owed = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+            x = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128);
         }
 
-        // Include previously accumulated fees (rolled up from mergePositions, or the unpaid
-        // remainder of an earlier short collect)
-        owed += p.tokensOwed;
+        // The truncated fees, plus the fees a merge rolled up, and the scaled fee claim the
+        // ledger carries for this position (FEAT-9BQZ FR-9BRB). tokensOwed x Q128 is not a
+        // wraparound product, so it stays outside the block.
+        uint256 owed = x / Q128 + p.tokensOwed;
+        uint256 owedX128 = x + p.tokensOwed * Q128;
 
-        // Pay what is there (decision O2, FR-U07K): the smaller of what is owed and the USDC the
-        // vault holds above escrow, counting the pairs the merge below turns into USDC.
+        // Pro-rata (decision O2, FR-U07K): the owed amount times the USDC ratio of the solvency
+        // ledger, with the USDC the vault holds above escrow, counting the pairs the merge below
+        // turns into USDC, over the principal and the fees it owes (FR-9BRM), read before the debit.
         uint256 pairs;
         uint256 paid;
         if (owed > 0) {
             (uint256 yes, uint256 no) = _tokenBalances();
             pairs = yes < no ? yes : no;
-            uint256 available = _availableUsdc(pairs);
-            paid = owed < available ? owed : available;
+            paid = _prorate(owed, _availableUsdc(pairs), totalUsdcOwed() + totalFeesOwed());
         }
 
         // --- Effects ---
 
-        // Snapshot update: future collects start from here. The unpaid remainder waits in
-        // tokensOwed for a later collect, because the snapshot has already advanced.
+        // Snapshot update: future collects start from here. Nothing waits in tokensOwed: the
+        // claim is settled at the ratio, paid or not (FR-9BRR).
         p.feeGrowthInsideLastX128 = feeGrowthInsideX128;
-        p.tokensOwed = owed - paid;
+        p.tokensOwed = 0;
+
+        // The ledger settles the whole scaled fee claim, whatever was paid (FR-9BRB); an LP exit
+        // never reverts on a ledger write (NFR-9BRT)
+        totalFeesOwedX128 = _saturatingSub(totalFeesOwedX128, owedX128);
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
         _mergeCompleteSets(pairs);
 
-        if (paid > 0) {
-            _safeTransfer(usdc, p.owner, paid);
-            emit FeesCollected(positionId, p.owner, paid);
-        }
+        if (paid > 0) _safeTransfer(usdc, p.owner, paid);
+        if (owed > 0) emit FeesCollected(positionId, p.owner, owed, paid);
     }
 
     // ──────────────────────────────────────────────
@@ -1220,6 +1269,10 @@ contract LPVault {
         uint256 tokenOwed;
         uint256 tokenPaid;
         uint256 pairs;
+        // The same claim and fees in the ledger's pre-division unit (FEAT-9BQZ FR-9BR9, FR-9BRC)
+        uint256 usdcScaled;
+        uint256 tokenScaled;
+        uint256 feesX128;
     }
 
     /// @dev One body for both burn entry points (FR-7G4L). Order, per NFR-7G59 and CLAUDE.md
@@ -1236,19 +1289,38 @@ contract LPVault {
         address owner = p.owner;
         int24 tickLower = p.tickLower;
         int24 tickUpper = p.tickUpper;
+        int24 mintTick = p.mintTick;
         uint128 liquidity = p.liquidity;
         BurnAmounts memory a = _burnAmounts(p);
 
         // --- Effects ---
 
+        // The NO sub-range leaves first, so a boundary tick that deinitializes below already
+        // holds a zero noLiquidityNet (FR-7G4O, ADR-COEW)
+        _removeNoSubRange(tickLower, tickUpper, mintTick, liquidity);
+
         // Exact inverse of the mint deltas (FR-7G4O); a tick at zero is deinitialized (FR-7G4P)
         _removeLiquidityFromTick(tickLower, liquidity, true);
         _removeLiquidityFromTick(tickUpper, liquidity, false);
 
-        // Only an in-range position contributes to activeLiquidity (FR-7G4Q)
-        if (tickLower <= currentTick && currentTick < tickUpper) {
+        // Only an in-range position contributes to activeLiquidity (FR-7G4Q), and only one on
+        // the NO side of its mint tick to noSideLiquidity
+        int24 current = currentTick;
+        if (tickLower <= current && current < tickUpper) {
             activeLiquidity -= liquidity;
+            if (mintTick <= current) noSideLiquidity -= liquidity;
         }
+
+        // The ledger: debit the full scaled claim and fees, whatever the burn pays, so every
+        // later claimant meets the same ratio (FR-9BR9, FR-9BRC); an LP exit never reverts on a
+        // ledger write (NFR-9BRT)
+        totalUsdcOwedScaled = _saturatingSub(totalUsdcOwedScaled, a.usdcScaled);
+        if (a.tokenId == yesTokenId) {
+            totalYesOwedScaled = _saturatingSub(totalYesOwedScaled, a.tokenScaled);
+        } else if (a.tokenId != 0) {
+            totalNoOwedScaled = _saturatingSub(totalNoOwedScaled, a.tokenScaled);
+        }
+        totalFeesOwedX128 = _saturatingSub(totalFeesOwedX128, a.feesX128);
 
         // Delete the whole record (FR-7G4S). nextPositionId is untouched, so the id is retired,
         // never recycled (FR-7G4T): reuse would let a stale reference resolve to another LP's
@@ -1274,11 +1346,12 @@ contract LPVault {
         emit PositionBurned(positionId, owner, a.usdcOwed, a.feesOwed, a.usdcPaid, a.tokenId, a.tokenOwed, a.tokenPaid);
     }
 
-    /// @dev The fees, the claim, both token balances, the USDC balance, and the two amounts to
-    ///      pay, from view reads only. The amounts are computable before the merge because the
-    ///      ConditionalTokens contract pays exactly min(yes, no) USDC for a merge and burns that
-    ///      many of each token (NFR-7G59). Pay what is there (decision O2, FR-BMEZ): the smaller
-    ///      of what is owed and what the vault holds, per asset, and never a revert.
+    /// @dev The fees, the claim, both token balances, the USDC balance, the ledger totals, and
+    ///      the two amounts to pay, from view reads only. The amounts are computable before the
+    ///      merge because the ConditionalTokens contract pays exactly min(yes, no) USDC for a
+    ///      merge and burns that many of each token (NFR-7G59). Pro-rata (decision O2, FR-COEX):
+    ///      each owed amount times its asset's ratio, the smaller of 1 and held over the
+    ///      ledger's total, rounded down, and never a revert.
     function _burnAmounts(Position storage p) internal view returns (BurnAmounts memory a) {
         // Fees must be computed while both boundary ticks still hold their feeGrowthOutsideX128;
         // the effects in _burn may delete them.
@@ -1292,23 +1365,30 @@ contract LPVault {
         // block and never goes through _mulDiv by convention, so every fee site
         // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
         uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
+        uint256 x;
         unchecked {
-            a.feesOwed = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
+            x = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128);
         }
-        a.feesOwed += p.tokensOwed;
+        // The truncated fees plus the fees a merge rolled up, and the scaled fee claim the ledger
+        // carries (FR-9BRC). tokensOwed x Q128 is not a wraparound product, so it stays outside.
+        a.feesOwed = x / Q128 + p.tokensOwed;
+        a.feesX128 = x + p.tokensOwed * Q128;
 
-        (a.usdcOwed, a.tokenId, a.tokenOwed) = _claim(p.tickLower, p.tickUpper, p.mintTick, p.liquidity);
+        // One valuation for the payout and for the ledger debit: the scaled claim, truncated here
+        (a.usdcScaled, a.tokenId, a.tokenScaled) = _claim(p.tickLower, p.tickUpper, p.mintTick, p.liquidity);
+        a.usdcOwed = a.usdcScaled / USDC_CLAIM_SCALE;
+        a.tokenOwed = a.tokenScaled / LIQUIDITY_PRECISION;
 
         (uint256 yes, uint256 no) = _tokenBalances();
         a.pairs = yes < no ? yes : no;
 
-        uint256 usdcTotal = a.usdcOwed + a.feesOwed;
-        uint256 available = _availableUsdc(a.pairs);
-        a.usdcPaid = usdcTotal < available ? usdcTotal : available;
+        // The USDC ratio: principal and fees share it (ADR-9BSI), escrow stays out (FR-9BRM)
+        a.usdcPaid = _prorate(a.usdcOwed + a.feesOwed, _availableUsdc(a.pairs), totalUsdcOwed() + totalFeesOwed());
 
-        // The merge below consumes `pairs` of each token, so the band's token is what is left
+        // The merge below consumes `pairs` of each token, so the band's token is what is left;
+        // the band's ratio is independent of the USDC ratio (FR-9BRN to FR-9BRQ)
         uint256 held = (a.tokenId == yesTokenId ? yes : no) - a.pairs;
-        a.tokenPaid = a.tokenOwed < held ? a.tokenOwed : held;
+        a.tokenPaid = _prorate(a.tokenOwed, held, a.tokenId == yesTokenId ? totalYesOwed() : totalNoOwed());
     }
 
     /// @dev Values a claim under decision C26 (FR-7G4M, ADR-7G5F). Every level of the range holds
@@ -1320,26 +1400,27 @@ contract LPVault {
     ///      the USDC the band did not spend is an arithmetic series over its ticks, exact at price
     ///      0.0001 with no loop. band * (a + m - 1) is always even, so the halving is exact.
     ///      Every product stays under 2^156 (L < 2^128, width * ONE < 2^27), so none needs
-    ///      _mulDiv, and every division rounds down (decision C21).
+    ///      _mulDiv. The result is the claim in its pre-division unit: USDC scaled by
+    ///      USDC_CLAIM_SCALE and tokens by LIQUIDITY_PRECISION. The solvency ledger sums it as is
+    ///      (FEAT-9BQZ FR-9BR4), and _burnAmounts truncates it for the payout, rounding down
+    ///      (decision C21), so the ledger and the payout never value a claim twice.
     ///      A clamped mint tick (FR-AFPO) needs no special case: a mint below its range has an
     ///      empty YES side, and a mint above it has an empty NO side, which the band == 0 check
     ///      catches before the sum, where a + m - 1 would underflow at a = m = 0.
-    /// @return usdcOwed The USDC of the unfilled levels plus the unspent part of the band
+    /// @return usdcScaled The USDC of the unfilled levels plus the unspent part of the band, x USDC_CLAIM_SCALE
     /// @return tokenId yesTokenId below the mint tick, noTokenId above it, zero when the band is empty
-    /// @return tokenOwed One token per unit of liquidity per tick of the band
+    /// @return tokenScaled One token per unit of liquidity per tick of the band, x LIQUIDITY_PRECISION
     function _claim(int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity)
         internal
         view
-        returns (uint256 usdcOwed, uint256 tokenId, uint256 tokenOwed)
+        returns (uint256 usdcScaled, uint256 tokenId, uint256 tokenScaled)
     {
         int24 current = currentTick;
         uint256 l = liquidity;
         // casting to uint256 is safe because tickUpper > tickLower is validated at the mint
         // forge-lint: disable-next-line(unsafe-typecast)
         uint256 width = uint256(int256(tickUpper - tickLower));
-        // casting to uint256 is safe because PRICE_TICK_ONE is the positive constant 10,000
-        // forge-lint: disable-next-line(unsafe-typecast)
-        uint256 one = uint256(int256(PRICE_TICK_ONE));
+        uint256 one = USDC_CLAIM_SCALE / LIQUIDITY_PRECISION;
 
         if (current < mintTick) {
             // The YES band [a, m): the levels the price fell through
@@ -1349,11 +1430,11 @@ contract LPVault {
             uint256 band = uint256(int256(mintTick - a));
             if (band > 0) {
                 tokenId = yesTokenId;
-                tokenOwed = l * band / LIQUIDITY_PRECISION;
+                tokenScaled = l * band;
                 // forge-lint: disable-next-line(unsafe-typecast)
                 uint256 sumTicks = band * uint256(int256(a) + int256(mintTick) - 1) / 2;
-                usdcOwed = l * (width * one - sumTicks) / (one * LIQUIDITY_PRECISION);
-                return (usdcOwed, tokenId, tokenOwed);
+                usdcScaled = l * (width * one - sumTicks);
+                return (usdcScaled, tokenId, tokenScaled);
             }
         } else if (current > mintTick) {
             // The NO band [m, b): the levels the price rose through
@@ -1363,22 +1444,23 @@ contract LPVault {
             uint256 band = uint256(int256(b - mintTick));
             if (band > 0) {
                 tokenId = noTokenId;
-                tokenOwed = l * band / LIQUIDITY_PRECISION;
+                tokenScaled = l * band;
                 // forge-lint: disable-next-line(unsafe-typecast)
                 uint256 sumTicks = band * uint256(int256(mintTick) + int256(b) - 1) / 2;
-                usdcOwed = l * ((width - band) * one + sumTicks) / (one * LIQUIDITY_PRECISION);
-                return (usdcOwed, tokenId, tokenOwed);
+                usdcScaled = l * ((width - band) * one + sumTicks);
+                return (usdcScaled, tokenId, tokenScaled);
             }
         }
 
         // The price sits at the mint tick, or the clamped side is empty: every level is USDC
-        usdcOwed = l * width / LIQUIDITY_PRECISION;
+        usdcScaled = l * width * one;
     }
 
-    /// @dev The USDC a payout may draw on (decisions C6 and C7): the balance plus the pairs the
-    ///      merge is about to turn into USDC, less the escrow total, floored at zero. On chain a
-    ///      fill turns vault USDC into tokens (decision C8), so the balance can sit below
-    ///      totalEscrowed, and a checked subtraction would revert every exit.
+    /// @dev The USDC a payout may draw on, the USDC ratio's numerator (decisions C6 and C7,
+    ///      FEAT-9BQZ FR-9BRM): the balance plus the pairs the merge is about to turn into USDC,
+    ///      less the escrow total, floored at zero. On chain a fill turns vault USDC into tokens
+    ///      (decision C8), so the balance can sit below totalEscrowed, and a checked subtraction
+    ///      would revert every exit.
     function _availableUsdc(uint256 pairs) internal view returns (uint256) {
         uint256 held = IERC20(usdc).balanceOf(address(this)) + pairs;
         uint256 escrowed = totalEscrowed;
@@ -1396,17 +1478,13 @@ contract LPVault {
     function _removeLiquidityFromTick(int24 tick, uint128 liquidity, bool isLower) internal {
         TickInfo storage info = ticks[tick];
 
-        info.liquidityGross -= liquidity;
         if (isLower) {
             info.liquidityNet -= _toInt128(liquidity);
         } else {
             info.liquidityNet += _toInt128(liquidity);
         }
 
-        if (info.liquidityGross == 0) {
-            delete ticks[tick];
-            _clearTickBitmapBit(tick);
-        }
+        _removeTickReference(tick, liquidity);
     }
 
     // ──────────────────────────────────────────────
@@ -1515,7 +1593,9 @@ contract LPVault {
     ///      report at all, stays inside the trust model. Operational need: each Operator
     ///      wallet holds a standing USDC approval to each vault it reports to (see
     ///      DEPLOYMENT.md). No solvency assertion runs here (decision C6): the report is a
-    ///      receipt, not a gate. Decision C19, ADR-ASNR in FEAT-TOGR.
+    ///      receipt, not a gate. Decision C19, ADR-ASNR in FEAT-TOGR. Every report also raises
+    ///      the fee total that every payout's USDC ratio divides by (FEAT-9BQZ FR-9BRA), so an
+    ///      over-report lowers the ratio for everyone alike, never for one claimant.
     ///
     ///      Checks-effects-interactions (NFR-ASNN): the phase, amount, and liquidity checks
     ///      run first, the accumulator write second, and the USDC pull last, under the
@@ -1537,7 +1617,13 @@ contract LPVault {
         // mulDiv computes (amount * 2^128) / activeLiquidity with full intermediate
         // precision, truncating downward. The dust is economically negligible
         // (< 1/2^128 USDC per unit of liquidity per call).
-        feeGrowthGlobalX128 += _mulDiv(amount, Q128, uint256(activeL));
+        uint256 growth = _mulDiv(amount, Q128, uint256(activeL));
+        feeGrowthGlobalX128 += growth;
+
+        // The ledger: the in-range positions' fee claims grow by exactly growth x activeLiquidity,
+        // so the credit is exact and the mulDiv dust stays outside every total (FR-9BRA). The
+        // checked product bounds a report at 2^128 base units (NFR-COEV).
+        totalFeesOwedX128 += growth * uint256(activeL);
 
         // --- Interactions (external call last, per checks-effects-interactions) ---
 
@@ -1594,6 +1680,15 @@ contract LPVault {
     ///      where any LP initialized a tick. A large jump across empty words still reads one
     ///      word per 256 ticks, so the Operator chunks a very large jump as it chunks
     ///      crossings (ADR-TVUW).
+    ///      A reported tick also moves the four totals of the solvency ledger (FEAT-9BQZ,
+    ///      UC-9BR1) for every segment the move traverses, with the liquidity split as it stood
+    ///      in that segment, and an interior mint tick is crossed like a boundary (ADR-COEW), so
+    ///      those totals set every payout's ratio.
+    ///
+    ///      MEV analysis: the ratio denominators move with the reported tick, which the Operator
+    ///      already controls under the trust assumption above. No third party can order a move
+    ///      around a payout, because every payout reads the totals in the same transaction it
+    ///      pays, and the move itself places no order and moves no token.
     /// @param newTick The new price tick to set
     function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
         // Phase check: only Active vaults accept tick updates
@@ -1611,6 +1706,11 @@ contract LPVault {
         bool movingRight = newTick > oldTick;
         uint256 crossCount = 0;
         int24 tick = oldTick;
+        // The ledger shift, accrued per segment with the split as it stood during that segment
+        // and written once (FR-9BRI to FR-9BRL). segmentEdge is the segment's start when moving
+        // up and its end when moving down.
+        Shift memory shift;
+        int24 segmentEdge = oldTick;
 
         if (movingRight) {
             // Cross every initialized tick in (oldTick, newTick]
@@ -1620,9 +1720,14 @@ contract LPVault {
 
                 crossCount++;
                 if (crossCount > MAX_TICK_CROSSINGS) revert TooManyTicksCrossed();
+                // The segment that ends at the tick, with the split before the crossing (FR-9BRI)
+                _accrueSegment(shift, segmentEdge, next, true);
                 _crossTick(next, true);
+                segmentEdge = next;
                 tick = next;
             }
+            // The trailing segment, or the whole move when nothing was crossed (FR-9BRJ, FR-9BRK)
+            _accrueSegment(shift, segmentEdge, newTick, true);
         } else {
             // Cross every initialized tick in (newTick, oldTick]
             while (tick > newTick) {
@@ -1631,11 +1736,16 @@ contract LPVault {
 
                 crossCount++;
                 if (crossCount > MAX_TICK_CROSSINGS) revert TooManyTicksCrossed();
+                // The segment that starts at the tick, with the split before the crossing (FR-9BRI)
+                _accrueSegment(shift, next, segmentEdge, false);
                 _crossTick(next, false);
+                segmentEdge = next;
                 tick = next - 1;
             }
+            _accrueSegment(shift, newTick, segmentEdge, false);
         }
 
+        _applyShift(shift);
         currentTick = newTick;
 
         emit TickUpdated(oldTick, newTick, crossCount);
@@ -1659,7 +1769,11 @@ contract LPVault {
     ///      overlapping positions).
     ///      No USDC moves during merge — uncollected fees from consumed positions are
     ///      rolled into the survivor's tokensOwed. Tick state (liquidityGross,
-    ///      liquidityNet) is unchanged since total liquidity on the range stays the same.
+    ///      liquidityNet, noLiquidityNet) is unchanged since total liquidity on the range and
+    ///      on the NO sub-range stays the same. The merge writes one total of the solvency
+    ///      ledger, the fee dust its floors drop (FEAT-9BQZ FR-9BRH), and never a principal
+    ///      total: the claim is linear in liquidity and every merged position shares the
+    ///      range and the mint tick.
     /// @param positionIds Array of distinct position IDs to merge — must have >= 2 elements,
     ///        all sharing the same owner, tickLower, tickUpper, and mintTick
     function mergePositions(uint256[] calldata positionIds)
@@ -1706,9 +1820,18 @@ contract LPVault {
         // wrong delta both forms return a wrong number. The product stays in this
         // block and never goes through _mulDiv by convention, so every fee site
         // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
+        // The floors below drop feeDustX128 from the positions' scaled fee claims; the ledger
+        // debits it so the fee total still equals the survivor's scaled claim (FR-9BRH). Only the
+        // wraparound product stays in the block; the floor and the remainder are derived outside.
         uint256 survivorFees;
-        unchecked {
-            survivorFees = uint256(survivor.liquidity) * (feeGrowthInsideX128 - survivor.feeGrowthInsideLastX128) / Q128;
+        uint256 feeDustX128;
+        {
+            uint256 x;
+            unchecked {
+                x = uint256(survivor.liquidity) * (feeGrowthInsideX128 - survivor.feeGrowthInsideLastX128);
+            }
+            survivorFees = x / Q128;
+            feeDustX128 = x % Q128;
         }
 
         // Start accumulation from the survivor's current state
@@ -1730,9 +1853,13 @@ contract LPVault {
             // unchecked: same wraparound-cancellation as survivorFees above, and the
             // same one-shape convention keeps this product out of _mulDiv.
             uint256 consumedFees;
-            unchecked {
-                consumedFees =
-                    uint256(consumed.liquidity) * (feeGrowthInsideX128 - consumed.feeGrowthInsideLastX128) / Q128;
+            {
+                uint256 x;
+                unchecked {
+                    x = uint256(consumed.liquidity) * (feeGrowthInsideX128 - consumed.feeGrowthInsideLastX128);
+                }
+                consumedFees = x / Q128;
+                feeDustX128 += x % Q128;
             }
 
             // Accumulate liquidity and fees
@@ -1749,6 +1876,9 @@ contract LPVault {
         survivor.liquidity = totalLiquidity;
         survivor.tokensOwed = totalOwed;
         survivor.feeGrowthInsideLastX128 = feeGrowthInsideX128;
+
+        // Checked: a ledger bug on the Operator path reverts the merge (NFR-9BRT)
+        totalFeesOwedX128 -= feeDustX128;
 
         emit PositionsMerged(positionIds, positionIds[0]);
     }
@@ -1801,6 +1931,51 @@ contract LPVault {
         partition = new uint256[](2);
         partition[0] = 1;
         partition[1] = 2;
+    }
+
+    // ──────────────────────────────────────────────
+    // Solvency ledger views and helpers (FEAT-9BQZ, UC-9BR0, UC-9BR2)
+    // ──────────────────────────────────────────────
+
+    // SC-9BS7, SC-COEO: the truncated totals, the monitoring surface (FR-9BR6) and the ratio
+    // denominators (FR-9BRM to FR-9BRO)
+    /// @notice The USDC principal the vault owes to every live position, in USDC units.
+    function totalUsdcOwed() public view returns (uint256) {
+        return totalUsdcOwedScaled / USDC_CLAIM_SCALE;
+    }
+
+    /// @notice The YES tokens the vault owes to every live position, in token units.
+    function totalYesOwed() public view returns (uint256) {
+        return totalYesOwedScaled / LIQUIDITY_PRECISION;
+    }
+
+    /// @notice The NO tokens the vault owes to every live position, in token units.
+    function totalNoOwed() public view returns (uint256) {
+        return totalNoOwedScaled / LIQUIDITY_PRECISION;
+    }
+
+    /// @notice The fees the vault owes to every live position, in USDC units.
+    function totalFeesOwed() public view returns (uint256) {
+        return totalFeesOwedX128 / Q128;
+    }
+
+    // SC-9BSC through SC-9BSG, SC-COET, SC-COEU: one ratio per asset, applied to every payout
+    /// @dev owed x min(1, held / totalOwed), rounded down, and never above held (FR-9BRM to
+    ///      FR-9BRR, NFR-9BRW). The denominators are the truncated getters read before the
+    ///      debit: the sum of every per-position floor never exceeds the floor of the sum, so the
+    ///      payouts never exceed what is held, and the final cap keeps decision C6 true even
+    ///      against a ledger error. A zero total is a ratio of 1 with no division (FR-9BRP).
+    function _prorate(uint256 owed, uint256 held, uint256 totalOwed) internal pure returns (uint256 paid) {
+        if (owed == 0) return 0;
+        paid = held < totalOwed ? _mulDiv(owed, held, totalOwed) : owed;
+        if (paid > held) paid = held;
+    }
+
+    /// @dev A ledger debit that saturates at zero, for _burn and _collect only: an LP exit never
+    ///      reverts on a ledger write (NFR-9BRT, ADR-COEN). The Operator paths use checked
+    ///      arithmetic instead, so a ledger bug surfaces there.
+    function _saturatingSub(uint256 total, uint256 amount) internal pure returns (uint256) {
+        return amount < total ? total - amount : 0;
     }
 
     // ──────────────────────────────────────────────
@@ -1917,6 +2092,52 @@ contract LPVault {
         }
     }
 
+    /// @dev Adds one position's liquidity to a tick's reference count, initializing the tick on
+    ///      the first reference. One place for the rule that a set bitmap bit means liquidity
+    ///      behind it (CLAUDE.md checklist item 10), for the boundary ticks and for an interior
+    ///      mint tick alike (ADR-COEW).
+    function _addTickReference(int24 tick, uint128 liquidity) internal {
+        _initializeTick(tick);
+        ticks[tick].liquidityGross += liquidity;
+    }
+
+    /// @dev The exact inverse of _addTickReference: removes the liquidity and deinitializes the
+    ///      tick when nothing references it any more (FR-7G4P, audit issue 6.15). Deleting the
+    ///      record and clearing the bit together is what keeps the bitmap's meaning, or a later
+    ///      updateTick would cross a tick with no liquidity behind it.
+    function _removeTickReference(int24 tick, uint128 liquidity) internal {
+        TickInfo storage info = ticks[tick];
+        info.liquidityGross -= liquidity;
+        if (info.liquidityGross == 0) {
+            delete ticks[tick];
+            _clearTickBitmapBit(tick);
+        }
+    }
+
+    /// @dev Books a position's NO sub-range [mintTick, tickUpper) as a liquidityNet pair, the
+    ///      way the range itself is booked, and makes an interior mint tick crossable by counting
+    ///      the position's liquidity there (FEAT-9BQZ, ADR-COEW). The clamped mint tick
+    ///      (ADR-AFPP) keeps the YES side [tickLower, mintTick) and the NO side a partition of
+    ///      the range: a mint at its upper bound has no NO side, and a mint at its lower bound
+    ///      needs no interior reference because the bound already holds one.
+    function _addNoSubRange(int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity) internal {
+        if (mintTick == tickUpper) return;
+        int128 net = _toInt128(liquidity);
+        ticks[mintTick].noLiquidityNet += net;
+        ticks[tickUpper].noLiquidityNet -= net;
+        if (mintTick != tickLower) _addTickReference(mintTick, liquidity);
+    }
+
+    /// @dev The exact inverse of _addNoSubRange. The nets leave before the reference, so a mint
+    ///      tick that deinitializes already holds a zero noLiquidityNet.
+    function _removeNoSubRange(int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity) internal {
+        if (mintTick == tickUpper) return;
+        int128 net = _toInt128(liquidity);
+        ticks[mintTick].noLiquidityNet -= net;
+        ticks[tickUpper].noLiquidityNet += net;
+        if (mintTick != tickLower) _removeTickReference(mintTick, liquidity);
+    }
+
     /// @dev Computes the fee growth that occurred inside [tickLower, tickUpper) since
     ///      the vault's inception. Used to snapshot feeGrowthInsideLastX128 at mint time.
     ///      Formula: feeGrowthInside = global - below(tickLower) - above(tickUpper)
@@ -1955,8 +2176,10 @@ contract LPVault {
     // ──────────────────────────────────────────────
 
     /// @dev Crosses an initialized tick: flips feeGrowthOutsideX128 and adjusts
-    ///      activeLiquidity by the tick's liquidityNet. The flip formula is the
-    ///      same in both directions; the liquidityNet sign depends on direction.
+    ///      activeLiquidity by the tick's liquidityNet and noSideLiquidity by its
+    ///      noLiquidityNet. The flip formula is the same in both directions; the net
+    ///      signs depend on direction. A pure mint tick has liquidityNet == 0 and a flip
+    ///      that no position reads, because no position bounds it (ADR-COEW).
     function _crossTick(int24 tick, bool ltr) internal {
         TickInfo storage info = ticks[tick];
 
@@ -1971,6 +2194,77 @@ contract LPVault {
         // Apply liquidityNet: positive when moving L-to-R, negated when R-to-L
         int128 liquidityDelta = ltr ? info.liquidityNet : -info.liquidityNet;
         activeLiquidity = _addDelta(activeLiquidity, liquidityDelta);
+
+        // The NO sub-ranges cross the same way (FEAT-9BQZ FR-A2ZS)
+        int128 noNet = info.noLiquidityNet;
+        if (noNet != 0) noSideLiquidity = _addDelta(noSideLiquidity, ltr ? noNet : -noNet);
+    }
+
+    /// @dev The ledger shift of one tick move, in the totals' scaled units, accrued per segment
+    ///      and written once by _applyShift (FEAT-9BQZ FR-9BRL).
+    struct Shift {
+        int256 usdc;
+        int256 yes;
+        int256 no;
+    }
+
+    /// @dev Accrues the shift of one segment of levels [from, to) under the claim model
+    ///      (decision C26). With N = noSideLiquidity and Y = activeLiquidity - N, moving up
+    ///      each NO-side level buys NO at 1 - t / ONE and each YES-side level's YES returns to
+    ///      USDC through a pair worth 1, so NO += N x k, YES -= Y x k, and
+    ///      USDC += Y x sum(t) - N x (k x ONE - sum(t)); moving down negates the three. A segment
+    ///      with nothing in range is skipped, which also keeps every level inside a position's
+    ///      range and so inside [0, 10000]. Every product stays under 2^155 (L < 2^128,
+    ///      k x ONE < 2^27), so none needs _mulDiv, and k x (from + to - 1) is always even, so the
+    ///      halving is exact.
+    function _accrueSegment(Shift memory shift, int24 from, int24 to, bool up) internal view {
+        uint256 active = activeLiquidity;
+        if (active == 0 || from == to) return;
+        uint256 no = noSideLiquidity;
+        uint256 yes = active - no;
+        // casting to uint256 is safe because active > 0 puts the segment inside a position's
+        // range, and every range lies inside [0, 10000] (FR-T7B2)
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint256 s = uint256(int256(from));
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint256 e = uint256(int256(to));
+        uint256 k = e - s;
+        uint256 sumTicks = k * (s + e - 1) / 2;
+        uint256 one = USDC_CLAIM_SCALE / LIQUIDITY_PRECISION;
+        // casting to int256 is safe because every product is below 2^155
+        // forge-lint: disable-next-line(unsafe-typecast)
+        int256 noDelta = int256(no * k);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        int256 yesDelta = int256(yes * k);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        int256 usdcDelta = int256(yes * sumTicks) - int256(no * (k * one - sumTicks));
+        if (up) {
+            shift.no += noDelta;
+            shift.yes -= yesDelta;
+            shift.usdc += usdcDelta;
+        } else {
+            shift.no -= noDelta;
+            shift.yes += yesDelta;
+            shift.usdc -= usdcDelta;
+        }
+    }
+
+    /// @dev Writes each nonzero delta once. Checked arithmetic on purpose: a ledger bug on the
+    ///      Operator's tick path reverts the report, the way _addDelta does, and never a payout
+    ///      (NFR-9BRT, ADR-COEN).
+    function _applyShift(Shift memory shift) internal {
+        if (shift.usdc != 0) totalUsdcOwedScaled = _applySigned(totalUsdcOwedScaled, shift.usdc);
+        if (shift.yes != 0) totalYesOwedScaled = _applySigned(totalYesOwedScaled, shift.yes);
+        if (shift.no != 0) totalNoOwedScaled = _applySigned(totalNoOwedScaled, shift.no);
+    }
+
+    /// @dev total + delta with checked arithmetic in both directions.
+    function _applySigned(uint256 total, int256 delta) internal pure returns (uint256) {
+        // casting to uint256 is safe because the sign is checked on each branch
+        // forge-lint: disable-next-line(unsafe-typecast)
+        if (delta >= 0) return total + uint256(delta);
+        // forge-lint: disable-next-line(unsafe-typecast)
+        return total - uint256(-delta);
     }
 
     /// @dev Adds a signed delta to an unsigned liquidity value. Reverts on underflow
