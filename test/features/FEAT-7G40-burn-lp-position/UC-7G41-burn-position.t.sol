@@ -9,7 +9,7 @@ pragma solidity 0.8.20;
 // Covers: SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B,
 //         SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6
 
-import {Vm} from "forge-std/Vm.sol";
+import {Vm, VmSafe} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
@@ -962,8 +962,12 @@ contract BurnReentrancyTest is BurnPositionTestBase {
 //           250,000 gas against the mock USDC
 // ──────────────────────────────────────────────
 contract BurnGasTest is BurnPositionTestBase {
-    // NFR-7G5C: measured cold, as R3 measured, so every slot starts cold as in a real transaction
+    // NFR-7G5C: measured cold, as R3 measured, so every slot starts cold as in a real transaction.
+    // The bound describes the optimized bytecode that deploys (ADR-9FOM in FEAT-J92H). `forge
+    // coverage` compiles with the optimizer off, where this burn costs about 256,500 gas, so the
+    // test is skipped there and asserted under `forge test`.
     function test_burnWithMergeAndBothLegsStaysUnderBound() public {
+        vm.skip(vm.isContext(VmSafe.ForgeContext.Coverage));
         _moveTick(5700);
         _fundVault(BAND_TOKENS + 50e6, 50e6);
         vm.cool(address(vault));

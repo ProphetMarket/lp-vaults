@@ -6,7 +6,7 @@ pragma solidity 0.8.20;
 // Covers: SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-COEZ
 
 import {Test} from "forge-std/Test.sol";
-import {Vm} from "forge-std/Vm.sol";
+import {Vm, VmSafe} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
@@ -845,13 +845,18 @@ contract CollectPaysItsShareTest is CollectFeesTestBase {
         return before - gasleft();
     }
 
-    // NFR-U07P: a paying collect with no pair to merge stays under 120,000 gas
+    // NFR-U07P: a paying collect with no pair to merge stays under 120,000 gas. Both bounds describe
+    // the optimized bytecode that deploys (ADR-9FOM in FEAT-J92H). `forge coverage` compiles with
+    // the optimizer off, where the no-pair collect costs about 120,600 gas, so both tests are
+    // skipped there and asserted under `forge test`.
     function test_collectWithNoPairStaysUnderBound() public {
+        vm.skip(vm.isContext(VmSafe.ForgeContext.Coverage));
         assertLt(_coldCollectGas(), 120_000, "the collect must stay under the NFR-U07P bound with no pair");
     }
 
     // NFR-U07P: a paying collect that merges the vault's pairs stays under 180,000 gas
     function test_collectWithMergeStaysUnderBound() public {
+        vm.skip(vm.isContext(VmSafe.ForgeContext.Coverage));
         _giveOutcomeTokens(address(vault), vault.conditionId(), 20, 20);
         assertLt(_coldCollectGas(), 180_000, "the collect must stay under the NFR-U07P bound with a merge");
     }
