@@ -68,6 +68,7 @@ interface ILPVaultFactory {
     function admins(address) external view returns (uint256);
     function safeFactory() external view returns (address);
     function safeProxyBytecodeHash() external view returns (bytes32);
+    function defaultEmergencyCancelTimelock() external view returns (uint32);
 }
 
 /// @title LPVault
@@ -133,6 +134,14 @@ contract LPVault {
 
     // would be immutable in a non-clone contract; storage because EIP-1167.
     uint128 public minimumFirstLiquidity;
+
+    // FR-REQN, decision C10 (ADR-BZC5 in FEAT-REPZ): the Operator-silence duration before any
+    // address may freeze the vault. Read from the factory's default once, inside initialize, and
+    // never written again, so a later default change cannot reach this vault. A uint32 holds 136 years,
+    // the factory caps the value at 30 days, and the four bytes pack into this slot with
+    // tickSpacing and minimumFirstLiquidity, so the copy adds no storage slot.
+    // would be immutable in a non-clone contract; storage because EIP-1167.
+    uint32 public emergencyCancelTimelock;
 
     // ──────────────────────────────────────────────
     // Initialization guard
@@ -315,12 +324,6 @@ contract LPVault {
     ///      updateTick call. Prevents gas griefing on large price moves.
     uint256 internal constant MAX_TICK_CROSSINGS = 256;
 
-    /// @dev Minimum silence duration before any position holder can trigger
-    ///      emergencyCancelAll. 7 days is long enough to distinguish operator
-    ///      outage from normal low-activity periods. Polygon block.timestamp
-    ///      tolerance is ±15s, negligible at this scale.
-    uint256 public constant EMERGENCY_CANCEL_TIMELOCK = 7 days;
-
     // ──────────────────────────────────────────────
     // Reentrancy guard (inlined per pattern policy in CLAUDE.md)
     // ──────────────────────────────────────────────
@@ -354,7 +357,6 @@ contract LPVault {
     error PositionNotFound();
     error TimelockNotElapsed();
     error NotIntentOwner();
-    error NoPositionHeld();
     error VaultCancelled();
     error RangeMismatch();
     error InsufficientPositions();
@@ -379,7 +381,7 @@ contract LPVault {
     // SC-JGEF: emitted when Oracle transitions vault from Active to WindDown
     event VaultWindDownStarted(bytes32 indexed marketId);
 
-    // SC-JXQX: emitted when a position holder triggers emergency cancel
+    // SC-JXQX: emitted when any address freezes the vault after the silence timelock
     event EmergencyCancelExecuted(address indexed caller);
 
     // SC-TOGT, SC-TOGU: emitted when Operator distributes fee revenue
@@ -580,6 +582,11 @@ contract LPVault {
         noTokenId = noTokenId_;
         tickSpacing = tickSpacing_;
         minimumFirstLiquidity = minimumFirstLiquidity_;
+        // The emergency-cancel timelock is read from the factory once, here, and never again
+        // (decision C10): a twelfth parameter does not compile under forge coverage, where the
+        // optimizer is off, so the copy is a read instead of an argument. The factory is
+        // msg.sender, checked above, so the read is against a trusted contract.
+        emergencyCancelTimelock = ILPVaultFactory(factory_).defaultEmergencyCancelTimelock();
         implementationVersion = version_;
 
         // Set vault lifecycle to Active
@@ -723,89 +730,35 @@ contract LPVault {
     // Emergency cancel (FEAT-JXQO, UC-JXQW)
     // ──────────────────────────────────────────────
 
-    // SC-JXQX through SC-JXR2: position-holder-triggered emergency force-close
-    /// @notice Force-closes all open positions and distributes principal + accrued
-    ///         fees to each position owner. Transitions vault to terminal Cancelled state.
-    /// @dev Callable by any address that owns at least one position, after the
-    ///      operator-silence timelock has elapsed. Iterates all positions (bounded
-    ///      by nextPositionId), computes each position's payout, zeroes state, then
-    ///      transfers USDC. Follows checks-effects-interactions: all state mutations
-    ///      happen before any external transfer call.
-    ///      The Cancelled phase (3) is terminal — no vault function succeeds after this.
-    function emergencyCancelAll() external nonReentrant {
-        // --- Checks ---
-
-        // Already cancelled — terminal state, nothing to do
+    // SC-JXQX, SC-JXQY, SC-BZBW, SC-BZBX, SC-JXR1: any address freezes the vault after the timelock
+    /// @notice Freezes the vault after the Operator has been silent for the vault's emergency-cancel
+    ///         timelock: sets the phase to Cancelled and changes nothing else.
+    /// @dev Any address may call it, because the freeze moves no funds and the timelock is the whole
+    ///      condition (audit-solutions.md Finding 4, decision C9, ADR-BZBY). It keeps activeLiquidity,
+    ///      every tick, every position, and every total: an in-range burn subtracts from
+    ///      activeLiquidity with checked arithmetic, and the exits value each claim from the records.
+    ///      No nonReentrant, because the function makes no external call and moves no token
+    ///      (CLAUDE.md checklist item 1), the same as startWindDown and pauseTrading.
+    ///      After the freeze, burnPosition, burnPositionFor, collect, collectFor, reclaimDeposit,
+    ///      reclaimDepositFor, and mergeCompleteSets work and pay what they pay in WindDown at the
+    ///      same tick, so each LP exits in their own transaction and a USDC-blacklisted LP blocks
+    ///      only their own exit (audit issue 6.17). The vault approves no new order after the
+    ///      freeze, because the order maker accepts an order only while Active and not paused
+    ///      (decision C22, ADR-BZBZ, built in Part 6). The ±15s Polygon tolerance is negligible at
+    ///      the day scale of the timelock (CLAUDE.md checklist item 12).
+    ///      The Cancelled phase (3) is terminal: every trading entry point reverts after it.
+    function emergencyCancelAll() external {
+        // Already cancelled: terminal state, nothing to do
         if (phase == 3) revert VaultCancelled();
 
-        // Operator-silence timelock must have elapsed (±15s Polygon tolerance is negligible at 7-day scale)
+        // Operator-silence timelock must have elapsed
         // forge-lint: disable-next-line(block-timestamp)
-        if (block.timestamp - lastOperatorActivityTimestamp < EMERGENCY_CANCEL_TIMELOCK) {
+        if (block.timestamp - lastOperatorActivityTimestamp < emergencyCancelTimelock) {
             revert TimelockNotElapsed();
         }
 
-        // Caller must own at least one active position in this vault
-        uint256 count = nextPositionId;
-        bool callerHasPosition = false;
-        for (uint256 i = 0; i < count; i++) {
-            if (positions[i].owner == msg.sender && positions[i].liquidity > 0) {
-                callerHasPosition = true;
-                break;
-            }
-        }
-        if (!callerHasPosition) revert NoPositionHeld();
-
-        // --- Effects ---
-
-        // Build payout arrays from position data before zeroing state
-        address[] memory owners = new address[](count);
-        uint256[] memory payouts = new uint256[](count);
-
-        for (uint256 i = 0; i < count; i++) {
-            Position storage p = positions[i];
-            if (p.liquidity == 0) continue;
-
-            // Compute uncollected fees using the same accumulator formula as collect
-            uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
-            // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 both wrapped
-            // mod 2^256 by the same offset (see _computeFeeGrowthInside), so this
-            // subtraction must wrap too: it cancels the offset to the true small delta,
-            // mirroring Uniswap v3's fee-growth accounting. That subtraction is the
-            // load-bearing part. On a correct delta, liquidity * delta fits in 256 bits
-            // for every reachable value, so _mulDiv would return the same number; on a
-            // wrong delta both forms return a wrong number. The product stays in this
-            // block and never goes through _mulDiv by convention, so every fee site
-            // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
-            uint256 fees;
-            unchecked {
-                fees = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128) / Q128;
-            }
-            fees += p.tokensOwed;
-
-            // Reconstruct original principal from liquidity and tick range width
-            uint256 rangeWidth = uint256(int256(p.tickUpper - p.tickLower));
-            uint256 principal = uint256(p.liquidity) * rangeWidth / LIQUIDITY_PRECISION;
-
-            owners[i] = p.owner;
-            payouts[i] = principal + fees;
-
-            // Zero position state
-            p.liquidity = 0;
-            p.tokensOwed = 0;
-            p.feeGrowthInsideLastX128 = 0;
-        }
-
-        // Transition to terminal state
-        activeLiquidity = 0;
+        // The freeze writes phase and nothing else (FR-JXQP)
         phase = 3;
-
-        // --- Interactions (external calls last, per checks-effects-interactions) ---
-
-        for (uint256 i = 0; i < count; i++) {
-            if (payouts[i] > 0) {
-                _safeTransfer(usdc, owners[i], payouts[i]);
-            }
-        }
 
         emit EmergencyCancelExecuted(msg.sender);
     }
@@ -1179,9 +1132,9 @@ contract LPVault {
     ///      moment the LP did not choose, even with the funds landing at the correct owner.
     ///
     ///      A zero-liquidity record with a live owner is NOT burnable (FR-7G4W): mergePositions
-    ///      and, at this step, emergencyCancelAll leave records in that shape, and their liquidity
-    ///      already left the ticks. Burning one would touch the ticks by zero and could clear a
-    ///      bitmap bit a survivor needs.
+    ///      leaves records in that shape, and their liquidity already left the ticks. Burning one
+    ///      would touch the ticks by zero and could clear a bitmap bit a survivor needs. The freeze
+    ///      (emergencyCancelAll) leaves every record intact, so a burn after it pays in full.
     /// @param positionId The ID of the position to close
     function burnPosition(uint256 positionId) external nonReentrant {
         // --- Checks ---
@@ -1274,7 +1227,9 @@ contract LPVault {
     ///      ticks, activeLiquidity, the record), then the interactions, with the ERC-1155
     ///      transfer as the final call because a Safe owner can replace the Safe's fallback
     ///      handler and re-enter during that transfer. By then the record is deleted, both ticks
-    ///      are updated, and the guard on every state-changing entry point stops the re-entry.
+    ///      are updated, and the guard on every entry point that moves an asset stops the re-entry.
+    ///      The one unguarded entry point, emergencyCancelAll, writes only phase, and a re-entry
+    ///      into it during the transfer is harmless because the burn's effects are complete.
     function _burn(uint256 positionId, Position storage p) internal {
         // --- Reads and computation, all before any state is touched ---
 
@@ -1567,7 +1522,7 @@ contract LPVault {
     ///      inline reentrancy guard because the pull is an external call.
     /// @param amount The amount of USDC fee revenue to distribute across active liquidity
     function notifyFees(uint256 amount) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
-        // Cancelled vaults have already distributed all funds
+        // A frozen vault takes no new trading work; its exits stay open (FR-JXQT)
         if (phase == 3) revert VaultCancelled();
 
         // Zero-amount guard: notifying zero fees wastes gas and signals a caller bug
@@ -1615,7 +1570,8 @@ contract LPVault {
     ///      about the market. Neither says whether the Operator is alive, so neither state
     ///      must drift toward emergency cancellation while its Operator still responds.
     function heartbeat() external onlyOperator touchesHeartbeat {
-        // Cancelled vaults have already distributed all funds — nothing left to protect
+        // A frozen vault takes no new trading work; its exits stay open (FR-JXQT). The freeze is
+        // terminal, so the silence timer has no further reader and a refresh serves no purpose.
         if (phase == 3) revert VaultCancelled();
     }
 
@@ -1713,7 +1669,7 @@ contract LPVault {
         nonReentrant
         touchesHeartbeat
     {
-        // Cancelled vaults have already distributed all funds — nothing left to merge.
+        // A frozen vault takes no new trading work; its exits stay open (FR-JXQT).
         // Deliberately Cancelled-only rather than `phase != 1`: FEAT-JGE7 documents that
         // the Operator may still merge positions during WindDown while LPs exit.
         if (phase == 3) revert VaultCancelled();

@@ -78,6 +78,19 @@ contract LPVaultFactory {
     uint256 public constant IMPLEMENTATION_TIMELOCK = 7 days;
 
     // ──────────────────────────────────────────────
+    // Default emergency-cancel timelock (FEAT-REPZ, FR-BZC0, FR-BZC1)
+    // ──────────────────────────────────────────────
+
+    /// @notice The Operator-silence duration that each vault copies at createVault and never
+    ///         changes: 7 days at deployment, Admin-set within (0, MAX_EMERGENCY_CANCEL_TIMELOCK].
+    ///         A change reaches only vaults created after it (decision C10, ADR-BZC5).
+    uint32 public defaultEmergencyCancelTimelock;
+
+    /// @dev The longest default an Admin may set. Readable on chain so Admin tooling can check a
+    ///      value before it sends. A uint32 holds 136 years, so the cap needs no cast anywhere.
+    uint256 public constant MAX_EMERGENCY_CANCEL_TIMELOCK = 30 days;
+
+    // ──────────────────────────────────────────────
     // Vault registry
     // ──────────────────────────────────────────────
 
@@ -112,6 +125,10 @@ contract LPVaultFactory {
     error NotBinaryCondition();
     error TokenIdMismatch();
 
+    // SC-BZC3: one error per rejected default timelock
+    error ZeroTimelock();
+    error TimelockTooLong();
+
     // ──────────────────────────────────────────────
     // Events
     // ──────────────────────────────────────────────
@@ -122,6 +139,8 @@ contract LPVaultFactory {
     event RemovedOperator(address indexed removedOperator, address indexed admin);
     event AdminTransferProposed(address indexed currentAdmin, address indexed proposedAdmin);
     event VaultCreated(bytes32 indexed marketId, address vault, uint128 minimumFirstLiquidity);
+    // SC-BZC2: emitted when an Admin changes the default that later vaults copy
+    event DefaultEmergencyCancelTimelockUpdated(uint32 oldTimelock, uint32 newTimelock);
 
     // SC-KX5P: emitted when Admin schedules a new implementation
     event ImplementationScheduled(address indexed newImpl, uint256 unlockAt);
@@ -193,6 +212,9 @@ contract LPVaultFactory {
         // Start version counter at 1 (the initial deployment is version 1)
         implementationVersion = 1;
 
+        // The value the auditors reviewed; no constructor argument, so the deploy script stays
+        defaultEmergencyCancelTimelock = 7 days;
+
         // Initialize Auth registry: one admin, one oracle, one operator
         admins[admin_] = 1;
         adminCount = 1;
@@ -239,7 +261,8 @@ contract LPVaultFactory {
         // CEI: register before external interaction (initialize calls approve on USDC/CT)
         vaultForMarket[marketId_] = vault;
 
-        // Initialize the clone with per-market configuration (role state delegated, not copied)
+        // Initialize the clone with per-market configuration (role state delegated, not copied;
+        // the clone reads defaultEmergencyCancelTimelock from this factory inside initialize)
         LPVault(vault)
             .initialize(
                 marketId_,
@@ -256,6 +279,23 @@ contract LPVaultFactory {
             );
 
         emit VaultCreated(marketId_, vault, minimumFirstLiquidity_);
+    }
+
+    // SC-BZC2, SC-BZC3, SC-BZC4: Admin sets the default that later vaults copy (FR-BZC0, FR-BZC1)
+    /// @notice Sets the emergency-cancel timelock that vaults created from now on copy at
+    ///         createVault. No effect on any existing vault: each vault reads its own copy
+    ///         (decision C10, ADR-BZC5).
+    /// @dev A zero timelock would let any address freeze a vault in the block after any Operator
+    ///      call, and a value above the maximum would hold LPs to a silent Operator for longer
+    ///      than the product accepts.
+    /// @param newTimelock Silence duration in seconds, above 0 and at most MAX_EMERGENCY_CANCEL_TIMELOCK
+    function setDefaultEmergencyCancelTimelock(uint32 newTimelock) external onlyAdmin {
+        if (newTimelock == 0) revert ZeroTimelock();
+        if (newTimelock > MAX_EMERGENCY_CANCEL_TIMELOCK) revert TimelockTooLong();
+
+        uint32 oldTimelock = defaultEmergencyCancelTimelock;
+        defaultEmergencyCancelTimelock = newTimelock;
+        emit DefaultEmergencyCancelTimelockUpdated(oldTimelock, newTimelock);
     }
 
     // SC-6HBV, SC-6HBW, SC-6HBX: outcome-token identity check (FR-6HBQ, FR-6HBR, FR-6HBS)
