@@ -3,13 +3,13 @@ id: UC-9BR2
 name: Apply Payout Ratios
 feature: FEAT-9BQZ
 status: implemented
-version: 2
+version: 3
 actor: LP
 ---
 
 # UC-9BR2: Apply Payout Ratios
 
-> An LP who exits receives the whole claim when the vault can cover it, and the same share as every other claimant when it cannot, per asset, never as a failed transaction, and the cut is final.
+> An LP who exits receives the whole claim when the vault can cover it, and the same share as every other claimant when it cannot, per asset before the switch and as one USDC sum after it, never as a failed transaction, and the cut is final.
 
 ## Preconditions
 
@@ -174,5 +174,50 @@ The Safe calls `burnPosition` or `collect` on a position it owns, or the Operato
 - `PositionBurned(positionId, safe, 247354500, 0, 200000000, yesTokenId, 90000000, 60000000)` emitted
 - `totalUsdcOwedScaled` and `totalYesOwedScaled` storage: debited by the full scaled claim
 - No revert
+
+---
+
+### SC-CYSB: Three burns after the switch receive the same ratio
+
+**Given:**
+- Three positions of the R9 example, owned by the Safe, the vault at 5700, so `totalUsdcOwed() == 742,063,500` and `totalYesOwed() == 270,000,000`
+- The vault holds 270 YES and its USDC was drained to 371,031,750, half of what it owes
+- The result `[1, 0]` is reported, the Oracle called `startWindDown` and `redeemOutcomeTokens`, so the vault holds 641,031,750 USDC above escrow and no token
+
+**Steps:**
+1. The first Safe position burns
+2. The second burns
+3. The third burns
+
+**Outcomes:**
+- Each burn pays `floor(337,354,500 × 641,031,750 ÷ 1,012,063,500) = 213,677,250` USDC units in one transfer, the same ratio each time
+- After the third, `totalUsdcOwed()`, `totalYesOwed()`, and `totalFeesOwed()` read zero and the vault holds `totalEscrowed`
+
+**Side Effects:**
+- Three `PositionBurned` events, each with `usdcPaid + tokenPaid = 213677250`
+- No `OutcomeTokensRedeemed`, because the Oracle redeemed first
+- No `TransferSingle`
+
+---
+
+### SC-CYSC: A payout after the switch redeems late tokens first
+
+**Given:**
+- One R9 position at 5700, the Oracle redeemed after `[1, 0]`, so the vault holds 337.3545 USDC above escrow
+- Then 5 YES and 5 NO arrived in the vault
+
+**Steps:**
+1. The Safe burns
+2. System redeems the 5 YES and 5 NO for 5 USDC
+3. System pays 337,354,500 USDC units
+
+**Outcomes:**
+- The Safe receives 337,354,500 USDC units
+- The vault keeps the 5 USDC and holds no token
+
+**Side Effects:**
+- `OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6)` emitted, then `PositionBurned`
+- `PayoutRedemption` emitted by ConditionalTokens
+- No `CompleteSetsMerged`
 
 ---

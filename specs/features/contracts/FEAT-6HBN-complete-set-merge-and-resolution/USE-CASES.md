@@ -7,3 +7,4 @@
 | ID | Name | Status | Description | File |
 |----|------|--------|-------------|------|
 | UC-6HBO | Merge Complete Sets | implemented | Any wallet turns the vault's matched YES and NO tokens into USDC held by the vault, in every phase | [UC-6HBO-merge-complete-sets.md](UC-6HBO-merge-complete-sets.md) |
+| UC-6HBP | Redeem Outcome Tokens After Resolution | implemented | The Oracle turns the vault's YES and NO tokens into USDC after the market resolves, and that first call switches every later payout to USDC at the reported payout | [UC-6HBP-redeem-outcome-tokens.md](UC-6HBP-redeem-outcome-tokens.md) |

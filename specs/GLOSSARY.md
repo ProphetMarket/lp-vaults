@@ -29,6 +29,12 @@
 
 **Complete set (pair)** -- One YES token plus one NO token of the vault's condition. The Conditional Tokens contract turns a pair into 1 USDC at any time through `mergePositions`, so a pair is worth exactly its USDC value. An outcome token has USDC's six decimals: 90 tokens are 90,000,000 units.
 
+**Resolution** -- The moment the ConditionalTokens contract holds the payout vector of a condition (`payoutDenominator(conditionId) != 0`), forwarded by Prophet's `Resolution.finalizePayouts`. Prophet reports `[1, 0]` (YES wins), `[0, 1]` (NO wins), or `[1, 1]` (the market is cancelled, each token pays 0.5 USDC).
+
+**Redemption** -- The ConditionalTokens call `redeemPositions` that burns a holder's outcome tokens and pays `balance × numerator ÷ denominator` USDC per index set, rounded down. The vault redeems through the Oracle's `redeemOutcomeTokens()` and, after the switch, inside every burn and collect.
+
+**The switch** -- The vault's stored payout, `payoutNumerators()`, zero until the Oracle's first successful `redeemOutcomeTokens`. While it is off a payout merges pairs and pays a token in kind at that token's own ratio. While it is on a payout redeems every token the vault holds and pays USDC at one ratio that values the token totals at the stored payout (FEAT-6HBN ADR-6HCK).
+
 **Tick bitmap** -- The vault's record of which ticks are initialized: `tickBitmap[int16 word] => uint256`, one bit per tick, bit `n` of word `w` set when tick `w × 256 + n` has liquidity. `updateTick` reads it to find the next initialized tick without walking every tick.
 
 **Bitmap word** -- One `uint256` entry of the tick bitmap, covering 256 consecutive ticks. The word index is the tick divided by 256, rounded down, and it spans `int16`: word −32768 holds the lowest ticks and word 32767 the highest. The tick search stops at the word that holds the Operator's target.

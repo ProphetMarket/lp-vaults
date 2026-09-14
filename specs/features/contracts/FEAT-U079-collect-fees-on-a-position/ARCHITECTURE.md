@@ -2,7 +2,7 @@
 id: FEAT-U079
 name: Collect Fees on a Position
 use_cases: [UC-U07A, UC-BMF8]
-scenarios: [SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-COEZ, SC-BMFG, SC-BMFH, SC-BMFI, SC-BMFJ, SC-BMFK, SC-BMFL, SC-BMFM, SC-BMG6]
+scenarios: [SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-COEZ, SC-CYSD, SC-BMFG, SC-BMFH, SC-BMFI, SC-BMFJ, SC-BMFK, SC-BMFL, SC-BMFM, SC-BMG6]
 last_update: 2026-09-14
 ---
 
@@ -42,7 +42,7 @@ C4Container
     Container(feeInside, "_computeFeeGrowthInside()", "Solidity internal", "Computes feeGrowthInsideX128 from global and per-tick accumulators")
     Container(avail, "_availableUsdc()", "Solidity internal", "balance + pairs - totalEscrowed, floored at zero (FEAT-7G40)")
     Container(prorate, "_prorate()", "Solidity internal", "owed x min(1, available / (totalUsdcOwed + totalFeesOwed)), rounded down (FEAT-9BQZ)")
-    Container(merge, "_mergeCompleteSets()", "Solidity internal", "Turns min(YES, NO) pairs into USDC (FEAT-6HBN)")
+    Container(merge, "_settle()", "Solidity internal", "The merge before the switch, the redemption after it (FEAT-6HBN)")
     Container(eip712, "EIP-712 (inlined)", "Solidity internal", "CollectIntent typehash, _verifySafeOwnerSignature")
     Container(safeTransfer, "_safeTransfer()", "Solidity internal", "Handles bool/non-bool ERC-20 returns")
     ContainerDb(positions, "positions[positionId]", "Storage", "Per-LP position records with feeGrowthInsideLastX128 and tokensOwed")
@@ -60,8 +60,8 @@ C4Container
     Rel(vault, avail, "read what USDC may be paid", "view")
     Rel(vault, prorate, "the paid amount at the USDC ratio", "internal")
     Rel(vault, positions, "reads liquidity, snapshot, tokensOwed; writes snapshot and zeroes tokensOwed", "storage")
-    Rel(vault, merge, "merge pairs", "first interaction")
-    Rel(merge, ctf, "mergePositions", "call")
+    Rel(vault, merge, "merge pairs, or redeem every token", "first interaction")
+    Rel(merge, ctf, "mergePositions or redeemPositions", "call")
     Rel(vault, safeTransfer, "transfer the paid USDC")
 ```
 
@@ -108,7 +108,7 @@ erDiagram
 | File | Role | Key Exports |
 |------|------|-------------|
 | `src/LPVault.sol` | Per-market vault -- the two collect entry points over one body | `collect()`, `collectFor()`, `_collect()`, `COLLECT_INTENT_TYPEHASH`, `usedCollectAuthorizations`, `_safeTransfer()` |
-| `src/LPVault.sol` | Reused from FEAT-T7AF / FEAT-TOGR / FEAT-7G40 / FEAT-6HBN / FEAT-3ZRI | `_computeFeeGrowthInside()`, `_availableUsdc()`, `_tokenBalances()`, `_mergeCompleteSets()`, `_verifySafeOwnerSignature()` |
+| `src/LPVault.sol` | Reused from FEAT-T7AF / FEAT-TOGR / FEAT-7G40 / FEAT-6HBN / FEAT-3ZRI / FEAT-9BQZ | `_computeFeeGrowthInside()`, `_availableUsdc()`, `_usdcRatio()`, `_tokenBalances()`, `_resolved()`, `_settle()`, `_mergeCompleteSets()`, `_redeemOutcomeTokens()`, `_verifySafeOwnerSignature()` |
 | `test/fixtures/LPVaultFixture.sol` | test fixture | `COLLECT_INTENT_TYPEHASH`, `_signCollectIntent(vault, pk, lp, positionId, nonce, deadline)` |
 | `test/features/FEAT-U079-collect-fees-on-a-position/UC-U07A-collect-position-fees.t.sol` | Integration tests for the self-service path | Scenarios of UC-U07A |
 | `test/features/FEAT-U079-collect-fees-on-a-position/UC-BMF8-operator-collect-fees-for-lp.t.sol` | Integration tests for the relayed path | Scenarios of UC-BMF8 |
@@ -143,7 +143,7 @@ erDiagram
 | System | Protocol | Direction | Purpose |
 |--------|----------|-----------|---------|
 | USDC (ERC-20) | `balanceOf`, `transfer` | outbound | Reads what the vault holds above escrow, then pays the fees to the Safe via inline _safeTransfer |
-| ConditionalTokens (Gnosis CTF) | `balanceOf`, `mergePositions` | outbound | Merges the vault's pairs into USDC before a paying collect, reached from `_collect` |
+| ConditionalTokens (Gnosis CTF) | `balanceOf`, `mergePositions`, `redeemPositions` | outbound | Settles the vault's tokens before a paying collect, reached from `_collect`: the merge before the switch, the redemption after it |
 | LPVaultFactory | `operators`, `safeFactory`, `safeProxyBytecodeHash` | outbound | The Operator gate and the Safe derivation on the relayed path |
 
 ## Code Map
@@ -164,6 +164,7 @@ erDiagram
 | SC-BMFD | Collect in the Cancelled phase pays the accrued fees | `src/LPVault.sol:collect()` (no phase gate) |
 | SC-BMFE | Collect merges the vault's pairs first | `src/LPVault.sol:_collect()`, `src/LPVault.sol:_mergeCompleteSets()` |
 | SC-COEZ | Collect pays its share and settles | `src/LPVault.sol:_collect()`, `src/LPVault.sol:_prorate()`, `src/LPVault.sol:_availableUsdc()` |
+| SC-CYSD | Collect after the switch pays at the pooled ratio | `src/LPVault.sol:_collect()`, `src/LPVault.sol:_usdcRatio()`, `src/LPVault.sol:_settle()` |
 | UC-BMF8 | Operator Collect Fees for LP | `src/LPVault.sol:collectFor()`, `src/LPVault.sol:_collect()` |
 | SC-BMFG | Operator collect pays the LP its fees, never the caller | `src/LPVault.sol:collectFor()`, `src/LPVault.sol:_collect()` |
 | SC-BMFH | A second collect with a new nonce pays only the new fees | `src/LPVault.sol:collectFor()`, `COLLECT_INTENT_TYPEHASH` |

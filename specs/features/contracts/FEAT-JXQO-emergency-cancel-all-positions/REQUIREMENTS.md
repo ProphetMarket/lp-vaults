@@ -4,7 +4,7 @@ name: Emergency Cancel All Positions
 module: contracts
 domain: "@vault"
 status: implemented
-version: 7
+version: 8
 refs: [FEAT-REPZ, FEAT-JGE7, FEAT-TVS0, FEAT-7G40, FEAT-U079, FEAT-JAIJ, FEAT-6HBN]
 ---
 
@@ -59,7 +59,7 @@ Linked to: UC-JXQW
 ### Cancelled Phase Gating
 
 **FR-JXQT** `While the vault phase is Cancelled (3), when any address calls a trading entry point, the system shall revert; every LP exit and the complete-set merge shall succeed and pay what they pay in the Active phase.`
-Fit Criterion: Given `phase == 3`, calls to `mintPositionFor`, `depositForIntent`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat`, `startWindDown`, and `emergencyCancelAll` all revert (`VaultNotActive` or `VaultCancelled`). `reclaimDeposit` and `reclaimDepositFor` refund the recorded escrow (FEAT-JAIJ FR-9OYO). `collect` and `collectFor` pay the accrued fees (FEAT-U079 FR-U07O). `burnPosition` and `burnPositionFor` pay the claim valued at the frozen `currentTick`, remove the liquidity from both ticks, and reduce `activeLiquidity` when the position is in range (FEAT-7G40 FR-7G4V). `mergeCompleteSets` merges the pairs (FEAT-6HBN FR-6HC1). The freeze leaves every record in place, so a frozen vault pays exactly what a wound-down vault pays at the same tick. Decision C9.
+Fit Criterion: Given `phase == 3`, calls to `mintPositionFor`, `depositForIntent`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat`, `startWindDown`, and `emergencyCancelAll` all revert (`VaultNotActive` or `VaultCancelled`). `reclaimDeposit` and `reclaimDepositFor` refund the recorded escrow (FEAT-JAIJ FR-9OYO). `collect` and `collectFor` pay the accrued fees (FEAT-U079 FR-U07O). `burnPosition` and `burnPositionFor` pay the claim valued at the frozen `currentTick`, remove the liquidity from both ticks, and reduce `activeLiquidity` when the position is in range (FEAT-7G40 FR-7G4V). `mergeCompleteSets` merges the pairs (FEAT-6HBN FR-6HC1), and the Oracle's `redeemOutcomeTokens` redeems the tokens and sets the switch (FEAT-6HBN FR-6HC7). The freeze leaves every record in place, so a frozen vault pays exactly what a wound-down vault pays at the same tick. Decision C9.
 Linked to: UC-JXQW
 
 ## Non-Functional Requirements

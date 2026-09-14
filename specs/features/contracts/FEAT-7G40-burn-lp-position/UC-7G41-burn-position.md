@@ -3,13 +3,13 @@ id: UC-7G41
 name: Burn Position
 feature: FEAT-7G40
 status: implemented
-version: 4
+version: 5
 actor: LP
 ---
 
 # UC-7G41: Burn Position
 
-> The LP's Safe closes a position it owns and receives what the claim holds under decision C26, USDC plus at most one outcome token plus fees, without needing the Operator to cooperate, or to exist.
+> The LP's Safe closes a position it owns and receives what the claim holds under decision C26, USDC plus at most one outcome token plus fees before the switch, and USDC only after the Oracle's redemption, without needing the Operator to cooperate, or to exist.
 
 ## Preconditions
 
@@ -359,5 +359,92 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - `PositionBurned(positionId, safe, 260845500, 0, 260845500, noTokenId, 90000000, 90000000)` emitted
 - `positions[positionId]` storage: deleted
 - ERC-1155 NO transferred from vault to the Safe
+
+---
+
+### SC-CYS7: Burn after the switch pays the winning leg in USDC
+
+**Given:**
+- The Safe owns the position of SC-7G44 (`liquidity = 3e23`, range `[5500, 6500)`, `mintTick = 6000`), the vault at 5700, and the vault held 90 YES
+- The result `[1, 0]` is reported, the Oracle called `startWindDown` and `redeemOutcomeTokens`, so the vault holds 337.3545 USDC above escrow and no token
+
+**Steps:**
+1. The Safe calls `burnPosition` for the position
+2. System reads the stored payout `(1, 0)` and values the 90 YES at 90 USDC
+3. System computes one USDC ratio: held 337.3545, owed 337.3545, ratio 1
+4. System removes the liquidity from both ticks and deletes the record
+5. System finds no token to redeem and transfers 337.3545 USDC
+
+**Outcomes:**
+- The Safe's USDC balance increases by 337,354,500 units
+- The Safe receives no token
+
+**Side Effects:**
+- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 90000000)` emitted, where `tokenPaid` is the token leg's USDC after the switch
+- One `Transfer` from the vault to the Safe, of 337,354,500 units
+- No `TransferSingle`, no `PayoutRedemption`, no `OutcomeTokensRedeemed`
+
+---
+
+### SC-CYS8: Burn after the switch pays the losing leg nothing
+
+**Given:**
+- The same position and holdings as SC-CYS7
+- The result `[0, 1]` is reported and the Oracle redeemed, so the vault holds 247.3545 USDC above escrow and no token
+
+**Steps:**
+1. The Safe calls `burnPosition` for the position
+2. System values the 90 YES at 0 USDC
+3. System transfers 247.3545 USDC
+
+**Outcomes:**
+- The Safe's USDC balance increases by 247,354,500 units
+- The Safe receives no token
+
+**Side Effects:**
+- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 0)` emitted; `tokenOwed` still reports the 90 tokens the claim held
+- No `TransferSingle`
+
+---
+
+### SC-CYS9: Burn after a cancelled market pays half the token leg
+
+**Given:**
+- The same position and holdings as SC-CYS7
+- The result `[1, 1]` is reported and the Oracle redeemed, so the vault holds 292.3545 USDC above escrow and no token
+
+**Steps:**
+1. The Safe calls `burnPosition` for the position
+2. System values the 90 YES at `90 × 1 ÷ 2 = 45` USDC
+3. System transfers 292.3545 USDC
+
+**Outcomes:**
+- The Safe's USDC balance increases by 292,354,500 units
+
+**Side Effects:**
+- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 45000000)` emitted
+- No `TransferSingle`
+
+---
+
+### SC-CYSA: Burn between resolution and the switch pays the token in kind
+
+**Given:**
+- The same position and holdings as SC-7G44: the vault at 5700 holds 90 YES
+- The result `[1, 0]` is reported and the Oracle has not called `redeemOutcomeTokens`
+
+**Steps:**
+1. The Safe calls `burnPosition` for the position
+2. System reads the stored payout `(0, 0)` and takes the pre-switch path
+3. System transfers 247.3545 USDC and 90 YES
+
+**Outcomes:**
+- Identical to SC-7G44: the Safe's USDC balance increases by 247,354,500 units and its YES balance by 90
+- The Safe redeems the 90 YES at the ConditionalTokens contract for 90 USDC in its own transaction, so no LP waits on the Oracle
+
+**Side Effects:**
+- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 90000000)` emitted
+- `TransferSingle` from the ConditionalTokens contract as the last external call
+- No `redeemPositions` call, no `OutcomeTokensRedeemed`
 
 ---

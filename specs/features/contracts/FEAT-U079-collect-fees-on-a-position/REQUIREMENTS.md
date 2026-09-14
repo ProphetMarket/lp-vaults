@@ -4,7 +4,7 @@ name: Collect Fees on a Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 4
+version: 5
 refs: [FEAT-TVS0, FEAT-6HBN, FEAT-3ZRI, FEAT-JAIJ, FEAT-9BQZ]
 ---
 
@@ -18,7 +18,7 @@ refs: [FEAT-TVS0, FEAT-6HBN, FEAT-3ZRI, FEAT-JAIJ, FEAT-9BQZ]
 - Does not handle fee notification or global accumulator updates -- see FEAT-TOGR
 - Does not handle tick crossing or feeGrowthOutside flipping -- see FEAT-TVS0
 - Does not handle vault lifecycle transitions -- see FEAT-JGE7 (wind-down) and FEAT-JXQO (emergency cancel)
-- Does not merge the vault's pairs on its own account -- see FEAT-6HBN, whose internal merge every paying collect calls first
+- Does not merge the vault's pairs or redeem its tokens on its own account -- see FEAT-6HBN, whose internal settlement every paying collect calls first (the merge before the switch, the redemption after it)
 
 ## Actors
 
@@ -47,8 +47,8 @@ Linked to: UC-U07A
 
 ### Payout
 
-**FR-U07K** `When collect computes a nonzero owed amount, the system shall merge the vault's complete sets, transfer the owed amount times the USDC ratio of FEAT-9BQZ (rounded down, never above what is held) to the position's owner, set the position's tokensOwed to zero, debit totalFeesOwedX128 by the position's full scaled fee claim, and emit FeesCollected with positionId, owner, the amount owed, and the amount paid.`
-Fit Criterion: Given owed > 0 and a covered vault, the LP's USDC balance increases by exactly the owed amount, `tokensOwed` is zero, and `FeesCollected(positionId, owner, owed, owed)` is emitted. Given owed = 10 USDC and a USDC ratio of 0.4, the call pays 4, does not revert, leaves `tokensOwed = 0`, emits `FeesCollected(positionId, owner, 10e6, 4e6)`, and a later collect owes only the fees that grew since. Given a vault whose USDC balance is below `totalEscrowed`, the call pays zero, does not revert, and emits `FeesCollected(positionId, owner, owed, 0)`. Decisions C6, C7, and O2 (ADR-COEN in FEAT-9BQZ).
+**FR-U07K** `When collect computes a nonzero owed amount, the system shall settle first (merge the vault's complete sets before the switch, redeem every token after it), transfer the owed amount times the USDC ratio of FEAT-9BQZ (FR-9BRM before the switch, FR-CYS5 after it; rounded down, never above what is held) to the position's owner, set the position's tokensOwed to zero, debit totalFeesOwedX128 by the position's full scaled fee claim, and emit FeesCollected with positionId, owner, the amount owed, and the amount paid.`
+Fit Criterion: Given owed > 0 and a covered vault, the LP's USDC balance increases by exactly the owed amount, `tokensOwed` is zero, and `FeesCollected(positionId, owner, owed, owed)` is emitted. Given owed = 10 USDC and a USDC ratio of 0.4, the call pays 4, does not revert, leaves `tokensOwed = 0`, emits `FeesCollected(positionId, owner, 10e6, 4e6)`, and a later collect owes only the fees that grew since. Given a vault whose USDC balance is below `totalEscrowed`, the call pays zero, does not revert, and emits `FeesCollected(positionId, owner, owed, 0)`. Given owed = 9,999,999 units after the Oracle's redemption, with the vault's USDC drained so that held is 173,677,249 against a pooled owed total of 347,354,499 (the principal, the fees, and the 90 YES owed at the payout), the call pays 4,999,999 and makes no `mergePositions` call. Decisions C6, C7, and O2 (ADR-COEN in FEAT-9BQZ).
 Linked to: UC-U07A, UC-BMF8
 
 **FR-U07L** `When collect computes zero owed fees, the system shall succeed without performing a USDC transfer.`
@@ -92,8 +92,8 @@ Rationale: measured cold on the build of 2026-09-13 at 99,646 call gas with noth
 
 **NFR-U07Q** Security: `The system shall apply an inline nonReentrant modifier on collect to prevent reentrancy via the USDC transfer callback.`
 
-**NFR-U07R** Security: `The system shall follow checks-effects-interactions ordering in collect: validate ownership and read the balances and the ledger totals first (both token balances, the USDC balance, totalUsdcOwed and totalFeesOwed, and the amount to pay), update position state and the ledger second (the feeGrowthInsideLastX128 snapshot, tokensOwed to zero, and the fee total's debit), then merge the complete sets and transfer USDC last.`
-Rationale: the merge pays exactly `min(yes, no)` USDC, so the amount to pay is known from view reads before any effect, and CLAUDE.md checklist item 1 holds without exception.
+**NFR-U07R** Security: `The system shall follow checks-effects-interactions ordering in collect: validate ownership and read the balances, the switch, and the ledger totals first (both token balances, the USDC balance, the stored payout, the ratio's two sides, and the amount to pay), update position state and the ledger second (the feeGrowthInsideLastX128 snapshot, tokensOwed to zero, and the fee total's debit), then settle (the merge before the switch, the redemption after it) and transfer USDC last.`
+Rationale: the merge pays exactly `min(yes, no)` USDC and the redemption pays exactly `balance × numerator ÷ denominator` per side, so the amount to pay is known from view reads before any effect, and CLAUDE.md checklist item 1 holds without exception.
 
 **NFR-BMFC** Security: `collectFor shall carry an OPERATOR TRUST ASSUMPTION NatSpec block with an MEV analysis section.`
 Fit Criterion: the block states that the Operator can delay a collect and chooses its block, which changes nothing about the fees owed, because the accumulator only grows; that it cannot start one without the signature, replay a spent nonce, or redirect the payout; and that the LP's remedy is `collect`.

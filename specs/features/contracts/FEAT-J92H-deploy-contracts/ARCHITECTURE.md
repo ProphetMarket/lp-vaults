@@ -3,7 +3,7 @@ id: FEAT-J92H
 name: Deploy Contracts
 use_cases: [UC-J92I]
 scenarios: [SC-J92J, SC-J92K, SC-J92L, SC-J92M, SC-K49S, SC-9OY8]
-last_update: 2026-09-12
+last_update: 2026-09-14
 ---
 
 # Architecture: Deploy Contracts
@@ -108,3 +108,6 @@ In the context of deploying to multiple networks (Amoy, mainnet), facing the nee
 
 **ADR-9FOM:** Compiler optimizer on at 200 runs, chosen for contract size
 In the context of a vault 388 bytes under the EIP-170 limit with the audit fixes still to add, facing a deploy-time revert that `forge test` cannot catch, we decided to set `optimizer = true` and `optimizer_runs = 200` in `foundry.toml` to achieve 10,055 bytes of room on 2026-09-12 and 4,720 bytes on the escrow-branch stand-in (43fd027), accepting up to 1.5 percent more gas than the highest runs value and a deployed bytecode that differs from the audited build (d47b72d) and from the Amoy broadcast artifacts, which the auditors are told before the re-review. Rejected: `via_ir`, because 200 runs alone gives enough room and `via_ir` changes the code shape more for the auditors. Rejected: a size assertion in the deploy use case test, because `forge coverage` compiles with the optimizer off and the unoptimized vault exceeds the limit once R5 lands, so the assertion would fail in the coverage build. The size check is therefore a completion check rule in `CLAUDE.md`, not a test.
+
+**ADR-CYSE:** Modifier bodies live in internal functions, for contract size
+In the context of a vault at 23,102 bytes after the order-maker step (R12) with the redemption still to add, facing an R13 that adds about 1,420 bytes and a `via_ir` that the compiler optimizer decision (ADR-9FOM) rejected, we decided that `onlyOperator`, `onlyOracle`, `onlyAdmin`, and `nonReentrant` keep their names and their placement on every function and call `_checkOperator()`, `_checkOracle()`, `_checkAdmin()`, and `_nonReentrantBefore()` / `_nonReentrantAfter()`, whose bodies are the old modifier bodies unchanged (the OpenZeppelin `Ownable._checkOwner` and `ReentrancyGuard._nonReentrantBefore` shape), to achieve about 1,800 bytes of room at no behavior change, accepting about 50 gas more per guarded call and a code shape that differs from the audited build, which the auditors are told in the addendum as a shape change with no behavior change. The modifier stays the only gate, and no function calls a `_check*()` directly (CLAUDE.md checklist item 2). `onlyFactory`, `onlyConditionalTokens`, `initializer`, `whenNotPaused`, and `touchesHeartbeat` stay inline, because each has one or two uses or a one-line body. Rejected: `optimizer_runs` at 100 or 50, which recovers 75 to 80 bytes; making the four truncating ledger getters internal, which recovers 76 bytes and removes a monitoring view (FEAT-9BQZ FR-9BR6). Measured on 2026-09-14 in the R13 exploration: 24,526 bytes with the redemption and the inline modifiers, 22,727 with the bodies moved. The user chose this on 2026-09-14.

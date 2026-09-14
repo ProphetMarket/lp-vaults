@@ -4,8 +4,8 @@ name: Vault Wind-Down Lifecycle
 module: contracts
 domain: "@vault"
 status: implemented
-version: 4
-refs: [FEAT-REPZ, FEAT-T7AF]
+version: 5
+refs: [FEAT-REPZ, FEAT-T7AF, FEAT-6HBN]
 ---
 
 # Vault Wind-Down Lifecycle
@@ -16,8 +16,9 @@ refs: [FEAT-REPZ, FEAT-T7AF]
 
 - Does not handle emergency cancel (`emergencyCancelAll`) -- separate feature
 - Does not handle position burning mechanics -- see burn position feature
-- Does not modify fee distribution behavior during WindDown -- Operator can still call `notifyFees`, `updateTick`, `mergePositions`
+- Does not modify fee distribution behavior during WindDown -- Operator can still call `notifyFees` and `mergePositions`; `updateTick` reverts `VaultNotActive` in WindDown (FEAT-TVS0), which is what lets the redemption below fix every claim
 - Does not handle market resolution on the CTF Exchange -- `startWindDown` is a downstream Oracle signal, not a resolution mechanism
+- Does not redeem the vault's outcome tokens -- see FEAT-6HBN; the Oracle calls `startWindDown` first, because the redemption reverts while the vault is Active (ADR-6HCK)
 
 ## Actors
 

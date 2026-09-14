@@ -3,7 +3,7 @@ id: UC-U07A
 name: Collect Position Fees
 feature: FEAT-U079
 status: implemented
-version: 5
+version: 6
 actor: LP
 ---
 
@@ -275,5 +275,30 @@ The LP's Safe calls `collect(positionId)`.
 - Case B: `FeesCollected(positionId, safe, 10, 0)` emitted, no USDC transfer; position storage: `tokensOwed = 0`, `feeGrowthInsideLastX128` updated
 - `totalFeesOwedX128` storage: decreased by the full scaled fee claim in both cases
 - `totalEscrowed` unchanged
+
+---
+
+### SC-CYSD: Collect after the switch pays at the pooled ratio
+
+**Given:**
+- The Safe owns the R9 position (300 USDC over `[5500, 6500)` minted at 6000), the vault at 5700, so the claim is 247,354,500 USDC units plus 90 YES, and the vault held 90 YES
+- A 10 USDC report over its liquidity left 9,999,999 units of fees owed, after the Q128 floor
+- The result `[1, 0]` is reported, the Oracle called `startWindDown` and `redeemOutcomeTokens`, so the switch is on and the vault holds no token
+- The vault's USDC was drained so that what it holds above `totalEscrowed` is 173,677,249 units, half of the pooled owed total `247,354,500 + 9,999,999 + 90,000,000 = 347,354,499` (FEAT-9BQZ FR-CYS5)
+
+**Steps:**
+1. The Safe calls collect(positionId)
+2. System computes owed = 9,999,999 and the one USDC ratio, `173,677,249 ÷ 347,354,499`
+3. System writes the snapshot, sets `tokensOwed` to zero, and debits `totalFeesOwedX128` by the full scaled claim
+4. System finds no token to redeem and transfers `floor(9,999,999 × 173,677,249 ÷ 347,354,499) = 4,999,999` units
+
+**Outcomes:**
+- LP receives 4,999,999 units, `tokensOwed == 0`, and a later collect owes only the fees that grew since
+- The 90 YES the ledger still owes count in the denominator at the payout: without them the collect would pay 6,748,560, so the collect and the burn use the same pooled ratio after the switch
+
+**Side Effects:**
+- `FeesCollected(positionId, safe, 9999999, 4999999)` emitted
+- `totalFeesOwedX128` storage: decreased by the full scaled fee claim
+- No `mergePositions` call, no `CompleteSetsMerged`, no `OutcomeTokensRedeemed`
 
 ---
