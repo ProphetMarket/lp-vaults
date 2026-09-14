@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-U07A: Collect Position Fees
 // Integration tests for every scenario in this use case.
-// Covers: SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-COEZ
+// Covers: SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-COEZ, SC-CYSD
 
 import {Test} from "forge-std/Test.sol";
 import {Vm, VmSafe} from "forge-std/Vm.sol";
@@ -859,5 +859,79 @@ contract CollectPaysItsShareTest is CollectFeesTestBase {
         vm.skip(vm.isContext(VmSafe.ForgeContext.Coverage));
         _giveOutcomeTokens(address(vault), vault.conditionId(), 20, 20);
         assertLt(_coldCollectGas(), 180_000, "the collect must stay under the NFR-U07P bound with a merge");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-CYSD: Collect after the switch pays at the pooled ratio
+// What: The R9 position at 5700 (247,354,500 USDC units plus 90 YES owed) with 9,999,999
+//       units of fees owed, the Oracle's redemption after [1, 0], and the vault drained to
+//       173,677,249 above escrow, half of the pooled owed total 347,354,499. The collect
+//       pays floor(9,999,999 x 173,677,249 / 347,354,499) = 4,999,999, settles the claim,
+//       and makes no merge call.
+// Why:  After the switch the collect uses the same one ratio as the burn (FR-CYS5). The 90
+//       YES the ledger still owes count in the denominator at the payout: without them the
+//       collect would pay 6,748,560.
+// ──────────────────────────────────────────────
+contract CollectAfterSwitchTest is CollectFeesTestBase {
+    uint256 constant FELL_USDC = 247_354_500;
+    uint256 constant BAND_TOKENS = 90e6;
+    uint256 constant FEES_OWED = 9_999_999;
+    uint256 constant POOLED_TOTAL = FELL_USDC + FEES_OWED + BAND_TOKENS;
+    uint256 constant HELD = POOLED_TOTAL / 2;
+    uint256 constant EXPECTED_PAID = 4_999_999;
+
+    address safe;
+    uint256 example;
+
+    event OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount);
+
+    function setUp() public override {
+        _deploy();
+        safe = lp;
+        // A floor of 1, so the worked example's liquidity passes the first-mint check
+        vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(2)), int24(10), uint128(1)));
+        vm.prank(operatorAddr);
+        vault.updateTick(6000);
+        example = _escrowAndMint(vault, operatorAddr, LP_PK, 5500, 6500, 300e6, keccak256("r9"));
+        vm.prank(operatorAddr);
+        vault.updateTick(5700);
+        _distributeFees(10e6);
+        _giveOutcomeTokens(address(vault), vault.conditionId(), BAND_TOKENS, 0);
+
+        _resolve(bytes32(uint256(2)), _payouts(1, 0));
+        vm.prank(oracleAddr);
+        vault.startWindDown();
+        vm.prank(oracleAddr);
+        vault.redeemOutcomeTokens();
+
+        uint256 above = mockUsdc.balanceOf(address(vault)) - vault.totalEscrowed();
+        vm.prank(exchangeAddr);
+        mockUsdc.transferFrom(address(vault), exchangeAddr, above - HELD);
+
+        assertEq(vault.totalFeesOwed(), FEES_OWED, "precondition: the fees owed after the Q128 floor");
+        assertEq(vault.totalUsdcOwed() + vault.totalFeesOwed() + vault.totalYesOwed(), POOLED_TOTAL, "precondition");
+        assertEq(mockUsdc.balanceOf(address(vault)) - vault.totalEscrowed(), HELD, "precondition: half held");
+        assertEq(ctf.balanceOf(address(vault), vault.yesTokenId()), 0, "precondition: no token after the switch");
+    }
+
+    // SC-CYSD: 4,999,999 at the pooled ratio, the claim settled, no merge call
+    function test_whenTheSwitchIsOnThenTheCollectPaysAtThePooledRatio() public {
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit FeesCollected(example, safe, FEES_OWED, EXPECTED_PAID);
+
+        vm.recordLogs();
+        vm.prank(safe);
+        vault.collect(example);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(mockUsdc.balanceOf(safe), EXPECTED_PAID, "the pooled share of the fees");
+        (,,,,,, uint256 tokensOwed) = vault.positions(example);
+        assertEq(tokensOwed, 0, "the claim is settled");
+        assertEq(vault.totalFeesOwedX128(), 0, "the ledger settled the whole scaled claim");
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].topics[0] != CompleteSetsMerged.selector, "no merge after the switch");
+            assertTrue(logs[i].topics[0] != OutcomeTokensRedeemed.selector, "nothing to redeem");
+        }
     }
 }

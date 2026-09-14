@@ -3,8 +3,9 @@ pragma solidity 0.8.20;
 
 // UC-9BR2: Apply Payout Ratios
 // Integration tests for every scenario in this use case.
-// Covers: SC-9BSC, SC-9BSD, SC-9BSE, SC-9BSF, SC-9BSG, SC-COET, SC-COEU
+// Covers: SC-9BSC, SC-9BSD, SC-9BSE, SC-9BSF, SC-9BSG, SC-COET, SC-COEU, SC-CYSB, SC-CYSC
 
+import {Vm} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
@@ -55,6 +56,9 @@ contract PayoutRatioTestBase is LPVaultFixture {
         uint256 tokenPaid
     );
     event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
+    event OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount);
+    event CompleteSetsMerged(address indexed caller, uint256 amount);
+    event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
 
     function setUp() public virtual {
         safe = _safeOf(vm.addr(LP_PK));
@@ -110,6 +114,149 @@ contract PayoutRatioTestBase is LPVaultFixture {
     function _expectFellBurn(uint256 id, uint256 fees, uint256 usdcPaid, uint256 yesPaid) internal {
         vm.expectEmit(true, true, false, true, address(vault));
         emit PositionBurned(id, safe, FELL_USDC, fees, usdcPaid, vault.yesTokenId(), BAND_TOKENS, yesPaid);
+    }
+
+    /// @dev Reports the result, winds the vault down, and has the Oracle redeem: the switch
+    ///      (FEAT-6HBN UC-6HBP). The question ID of the vault's condition is the market ID.
+    function _resolveAndRedeem(uint256 yesNumerator, uint256 noNumerator) internal {
+        _resolve(bytes32(uint256(1)), _payouts(yesNumerator, noNumerator));
+        vm.prank(oracleAddr);
+        vault.startWindDown();
+        vm.prank(oracleAddr);
+        vault.redeemOutcomeTokens();
+    }
+
+    /// @dev Counts the logs of one event selector from one emitter in a recorded window.
+    function _countLogs(Vm.Log[] memory logs, address emitter, bytes32 selector) internal pure returns (uint256 n) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == emitter && logs[i].topics[0] == selector) n++;
+        }
+    }
+
+    /// @dev The one PositionBurned log's usdcPaid + tokenPaid, the USDC a resolved burn sent.
+    function _paidSum(Vm.Log[] memory logs) internal pure returns (uint256) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] != PositionBurned.selector) continue;
+            (,, uint256 usdcPaid,,, uint256 tokenPaid) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+            return usdcPaid + tokenPaid;
+        }
+        revert("no PositionBurned log");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-CYSB: Three burns after the switch receive the same ratio
+// What: Three positions of the worked example at 5700 (742,063,500 USDC units and 270 YES
+//       owed), the vault holding 270 YES and its USDC drained to half of what it owes
+//       (371,031,750), the result [1, 0] reported and redeemed. held = 371,031,750 +
+//       270,000,000 = 641,031,750 and owed = 742,063,500 + 270,000,000 = 1,012,063,500, so
+//       each burn pays floor(337,354,500 x 641,031,750 / 1,012,063,500) = 213,677,250 in one
+//       transfer, and the third leaves the vault at totalEscrowed.
+// Why:  After the switch every asset is USDC, and one pooled ratio is what pro-rata means
+//       (FR-CYS5, ADR-9BSH). The ratio stays the same because every burn debits the full
+//       owed amount.
+// ──────────────────────────────────────────────
+contract ThreeBurnsAfterSwitchTest is PayoutRatioTestBase {
+    uint256 a;
+    uint256 b;
+    uint256 c;
+    uint256 constant EACH = 213_677_250;
+
+    function setUp() public override {
+        super.setUp();
+        a = _mintExample(keccak256("a"));
+        b = _mintExample(keccak256("b"));
+        c = _mintExample(keccak256("c"));
+        _moveTick(5700);
+        _fundVault(270e6, 0);
+        _drainTo(3 * FELL_USDC / 2);
+        _resolveAndRedeem(1, 0);
+        assertEq(mockUsdc.balanceOf(address(vault)), 641_031_750, "precondition: held after the redemption");
+        assertEq(vault.totalUsdcOwed() + vault.totalYesOwed(), 1_012_063_500, "precondition: the pooled owed total");
+    }
+
+    // SC-CYSB: each burn pays 213,677,250 in one transfer, the same ratio each time
+    function test_whenShortOfUsdcAfterTheSwitchThenThreeBurnsPayTheSamePooledShare() public {
+        vm.recordLogs();
+        _burn(a);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        assertEq(_paidSum(logs), EACH, "first burn: the pooled share");
+        assertEq(mockUsdc.balanceOf(safe), EACH, "one transfer of the pooled share");
+        assertEq(_countLogs(logs, address(ctf), TransferSingle.selector), 0, "no token leg");
+        assertEq(_countLogs(logs, address(vault), OutcomeTokensRedeemed.selector), 0, "the Oracle redeemed first");
+
+        vm.recordLogs();
+        _burn(b);
+        assertEq(_paidSum(vm.getRecordedLogs()), EACH, "second burn: the same share");
+
+        vm.recordLogs();
+        _burn(c);
+        assertEq(_paidSum(vm.getRecordedLogs()), EACH, "third burn: the same share");
+
+        assertEq(mockUsdc.balanceOf(safe), 3 * EACH, "three equal shares");
+        assertEq(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "the vault holds the escrow total");
+        assertEq(vault.totalUsdcOwed(), 0, "the USDC total is empty");
+        assertEq(vault.totalYesOwed(), 0, "the YES total is empty");
+        assertEq(vault.totalFeesOwed(), 0, "the fee total is empty");
+    }
+
+    // SC-CYSB: the two legs are one prorated sum, so usdcPaid + tokenPaid never exceeds held
+    function test_theTwoLegsAreOneProratedSum() public {
+        vm.recordLogs();
+        _burn(a);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 usdcPaid;
+        uint256 tokenPaid;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] != PositionBurned.selector) continue;
+            (,, usdcPaid,,, tokenPaid) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+        }
+        // floor(247,354,500 x 641,031,750 / 1,012,063,500) = 156,672,650; the token leg is the rest
+        assertEq(usdcPaid, uint256(FELL_USDC) * 641_031_750 / 1_012_063_500, "usdcPaid is the prorated principal");
+        assertEq(tokenPaid, EACH - usdcPaid, "tokenPaid is the rest of the prorated sum");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-CYSC: A payout after the switch redeems late tokens first
+// What: One position at 5700, the Oracle redeemed after [1, 0], then 5 YES and 5 NO arrive.
+//       The burn redeems them for 5 USDC (OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6)), then
+//       pays 337,354,500, and the vault keeps the 5 USDC and holds no token.
+// Why:  The Oracle's call is a one-time switch, not a step the vault depends on for
+//       solvency; every payout settles first (ADR-6HCK).
+// ──────────────────────────────────────────────
+contract LateTokensRedeemedByPayoutTest is PayoutRatioTestBase {
+    uint256 positionId;
+
+    function setUp() public override {
+        super.setUp();
+        positionId = _mintExample(keccak256("a"));
+        _moveTick(5700);
+        _fundVault(BAND_TOKENS, 0);
+        // The USDC the band's fills spent, so the vault holds exactly the claim before the switch
+        _drainThroughExchange(PRINCIPAL - FELL_USDC);
+        _resolveAndRedeem(1, 0);
+        _fundVault(5e6, 5e6);
+    }
+
+    // SC-CYSC: the redemption event, then the burn; the vault keeps the 5 USDC and no token
+    function test_burnRedeemsTheLateTokensFirst() public {
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6);
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(positionId, safe, FELL_USDC, 0, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+
+        vm.recordLogs();
+        _burn(positionId);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(mockUsdc.balanceOf(safe), FELL_USDC + BAND_TOKENS, "the whole claim in USDC");
+        assertEq(mockUsdc.balanceOf(address(vault)), 5e6, "the vault keeps the late tokens' USDC");
+        assertEq(_yesOf(address(vault)), 0, "no YES left");
+        assertEq(ctf.balanceOf(address(vault), vault.noTokenId()), 0, "no NO left");
+        assertEq(_countLogs(logs, address(vault), CompleteSetsMerged.selector), 0, "no merge after the switch");
     }
 }
 

@@ -6,8 +6,8 @@ pragma solidity 0.8.20;
 // FEAT-6HBN: Complete-Set Merge and Resolution Redemption
 // FEAT-7G40: Burn LP Position
 // Shared test fixture: the real Gnosis ConditionalTokens bytecode and the helpers that
-// prepare a binary condition, create a vault with a verified outcome-token identity, and
-// fund a vault with outcome tokens.
+// prepare a binary condition, create a vault with a verified outcome-token identity,
+// fund a vault with outcome tokens, and report a condition's result.
 // Test files import it. src/ never does.
 
 import {Test} from "forge-std/Test.sol";
@@ -19,6 +19,9 @@ import {MockERC20} from "./MockERC20.sol";
 ///      the calls the production code makes.
 interface ITestConditionalTokens {
     function prepareCondition(address oracle, bytes32 questionId, uint256 outcomeSlotCount) external;
+    function reportPayouts(bytes32 questionId, uint256[] calldata payouts) external;
+    function payoutDenominator(bytes32 conditionId) external view returns (uint256);
+    function payoutNumerators(bytes32 conditionId, uint256 index) external view returns (uint256);
     function splitPosition(
         address collateralToken,
         bytes32 parentCollectionId,
@@ -89,6 +92,21 @@ abstract contract ConditionalTokensFixture is Test {
         collateralOf[conditionId] = factory.usdc();
         vm.prank(oracle);
         vault = factory.createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId);
+    }
+
+    /// @dev Reports the result of a condition this test contract prepared, the way Prophet's
+    ///      `Resolution.finalizePayouts` does. The test contract is the condition's oracle on the
+    ///      ConditionalTokens contract (see _prepareBinaryCondition), so only it can report.
+    ///      `payouts` is `[1, 0]` for YES, `[0, 1]` for NO, or `[1, 1]` for a cancelled market.
+    function _resolve(bytes32 questionId, uint256[] memory payouts) internal {
+        ctf.reportPayouts(questionId, payouts);
+    }
+
+    /// @dev The two-element payout vector, so a test reads `_payouts(1, 0)` as YES wins.
+    function _payouts(uint256 yesNumerator, uint256 noNumerator) internal pure returns (uint256[] memory payouts) {
+        payouts = new uint256[](2);
+        payouts[0] = yesNumerator;
+        payouts[1] = noNumerator;
     }
 
     /// @dev Gives `holder` `amount` YES and `amount` NO tokens by splitting USDC through the real contract.

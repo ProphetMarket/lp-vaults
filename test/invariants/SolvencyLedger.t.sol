@@ -5,20 +5,25 @@ pragma solidity 0.8.20;
 // UC-9BR0: Maintain Solvency Totals, UC-9BR1: Accumulate Principal Shift, UC-9BR2: Apply Payout Ratios
 // Invariants required by CLAUDE.md's Foundry conventions and by the ledger requirement of
 // audit-solutions.md (FR-2J6D), for the ledger under mints, burns, collects, fee reports,
-// merges, freezes, and tick moves:
+// merges, freezes, tick moves, a resolution, and the Oracle's redemption (the switch,
+// FEAT-6HBN):
 //   1. the four scaled totals equal the sum over every live position of its scaled claim
 //      at currentTick and its scaled fee claim, exactly, with no tolerance (NFR-9BRX). The
 //      claim is computed per level in this file, not from the vault's closed form, so a wrong
-//      closed form is caught too
+//      closed form is caught too. The switch changes no total, so the check does not change
 //   2. noSideLiquidity == Σ liquidity over in-range positions whose mintTick <= currentTick
 //   3. no burn or collect paid more of an asset than the vault held, and every burn paid
-//      exactly floor(owed x min(1, held / total)) per asset (NFR-9BRW, FR-9BRR)
-//   4. updateTick and the exits reverted only for a documented reason
+//      exactly floor(owed x min(1, held / total)) per asset before the switch, and
+//      floor((usdcOwed + feesOwed + tokenUsdc) x min(1, held / total)) as one USDC sum after
+//      it (NFR-9BRW, FR-9BRR, FR-CYS5)
+//   4. updateTick, the exits, and the redemption reverted only for a documented reason
 // The handler's moves are clamped to [-300, 10300] and bounded to 700 ticks, so they cross
 // nothing, end between ticks, cross mint ticks, and leave the price scale; its deposits
-// rarely divide by the range width, so only a scaled ledger stays exact; and it freezes the
-// vault one pick in ten, after which the exits keep running. Every expected value is read
-// from the vault's own records, with no handler mirror.
+// rarely divide by the range width, so only a scaled ledger stays exact; it freezes the
+// vault one pick in ten, after which the exits keep running; and it resolves the market one
+// pick in three once two positions are live (wind-down, then the result), after which the
+// Oracle redeems and the exits pay USDC at one ratio. Every expected value is read from the vault's own records, with no
+// handler mirror.
 // Mutation checks of 2026-09-14: invariant 1 fails at once with the trailing segment
 // removed, with the segment before a crossing removed, and with liquidityNet applied
 // before the segment.
@@ -31,6 +36,12 @@ import {LPVaultFixture} from "../fixtures/LPVaultFixture.sol";
 import {ITestConditionalTokens} from "../fixtures/ConditionalTokensFixture.sol";
 import {MockERC20} from "../fixtures/MockERC20.sol";
 
+/// @dev The test contract prepared the condition, so it is the condition's oracle on the
+///      ConditionalTokens contract and the only address that can report; the handler asks it to.
+interface IResultReporter {
+    function reportPayouts(uint256[] calldata payouts) external;
+}
+
 // ──────────────────────────────────────────────
 // Handler: bounded action surface the invariant fuzzer drives. The mint and the fee report
 // run with no try/catch, because no documented rejection is reachable inside their bounds.
@@ -41,7 +52,9 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     LPVault public vault;
     MockERC20 public mockUsdc;
     address public operatorAddr;
+    address public oracleAddr;
     address public exchangeAddr;
+    IResultReporter public reporter;
 
     uint256 constant LP_PK = 0xA11CE;
     /// @dev The one Safe that owns every position, so any two same-range positions can merge.
@@ -55,6 +68,10 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     uint256 public completedCollects;
     uint256 public completedMerges;
     uint256 public completedFreezes;
+    uint256 public completedResolutions;
+    uint256 public completedRedemptions;
+    /// @dev How many payouts ran after the switch, so invariant 3 proved the pooled ratio too.
+    uint256 public resolvedPayouts;
     /// @dev How many payouts left the vault short of an asset it owed, so invariant 3 proved
     ///      the ratio on a real cut and not only on a ratio of 1.
     uint256 public cutPayouts;
@@ -84,6 +101,7 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         MockERC20 mockUsdc_,
         ITestConditionalTokens ctf_,
         address operatorAddr_,
+        address oracleAddr_,
         address exchangeAddr_
     ) {
         vault = vault_;
@@ -92,7 +110,9 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         // The fixture's token funding reads the collateral the vault's condition was split against
         collateralOf[vault_.conditionId()] = address(mockUsdc_);
         operatorAddr = operatorAddr_;
+        oracleAddr = oracleAddr_;
         exchangeAddr = exchangeAddr_;
+        reporter = IResultReporter(msg.sender);
         lp = _safeOf(vm.addr(LP_PK));
     }
 
@@ -108,7 +128,8 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     ///      boundaries, with a deposit that rarely divides by the width. One time in four,
     ///      when positions exist, the range copies a live position's, so the merge finds a pair.
     function mint(int256 lowerSeed, uint256 widthSeed, uint256 usdcSeed, bool copyRange) public {
-        if (vault.phase() == 3) return;
+        // A mint reverts VaultNotActive in WindDown and Cancelled
+        if (vault.phase() != 1) return;
         int24 tickLower;
         int24 tickUpper;
         if (copyRange && positionIds.length > 0) {
@@ -136,7 +157,8 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     /// @dev Moves the tick by at most 700 ticks, clamped to [-300, 10300] so the price leaves
     ///      the scale on both sides. TooManyTicksCrossed is the one documented rejection.
     function move(int256 moveSeed) public {
-        if (vault.phase() == 3) return;
+        // A move reverts VaultNotActive in WindDown and Cancelled
+        if (vault.phase() != 1) return;
         int256 delta = bound(moveSeed, -700, 700);
         if (delta == 0) return;
         int256 target = int256(vault.currentTick()) + delta;
@@ -186,13 +208,13 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     function collect(uint256 idSeed) public {
         if (positionIds.length == 0) return;
         uint256 id = positionIds[idSeed % positionIds.length];
-        uint256 usdcHeld = _usdcAvailable();
-        uint256 usdcTotal = vault.totalUsdcOwed() + vault.totalFeesOwed();
+        (uint256 usdcHeld, uint256 usdcTotal, bool resolved) = _usdcRatioSides();
         uint256 before = mockUsdc.balanceOf(lp);
         vm.recordLogs();
         vm.prank(lp);
         try vault.collect(id) {
             completedCollects++;
+            if (resolved) resolvedPayouts++;
             uint256 paid = mockUsdc.balanceOf(lp) - before;
             _checkCollectedLog(vm.getRecordedLogs(), paid, usdcHeld, usdcTotal);
         } catch (bytes memory reason) {
@@ -222,8 +244,7 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         if (positionIds.length == 0) return;
         uint256 i = idSeed % positionIds.length;
         uint256 id = positionIds[i];
-        uint256 usdcHeld = _usdcAvailable();
-        uint256 usdcTotal = vault.totalUsdcOwed() + vault.totalFeesOwed();
+        (uint256 usdcHeld, uint256 usdcTotal, bool resolved) = _usdcRatioSides();
         (uint256 yesHeld, uint256 noHeld) = _tokensHeldAfterMerge();
         uint256 yesTotal = vault.totalYesOwed();
         uint256 noTotal = vault.totalNoOwed();
@@ -234,9 +255,51 @@ contract SolvencyLedgerHandler is LPVaultFixture {
             completedBurns++;
             positionIds[i] = positionIds[positionIds.length - 1];
             positionIds.pop();
-            _checkBurnedLog(vm.getRecordedLogs(), usdcHeld, usdcTotal, yesHeld, yesTotal, noHeld, noTotal);
+            if (resolved) {
+                resolvedPayouts++;
+                _checkResolvedBurnedLog(vm.getRecordedLogs(), usdcHeld, usdcTotal);
+            } else {
+                _checkBurnedLog(vm.getRecordedLogs(), usdcHeld, usdcTotal, yesHeld, yesTotal, noHeld, noTotal);
+            }
         } catch (bytes memory reason) {
             _recordExitRevert(reason);
+        }
+    }
+
+    /// @dev Resolves the market once per run, one pick in three once two positions are live,
+    ///      so the switch lands mid-run and the exits after it have claims to pay (one pick in
+    ///      eight landed near the end of a 50-call run and left one run in six with a payout
+    ///      after the switch, measured on 2026-09-14): the Oracle winds the vault down
+    ///      when it is Active (the redemption reverts while Active, and a frozen vault needs no
+    ///      wind-down), then the condition's oracle, the test contract, reports [1, 0], [0, 1],
+    ///      or [1, 1] by seed, the three vectors Prophet's Resolution.sol allows. No try/catch:
+    ///      nothing documented can reject either call.
+    function resolve(uint256 seed) public {
+        if (completedResolutions > 0 || seed % 3 != 0 || positionIds.length < 2) return;
+        if (vault.phase() == 1) {
+            vm.prank(oracleAddr);
+            vault.startWindDown();
+        }
+        uint256 which = (seed / 8) % 3;
+        uint256[] memory payouts = which == 0 ? _payouts(1, 0) : which == 1 ? _payouts(0, 1) : _payouts(1, 1);
+        reporter.reportPayouts(payouts);
+        completedResolutions++;
+    }
+
+    /// @dev The Oracle's redemption, the switch. MarketNotResolved (no result yet) and
+    ///      VaultStillActive are its documented rejections; any other selector fails the run.
+    function redeem(uint256) public {
+        vm.prank(oracleAddr);
+        try vault.redeemOutcomeTokens() {
+            completedRedemptions++;
+        } catch (bytes memory reason) {
+            bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0xffffffff);
+            if (
+                undocumentedExitRevert == bytes4(0) && selector != LPVault.MarketNotResolved.selector
+                    && selector != LPVault.VaultStillActive.selector
+            ) {
+                undocumentedExitRevert = selector;
+            }
         }
     }
 
@@ -274,14 +337,64 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         completedFreezes++;
     }
 
-    /// @dev The USDC a payout may draw on: balance + pairs - totalEscrowed, floored at zero.
-    function _usdcAvailable() internal view returns (uint256) {
+    /// @dev The two sides of the USDC ratio (FR-9BRM before the switch, FR-CYS5 after it): held
+    ///      is the balance plus the USDC the settlement produces (the pairs, or every token at the
+    ///      stored payout) less totalEscrowed, floored at zero; total is the principal and the
+    ///      fees owed, plus the token totals at the stored payout after the switch.
+    function _usdcRatioSides() internal view returns (uint256 held, uint256 total, bool resolved) {
         (uint256 yes, uint256 no) = _balances();
-        uint256 pairs = yes < no ? yes : no;
-        uint256 held = mockUsdc.balanceOf(address(vault)) + pairs;
+        (uint128 numYes, uint128 numNo) = vault.payoutNumerators();
+        resolved = (numYes | numNo) != 0;
+        uint256 incoming = resolved ? _atPayout(yes, no) : (yes < no ? yes : no);
+        uint256 balance = mockUsdc.balanceOf(address(vault)) + incoming;
         uint256 escrowed = vault.totalEscrowed();
-        return held > escrowed ? held - escrowed : 0;
+        held = balance > escrowed ? balance - escrowed : 0;
+        total = vault.totalUsdcOwed() + vault.totalFeesOwed();
+        if (resolved) total += _atPayout(vault.totalYesOwed(), vault.totalNoOwed());
     }
+
+    /// @dev What `yes` YES and `no` NO redeem for at the stored payout, each side rounded down,
+    ///      as the ConditionalTokens contract pays.
+    function _atPayout(uint256 yes, uint256 no) internal view returns (uint256) {
+        (uint128 numYes, uint128 numNo) = vault.payoutNumerators();
+        uint256 den = uint256(numYes) + uint256(numNo);
+        return yes * numYes / den + no * numNo / den;
+    }
+
+    /// @dev After the switch a burn pays one USDC sum: usdcPaid + tokenPaid must equal
+    ///      floor((usdcOwed + feesOwed + tokenUsdc) x min(1, held / total)), never above held,
+    ///      with the token leg valued at the stored payout (FR-CYS4, FR-CYS5).
+    function _checkResolvedBurnedLog(Vm.Log[] memory logs, uint256 usdcHeld, uint256 usdcTotal) internal {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] != PositionBurned.selector) continue;
+            (
+                uint256 usdcOwed,
+                uint256 feesOwed,
+                uint256 usdcPaid,
+                uint256 tokenId,
+                uint256 tokenOwed,
+                uint256 tokenPaid
+            ) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+            uint256 tokenUsdc = tokenId == vault.yesTokenId()
+                ? _atPayout(tokenOwed, 0)
+                : (tokenId == vault.noTokenId() ? _atPayout(0, tokenOwed) : 0);
+            _checkLeg(usdcOwed + feesOwed + tokenUsdc, usdcPaid + tokenPaid, usdcHeld, usdcTotal, "USDC (resolved)");
+            // A redemption burns tokens, which is a TransferSingle to the zero address; a
+            // transfer to any other address is the token leg the switch forbids
+            for (uint256 j = 0; j < logs.length; j++) {
+                if (
+                    logs[j].emitter == address(ctf) && logs[j].topics[0] == TransferSingle.selector
+                        && logs[j].topics[3] != bytes32(0)
+                ) {
+                    _mismatch("a resolved burn made an ERC-1155 transfer");
+                }
+            }
+            return;
+        }
+        _mismatch("a successful burn must emit PositionBurned");
+    }
+
+    event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
 
     function _tokensHeldAfterMerge() internal view returns (uint256 yesHeld, uint256 noHeld) {
         (uint256 yes, uint256 no) = _balances();
@@ -384,7 +497,7 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
         vm.prank(operatorAddr);
         vault.updateTick(5000);
 
-        handler = new SolvencyLedgerHandler(vault, mockUsdc, ctf, operatorAddr, exchangeAddr);
+        handler = new SolvencyLedgerHandler(vault, mockUsdc, ctf, operatorAddr, oracleAddr, exchangeAddr);
         targetContract(address(handler));
 
         // Prologue: one position of each side and a burn, so the afterInvariant guards hold by
@@ -432,15 +545,30 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
         assertFalse(handler.payoutMismatch(), handler.payoutMismatchReason());
     }
 
-    // NFR-9BRT, NFR-9BRU: no move and no exit reverted for an undocumented reason.
+    /// @dev Reports the result of the vault's condition, whose question ID is the market ID. Only
+    ///      the handler may call it: this contract prepared the condition, so it is the oracle on
+    ///      the ConditionalTokens contract, and the fuzzer must not report on its own.
+    function reportPayouts(uint256[] calldata payouts) external {
+        require(msg.sender == address(handler), "only the handler reports");
+        _resolve(bytes32(uint256(1)), payouts);
+    }
+
+    // NFR-9BRT, NFR-9BRU: no move, no exit, and no redemption reverted for an undocumented reason.
     function invariant_ledgerRevertsOnlyForDocumentedReasons() public view {
         assertEq(handler.undocumentedMoveRevert(), bytes4(0), "updateTick reverted with an undocumented selector");
-        assertEq(handler.undocumentedExitRevert(), bytes4(0), "an exit reverted with an undocumented selector");
+        assertEq(
+            handler.undocumentedExitRevert(),
+            bytes4(0),
+            "an exit or the redemption reverted with an undocumented selector"
+        );
     }
 
     /// @dev Every action ran at least once, so each invariant proved something. The setUp prologue
     ///      makes the counters nonzero when the action works, and its drain makes the first burn
-    ///      a cut, so invariant 3 proves the ratio on a real shortfall in every run.
+    ///      a cut, so invariant 3 proves the ratio on a real shortfall in every run. No guard for
+    ///      the switch: the resolution is one pick in eight and a per-run guard would fail about
+    ///      one run in a thousand; the deterministic tests of UC-6HBP, UC-7G41, UC-9BR2, and
+    ///      UC-U07A prove the transition, and this harness proves the invariants hold across it.
     function afterInvariant() public view {
         assertGt(handler.completedMoves(), 0, "the run must include a completed move");
         assertGt(handler.completedBurns(), 0, "the run must include a completed burn");

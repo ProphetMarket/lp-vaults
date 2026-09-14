@@ -5,13 +5,14 @@ pragma solidity 0.8.20;
 // UC-7G41: Burn Position
 // Integration tests for every scenario in this use case, against the real ConditionalTokens
 // bytecode: the claim model of decision C26, the merge-first rule, the pro-rata rule of
-// decision O2 (FEAT-9BQZ), and the tick deinitialization that closes audit issue 6.15.
+// decision O2 (FEAT-9BQZ), the tick deinitialization that closes audit issue 6.15, and the
+// resolved branch after the Oracle's redemption (FEAT-6HBN, the switch).
 // Covers: SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B,
-//         SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6
+//         SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6, SC-CYS7, SC-CYS8, SC-CYS9, SC-CYSA
 
 import {Vm, VmSafe} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
-import {LPVault} from "../../../src/LPVault.sol";
+import {LPVault, IConditionalTokens} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 import {VaultStorage} from "../../fixtures/VaultStorage.sol";
@@ -52,6 +53,8 @@ contract BurnPositionTestBase is LPVaultFixture {
     uint256 constant ROSE_USDC = 265_345_500;
     // An outcome token has USDC's six decimals: 90 tokens are 90e6 units, worth 90 USDC at par
     uint256 constant BAND_TOKENS = 90e6;
+    // What the band's fills spent on the 90 YES: the deposit less the claim's USDC at 5700
+    uint256 constant BAND_SPENT = PRINCIPAL - FELL_USDC;
     uint256 constant Q128 = 2 ** 128;
 
     uint256 positionId;
@@ -71,6 +74,15 @@ contract BurnPositionTestBase is LPVaultFixture {
     event Transfer(address indexed from, address indexed to, uint256 value);
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
+    event OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount);
+    event PayoutRedemption(
+        address indexed redeemer,
+        address indexed collateralToken,
+        bytes32 indexed parentCollectionId,
+        bytes32 conditionId,
+        uint256[] indexSets,
+        uint256 payout
+    );
 
     function setUp() public virtual {
         safe = _safeOf(vm.addr(LP_PK));
@@ -121,6 +133,23 @@ contract BurnPositionTestBase is LPVaultFixture {
     function _burn(uint256 id) internal {
         vm.prank(safe);
         vault.burnPosition(id);
+    }
+
+    /// @dev Reports the result, winds the vault down, and has the Oracle redeem: the switch
+    ///      (FEAT-6HBN UC-6HBP). The question ID of the vault's condition is the market ID.
+    function _resolveAndRedeem(uint256 yesNumerator, uint256 noNumerator) internal {
+        _resolve(marketId, _payouts(yesNumerator, noNumerator));
+        vm.prank(oracleAddr);
+        vault.startWindDown();
+        vm.prank(oracleAddr);
+        vault.redeemOutcomeTokens();
+    }
+
+    /// @dev Counts the logs of one event selector from one emitter in a recorded window.
+    function _countLogs(Vm.Log[] memory logs, address emitter, bytes32 selector) internal pure returns (uint256 n) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == emitter && logs[i].topics[0] == selector) n++;
+        }
     }
 
     function _bitIsSet(int24 tick) internal view returns (bool) {
@@ -981,6 +1010,189 @@ contract BurnGasTest is BurnPositionTestBase {
         uint256 used = before - gasleft();
 
         assertLt(used, 250_000, "the burn must stay under the NFR-7G5C bound");
+    }
+
+    // NFR-7G5C: after the switch, with nothing to redeem, the burn pays one USDC transfer
+    function test_burnAfterTheSwitchWithNothingToRedeemStaysUnderBound() public {
+        vm.skip(vm.isContext(VmSafe.ForgeContext.Coverage));
+        _moveTick(5700);
+        _fundVault(BAND_TOKENS, 0);
+        _resolveAndRedeem(1, 0);
+        vm.cool(address(vault));
+        vm.cool(address(factory));
+        vm.cool(address(mockUsdc));
+        vm.cool(address(ctf));
+
+        vm.prank(safe);
+        uint256 before = gasleft();
+        vault.burnPosition(positionId);
+        uint256 used = before - gasleft();
+
+        assertLt(used, 250_000, "the resolved burn must stay under the NFR-7G5C bound");
+    }
+
+    // NFR-7G5C: after the switch, a burn that redeems late tokens first still fits the bound
+    function test_burnAfterTheSwitchWithALateRedemptionStaysUnderBound() public {
+        vm.skip(vm.isContext(VmSafe.ForgeContext.Coverage));
+        _moveTick(5700);
+        _fundVault(BAND_TOKENS, 0);
+        _resolveAndRedeem(1, 0);
+        _fundVault(5e6, 5e6);
+        vm.cool(address(vault));
+        vm.cool(address(factory));
+        vm.cool(address(mockUsdc));
+        vm.cool(address(ctf));
+
+        vm.prank(safe);
+        uint256 before = gasleft();
+        vault.burnPosition(positionId);
+        uint256 used = before - gasleft();
+
+        assertLt(used, 250_000, "the resolved burn with a redemption must stay under the NFR-7G5C bound");
+    }
+}
+
+// ──────────────────────────────────────────────
+// Resolved-branch base: the SC-7G44 state (the vault at 5700 holding 90 YES), with the USDC
+// the band's fills spent moved out through the exchange, so the vault holds exactly the
+// claim's USDC before the switch and exactly the claim plus the redeemed token leg after it.
+// ──────────────────────────────────────────────
+contract BurnAfterResolutionTestBase is BurnPositionTestBase {
+    function setUp() public virtual override {
+        super.setUp();
+        _moveTick(5700);
+        _fundVault(BAND_TOKENS, 0);
+        _drainThroughExchange(BAND_SPENT);
+        assertEq(mockUsdc.balanceOf(address(vault)), FELL_USDC, "precondition: the vault holds the claim's USDC");
+    }
+
+    /// @dev Burns the example and asserts the one USDC transfer, the event, and no token leg.
+    function _assertResolvedBurn(uint256 usdcOut, uint256 tokenPaid) internal {
+        vm.expectEmit(true, true, false, true, address(mockUsdc));
+        emit Transfer(address(vault), safe, usdcOut);
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(positionId, safe, FELL_USDC, 0, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, tokenPaid);
+
+        vm.recordLogs();
+        _burn(positionId);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(mockUsdc.balanceOf(safe), usdcOut, "the Safe receives the claim's USDC and the token leg's USDC");
+        assertEq(_yesOf(safe), 0, "the Safe receives no YES");
+        assertEq(_noOf(safe), 0, "the Safe receives no NO");
+        assertEq(_countLogs(logs, address(mockUsdc), Transfer.selector), 1, "one USDC transfer");
+        assertEq(_countLogs(logs, address(ctf), TransferSingle.selector), 0, "no ERC-1155 transfer");
+        assertEq(_countLogs(logs, address(ctf), PayoutRedemption.selector), 0, "nothing left to redeem");
+        assertEq(_countLogs(logs, address(vault), OutcomeTokensRedeemed.selector), 0, "no redemption event");
+        assertEq(mockUsdc.balanceOf(address(vault)), 0, "the vault paid the whole claim");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-CYS7: Burn after the switch pays the winning leg in USDC
+// What: With [1, 0] reported and the Oracle's redemption done, the vault holds
+//       247,354,500 + 90,000,000 = 337,354,500 USDC units and no token. The burn values
+//       the 90 YES at 90 USDC, finds one ratio of 1, and pays 337,354,500 in one transfer.
+// Why:  The USDC is in the vault, and one transfer costs less than one transfer plus an
+//       ERC-1155 transfer (FR-CYS4). tokenPaid reports the token leg's USDC after the switch.
+// ──────────────────────────────────────────────
+contract BurnAfterSwitchWinningLegTest is BurnAfterResolutionTestBase {
+    function setUp() public override {
+        super.setUp();
+        _resolveAndRedeem(1, 0);
+        assertEq(mockUsdc.balanceOf(address(vault)), FELL_USDC + BAND_TOKENS, "precondition: the redeemed YES");
+        assertEq(_yesOf(address(vault)), 0, "precondition: no token");
+    }
+
+    // SC-CYS7: one transfer of 337,354,500, PositionBurned with tokenPaid = 90e6, no token leg
+    function test_paysTheWinningLegAtParInOneUsdcTransfer() public {
+        _assertResolvedBurn(FELL_USDC + BAND_TOKENS, BAND_TOKENS);
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-CYS8: Burn after the switch pays the losing leg nothing
+// What: With [0, 1] reported and redeemed, the 90 YES redeemed for nothing, so the vault
+//       holds 247,354,500 and the burn pays that with tokenPaid = 0. tokenOwed still reports
+//       the 90 tokens the claim held.
+// ──────────────────────────────────────────────
+contract BurnAfterSwitchLosingLegTest is BurnAfterResolutionTestBase {
+    function setUp() public override {
+        super.setUp();
+        _resolveAndRedeem(0, 1);
+        assertEq(mockUsdc.balanceOf(address(vault)), FELL_USDC, "precondition: the YES redeemed for nothing");
+    }
+
+    // SC-CYS8: 247,354,500 in one transfer, tokenPaid = 0
+    function test_paysTheLosingLegNothing() public {
+        _assertResolvedBurn(FELL_USDC, 0);
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-CYS9: Burn after a cancelled market pays half the token leg
+// What: With [1, 1] reported and redeemed, the 90 YES redeemed for 45 USDC, so the vault
+//       holds 292,354,500 and the burn pays that with tokenPaid = 45e6.
+// ──────────────────────────────────────────────
+contract BurnAfterSwitchCancelledMarketTest is BurnAfterResolutionTestBase {
+    function setUp() public override {
+        super.setUp();
+        _resolveAndRedeem(1, 1);
+        assertEq(mockUsdc.balanceOf(address(vault)), FELL_USDC + BAND_TOKENS / 2, "precondition: half");
+    }
+
+    // SC-CYS9: 292,354,500 in one transfer, tokenPaid = 45e6
+    function test_paysHalfTheTokenLeg() public {
+        _assertResolvedBurn(FELL_USDC + BAND_TOKENS / 2, BAND_TOKENS / 2);
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-CYSA: Burn between resolution and the switch pays the token in kind
+// What: With [1, 0] reported but the Oracle's redemption not yet called, the stored payout
+//       is (0, 0), so the burn takes the pre-switch path: 247,354,500 USDC and 90 YES, with
+//       the ERC-1155 transfer as the last call. The Safe then redeems the 90 YES itself for
+//       90 USDC.
+// Why:  No LP waits on the Oracle (ADR-6HCK).
+// ──────────────────────────────────────────────
+contract BurnBetweenResolutionAndSwitchTest is BurnAfterResolutionTestBase {
+    function setUp() public override {
+        super.setUp();
+        _resolve(marketId, _payouts(1, 0));
+        (uint128 numYes, uint128 numNo) = vault.payoutNumerators();
+        assertEq(numYes | numNo, 0, "precondition: the switch is off");
+    }
+
+    // SC-CYSA: identical to SC-7G44, with no redemption call
+    function test_paysTheTokenInKindAsBeforeTheResolution() public {
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(positionId, safe, FELL_USDC, 0, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+
+        vm.recordLogs();
+        _burn(positionId);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "the claim's USDC");
+        assertEq(_yesOf(safe), BAND_TOKENS, "the 90 YES in kind");
+        assertEq(_countLogs(logs, address(ctf), PayoutRedemption.selector), 0, "no redemption");
+        assertEq(_countLogs(logs, address(vault), OutcomeTokensRedeemed.selector), 0, "no redemption event");
+        assertEq(
+            logs[logs.length - 2].topics[0], TransferSingle.selector, "the ERC-1155 transfer is the last external call"
+        );
+    }
+
+    // SC-CYSA: the Safe redeems the 90 YES at the ConditionalTokens contract for 90 USDC
+    function test_safeRedeemsTheTokenItselfForTheSameUsdc() public {
+        _burn(positionId);
+
+        // The arguments are read first, so the prank lands on the redemption call itself
+        bytes32 conditionId = vault.conditionId();
+        uint256[] memory partition = _binaryPartition();
+        vm.prank(safe);
+        IConditionalTokens(address(ctf)).redeemPositions(address(mockUsdc), bytes32(0), conditionId, partition);
+
+        assertEq(mockUsdc.balanceOf(safe), FELL_USDC + BAND_TOKENS, "the same 337.3545 USDC, one step later");
+        assertEq(_yesOf(safe), 0, "the YES are redeemed");
     }
 }
 
