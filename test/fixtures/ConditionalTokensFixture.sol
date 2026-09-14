@@ -46,6 +46,7 @@ interface ITestConditionalTokens {
     function getOutcomeSlotCount(bytes32 conditionId) external view returns (uint256);
     function balanceOf(address owner, uint256 id) external view returns (uint256);
     function isApprovedForAll(address owner, address operator) external view returns (bool);
+    function setApprovalForAll(address operator, bool approved) external;
 }
 
 /// @dev Base for every test that creates a vault. The factory verifies the outcome-token identity

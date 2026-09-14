@@ -332,6 +332,17 @@ contract EscrowSignatureTest is EscrowDepositTestBase {
         (uint8 v,, bytes32 s) = vm.sign(LP_PK, digest);
         _expectInvalid(lp, abi.encodePacked(bytes32(0), s, v));
     }
+
+    // SC-3Z97: a zero recovery reverts even when `lp` is the Safe that address(0) would derive.
+    // _recoverSigner returns address(0) for every unusable signature (FEAT-C0DJ, ADR-C0YQ), so
+    // the explicit zero check in _verifySafeOwnerSignature is what stops this pairing from
+    // matching; the Safe comparison alone would let it through.
+    function test_revertsOnZeroRecoveryNamingTheZeroDerivedSafe() public {
+        address zeroSafe = _safeOf(address(0));
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.InvalidSignature.selector);
+        vault.depositForIntent(zeroSafe, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE, "");
+    }
 }
 
 // ──────────────────────────────────────────────

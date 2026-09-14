@@ -1193,8 +1193,8 @@ contract VaultRejectsForeignTokenIdTest is LPVaultFixture {
 
 // ──────────────────────────────────────────────
 // SC-3WLO: Vault reports ERC-1155 receiver interface support
-// What: supportsInterface returns true for IERC1155Receiver and for ERC-165 itself,
-//       and false for anything else.
+// What: supportsInterface returns true for IERC1155Receiver, for ERC-165 itself, and for
+//       EIP-1271 (the order maker, FR-3WLK), and false for anything else.
 // Why:  Some callers ERC-165-probe a recipient before transferring. Without a truthful
 //       answer they skip the transfer entirely, even though the hooks work.
 // Example: supportsInterface(0x4e2312e0) == true, supportsInterface(0xffffffff) == false.
@@ -1228,6 +1228,13 @@ contract VaultSupportsInterfaceTest is LPVaultFixture {
     function test_reportsERC165Support() public view {
         assertTrue(
             IERC1155Receiver(address(vault)).supportsInterface(bytes4(0x01ffc9a7)), "vault must report ERC-165 support"
+        );
+    }
+
+    // SC-3WLO, FR-3WLK: the EIP-1271 interface id is reported as supported (FEAT-C0DJ)
+    function test_reportsEIP1271Support() public view {
+        assertTrue(
+            IERC1155Receiver(address(vault)).supportsInterface(bytes4(0x1626ba7e)), "vault must report EIP-1271 support"
         );
     }
 
