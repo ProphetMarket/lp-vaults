@@ -27,7 +27,7 @@ pragma solidity 0.8.20;
 // FEAT-7G40: Burn LP Position
 // UC-7G41: Burn Position, UC-7G42: Operator Burn Position for LP
 // FEAT-6HBN: Complete-Set Merge and Resolution Redemption
-// UC-6HBO: Merge Complete Sets
+// UC-6HBO: Merge Complete Sets, UC-6HBP: Redeem Outcome Tokens After Resolution
 // UC-BMF8: Operator Collect Fees for LP
 // FEAT-9BQZ: Vault Solvency Ledger
 // UC-9BR0: Maintain Solvency Totals, UC-9BR1: Accumulate Principal Shift, UC-9BR2: Apply Payout Ratios
@@ -58,6 +58,14 @@ interface IConditionalTokens {
         uint256 amount
     ) external;
     function safeTransferFrom(address from, address to, uint256 id, uint256 value, bytes calldata data) external;
+    function payoutDenominator(bytes32 conditionId) external view returns (uint256);
+    function payoutNumerators(bytes32 conditionId, uint256 index) external view returns (uint256);
+    function redeemPositions(
+        address collateralToken,
+        bytes32 parentCollectionId,
+        bytes32 conditionId,
+        uint256[] calldata indexSets
+    ) external;
 }
 
 /// @dev Minimal factory interface for auth delegation (FR-FKD0, FR-FKD1, FR-FKD2) and for the two
@@ -288,6 +296,21 @@ contract LPVault {
     uint256 public totalFeesOwedX128;
 
     // ──────────────────────────────────────────────
+    // Resolution (FEAT-6HBN)
+    // ──────────────────────────────────────────────
+
+    /// @dev The switch (ADR-6HCK): the condition's two payout numerators, copied from the
+    ///      ConditionalTokens contract by the Oracle's first successful redeemOutcomeTokens and
+    ///      never written again. Both zero until then. The switch is on when the slot is
+    ///      non-zero, and the denominator is their sum, which is exact because the factory
+    ///      verified two outcome slots at createVault and the ConditionalTokens contract sets
+    ///      its denominator to the sum of the reported numerators. One slot, so every payout
+    ///      reads the switch in one storage read instead of three external reads. Never an
+    ///      argument: the Oracle cannot set a payout (FR-6HC4, NFR-6HC8).
+    uint128 internal payoutNumeratorYes;
+    uint128 internal payoutNumeratorNo;
+
+    // ──────────────────────────────────────────────
     // TickBitmap (FEAT-TVS0)
     // ──────────────────────────────────────────────
 
@@ -413,6 +436,8 @@ contract LPVault {
     error DepositAlreadyEscrowed();
     error IntentMismatch();
     error IntentExpired();
+    error MarketNotResolved();
+    error VaultStillActive();
 
     // ──────────────────────────────────────────────
     // Events
@@ -441,11 +466,19 @@ contract LPVault {
     // burn or a collect that merged first; never on a zero merge
     event CompleteSetsMerged(address indexed caller, uint256 amount);
 
+    // SC-6HCD, SC-6HCE, SC-6HCH, SC-6HCI, SC-CYSC: emitted when the vault's tokens redeem into
+    // USDC, by the Oracle's call and by a burn or a collect after the switch that found a token to
+    // redeem; caller is msg.sender, as in CompleteSetsMerged; never when both balances were zero
+    event OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount);
+
     // SC-7G43 through SC-7G46, SC-BMF1 through SC-BMF3, SC-7G4C through SC-7G4E: emitted by both
-    // burn paths. usdcOwed is the claim's USDC leg, feesOwed the accrued fees, usdcPaid the one
-    // USDC transfer (at most usdcOwed + feesOwed), tokenId the YES or NO id of the band (zero when
-    // the band is empty), tokenOwed the band's tokens, tokenPaid the tokens transferred. An
-    // indexer sees a shortfall as paid < owed (decision O2).
+    // burn paths. usdcOwed is the claim's USDC leg, feesOwed the accrued fees, usdcPaid the
+    // prorated usdcOwed + feesOwed, tokenId the YES or NO id of the band (zero when the band is
+    // empty), tokenOwed the band's tokens. Before the switch tokenPaid is the tokens transferred
+    // and usdcPaid the one USDC transfer; after the switch (SC-CYS7 through SC-CYS9) tokenPaid is
+    // the USDC paid for the token leg and the one USDC transfer carries usdcPaid + tokenPaid. A
+    // reader knows the mode from payoutNumerators(). An indexer sees a shortfall as paid < owed
+    // (decision O2).
     event PositionBurned(
         uint256 indexed positionId,
         address indexed owner,
@@ -500,19 +533,38 @@ contract LPVault {
         _;
     }
 
+    /// @dev The three role modifiers and nonReentrant call an internal function that holds the
+    ///      old modifier body, the OpenZeppelin Ownable._checkOwner and
+    ///      ReentrancyGuard._nonReentrantBefore shape, because the compiler copies a modifier's
+    ///      body into every function that uses it and the four together are used 38 times:
+    ///      the move recovers about 1,800 bytes of contract size at about 50 gas per guarded
+    ///      call and no behavior change (ADR-CYSE in FEAT-J92H). The modifier stays the only
+    ///      gate; no function calls a _check*() directly (CLAUDE.md checklist item 2).
     modifier onlyAdmin() {
-        if (ILPVaultFactory(factory).admins(msg.sender) != 1) revert NotAdmin();
+        _checkAdmin();
         _;
     }
 
     modifier onlyOperator() {
-        if (ILPVaultFactory(factory).operators(msg.sender) != 1) revert NotOperator();
+        _checkOperator();
         _;
     }
 
     modifier onlyOracle() {
-        if (msg.sender != ILPVaultFactory(factory).oracle()) revert NotOracle();
+        _checkOracle();
         _;
+    }
+
+    function _checkAdmin() internal view {
+        if (ILPVaultFactory(factory).admins(msg.sender) != 1) revert NotAdmin();
+    }
+
+    function _checkOperator() internal view {
+        if (ILPVaultFactory(factory).operators(msg.sender) != 1) revert NotOperator();
+    }
+
+    function _checkOracle() internal view {
+        if (msg.sender != ILPVaultFactory(factory).oracle()) revert NotOracle();
     }
 
     /// @dev Gates the ERC-1155 receiver hooks. Inside a receiver hook msg.sender is the
@@ -543,11 +595,20 @@ contract LPVault {
         _;
     }
 
-    /// @dev Inlined reentrancy guard. _reentrancyGuard is set to 1 in initialize().
+    /// @dev Inlined reentrancy guard. _reentrancyGuard is set to 1 in initialize(). The two
+    ///      halves live in internal functions for contract size (ADR-CYSE), as above.
     modifier nonReentrant() {
+        _nonReentrantBefore();
+        _;
+        _nonReentrantAfter();
+    }
+
+    function _nonReentrantBefore() internal {
         if (_reentrancyGuard != 1) revert Reentrancy();
         _reentrancyGuard = 2;
-        _;
+    }
+
+    function _nonReentrantAfter() internal {
         _reentrancyGuard = 1;
     }
 
@@ -811,10 +872,12 @@ contract LPVault {
     // SC-JGEF through SC-JGEK: Oracle-driven vault lifecycle transition
     /// @notice Transitions the vault from Active to WindDown phase.
     /// @dev One-way transition — there is no mechanism to revert from WindDown
-    ///      back to Active. Once in WindDown, depositForIntent and mintPositionFor
+    ///      back to Active. Once in WindDown, depositForIntent, mintPositionFor, and updateTick
     ///      revert (phase guard at the top of each), while collect, collectFor, burnPosition,
-    ///      burnPositionFor, reclaimDeposit, reclaimDepositFor, and mergeCompleteSets remain
-    ///      callable so LPs can exit.
+    ///      burnPositionFor, reclaimDeposit, reclaimDepositFor, mergeCompleteSets, and
+    ///      redeemOutcomeTokens remain callable so LPs can exit. The Oracle calls this first and
+    ///      redeemOutcomeTokens after the result is reported, because the redemption reverts
+    ///      while the vault is Active (ADR-6HCK in FEAT-6HBN).
     ///      ORACLE TRUST ASSUMPTION: The Oracle can freeze minting on any vault
     ///      by calling startWindDown(). LPs must trust that the Oracle only
     ///      triggers wind-down when the underlying market has resolved.
@@ -1176,12 +1239,13 @@ contract LPVault {
     }
 
     /// @dev One body for both collect entry points. Reads first (the fees, both token balances,
-    ///      the USDC balance, the ledger totals, and the amount to pay), effects second (the
-    ///      snapshot, tokensOwed to zero, and the fee total's debit), interactions last (the
-    ///      merge, then the transfer), per NFR-U07R. The amount to pay is known before the merge
-    ///      because a merge pays exactly min(yes, no) USDC. A zero-owed collect reads no balance
-    ///      and merges nothing (FR-U07K). The claim settles at the ratio with no remainder: a cut
-    ///      is final, and the LP chose the moment (ADR-COEN in FEAT-9BQZ).
+    ///      the switch, the USDC balance, the ledger totals, and the amount to pay), effects
+    ///      second (the snapshot, tokensOwed to zero, and the fee total's debit), interactions
+    ///      last (the settlement, then the transfer), per NFR-U07R. The amount to pay is known
+    ///      before the settlement because a merge pays exactly min(yes, no) USDC and a redemption
+    ///      exactly balance x numerator / denominator per side. A zero-owed collect reads no
+    ///      balance and settles nothing (FR-U07K). The claim settles at the ratio with no
+    ///      remainder: a cut is final, and the LP chose the moment (ADR-COEN in FEAT-9BQZ).
     function _collect(uint256 positionId, Position storage p) internal {
         // --- Reads ---
 
@@ -1210,14 +1274,19 @@ contract LPVault {
         uint256 owedX128 = x + p.tokensOwed * Q128;
 
         // Pro-rata (decision O2, FR-U07K): the owed amount times the USDC ratio of the solvency
-        // ledger, with the USDC the vault holds above escrow, counting the pairs the merge below
-        // turns into USDC, over the principal and the fees it owes (FR-9BRM), read before the debit.
-        uint256 pairs;
+        // ledger, read before the debit. Before the switch: the USDC the vault holds above
+        // escrow, counting the pairs the merge below turns into USDC, over the principal and the
+        // fees it owes (FR-9BRM). After the switch: the same with every token valued at the
+        // stored payout on both sides, one ratio for every leg (FR-CYS5).
+        uint256 yes;
+        uint256 no;
+        bool resolved;
         uint256 paid;
         if (owed > 0) {
-            (uint256 yes, uint256 no) = _tokenBalances();
-            pairs = yes < no ? yes : no;
-            paid = _prorate(owed, _availableUsdc(pairs), totalUsdcOwed() + totalFeesOwed());
+            (yes, no) = _tokenBalances();
+            resolved = _resolved();
+            (uint256 held, uint256 total) = _usdcRatio(yes, no, resolved);
+            paid = _prorate(owed, held, total);
         }
 
         // --- Effects ---
@@ -1233,7 +1302,8 @@ contract LPVault {
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
-        _mergeCompleteSets(pairs);
+        // The merge before the switch, the redemption after it; nothing when owed was zero
+        _settle(yes, no, resolved);
 
         if (paid > 0) _safeTransfer(usdc, p.owner, paid);
         if (owed > 0) emit FeesCollected(positionId, p.owner, owed, paid);
@@ -1351,7 +1421,11 @@ contract LPVault {
         uint256 tokenId;
         uint256 tokenOwed;
         uint256 tokenPaid;
-        uint256 pairs;
+        // Both balances and the switch, read once: _settle merges the pairs before the switch and
+        // redeems both balances after it (FEAT-6HBN)
+        uint256 yes;
+        uint256 no;
+        bool resolved;
         // The same claim and fees in the ledger's pre-division unit (FEAT-9BQZ FR-9BR9, FR-9BRC)
         uint256 usdcScaled;
         uint256 tokenScaled;
@@ -1360,12 +1434,15 @@ contract LPVault {
 
     /// @dev One body for both burn entry points (FR-7G4L). Order, per NFR-7G59 and CLAUDE.md
     ///      checklist item 1: every read first (_burnAmounts), then every state write (the two
-    ///      ticks, activeLiquidity, the record), then the interactions, with the ERC-1155
-    ///      transfer as the final call because a Safe owner can replace the Safe's fallback
-    ///      handler and re-enter during that transfer. By then the record is deleted, both ticks
-    ///      are updated, and the guard on every entry point that moves an asset stops the re-entry.
-    ///      The one unguarded entry point, emergencyCancelAll, writes only phase, and a re-entry
-    ///      into it during the transfer is harmless because the burn's effects are complete.
+    ///      ticks, activeLiquidity, the ledger, the record), then the interactions. Before the
+    ///      switch: the merge, the USDC transfer, and the ERC-1155 transfer as the final call,
+    ///      because a Safe owner can replace the Safe's fallback handler and re-enter during that
+    ///      transfer. After the switch: the redemption, then the one USDC transfer as the final
+    ///      call, and no ERC-1155 transfer at all (FR-CYS4). By the first external call the
+    ///      record is deleted, both ticks are updated, and the guard on every entry point that
+    ///      moves an asset stops a re-entry. The one unguarded entry point, emergencyCancelAll,
+    ///      writes only phase, and a re-entry into it is harmless because the burn's effects are
+    ///      complete.
     function _burn(uint256 positionId, Position storage p) internal {
         // --- Reads and computation, all before any state is touched ---
 
@@ -1412,29 +1489,39 @@ contract LPVault {
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
-        // The pairs become the USDC that _availableUsdc already counted (decision C26)
-        _mergeCompleteSets(a.pairs);
+        // The pairs, or after the switch every token, become the USDC that _usdcRatio already
+        // counted (decision C26, FEAT-6HBN)
+        _settle(a.yes, a.no, a.resolved);
 
-        // One transfer covers the claim's USDC and the fees (FR-7G4R)
-        if (a.usdcPaid > 0) {
-            _safeTransfer(usdc, owner, a.usdcPaid);
+        // One transfer covers the claim's USDC and the fees (FR-7G4R), and after the switch the
+        // token leg's USDC too (FR-CYS4)
+        uint256 usdcOut = a.resolved ? a.usdcPaid + a.tokenPaid : a.usdcPaid;
+        if (usdcOut > 0) {
+            _safeTransfer(usdc, owner, usdcOut);
         }
 
-        // The one outcome token of the band, delivered as is: no order, no conversion
-        // (FR-7G4N). Last, because the receiver hook hands control to the recipient.
-        if (a.tokenPaid > 0) {
+        // Before the switch, the one outcome token of the band, delivered as is: no order, no
+        // conversion (FR-7G4N). Last, because the receiver hook hands control to the recipient.
+        if (!a.resolved && a.tokenPaid > 0) {
             IConditionalTokens(conditionalTokens).safeTransferFrom(address(this), owner, a.tokenId, a.tokenPaid, "");
         }
 
         emit PositionBurned(positionId, owner, a.usdcOwed, a.feesOwed, a.usdcPaid, a.tokenId, a.tokenOwed, a.tokenPaid);
     }
 
-    /// @dev The fees, the claim, both token balances, the USDC balance, the ledger totals, and
-    ///      the two amounts to pay, from view reads only. The amounts are computable before the
-    ///      merge because the ConditionalTokens contract pays exactly min(yes, no) USDC for a
-    ///      merge and burns that many of each token (NFR-7G59). Pro-rata (decision O2, FR-COEX):
-    ///      each owed amount times its asset's ratio, the smaller of 1 and held over the
-    ///      ledger's total, rounded down, and never a revert.
+    /// @dev The fees, the claim, both token balances, the switch, the USDC balance, the ledger
+    ///      totals, and the two amounts to pay, from view reads only. The amounts are computable
+    ///      before the settlement because the ConditionalTokens contract pays exactly min(yes, no)
+    ///      USDC for a merge, and exactly balance x numerator / denominator per side for a
+    ///      redemption, which _atPayout reproduces (NFR-7G59). Pro-rata (decision O2, FR-COEX):
+    ///      before the switch each owed amount times its asset's ratio, the smaller of 1 and held
+    ///      over the ledger's total, rounded down, and never a revert; after the switch every leg
+    ///      is USDC, so one ratio covers principal, fees, and the token leg valued at the stored
+    ///      payout, and the three are prorated as one sum (FR-CYS4, FR-CYS5). Two separately
+    ///      capped USDC legs could sum to more than the vault holds after a saturated ledger
+    ///      debit, and the one transfer would then revert, which decision C6 forbids; one prorate
+    ///      of the sum keeps the cap, and paidSum >= usdcPaid always, because the floor of the
+    ///      larger product is at least the floor of the smaller one under the same cap.
     function _burnAmounts(Position storage p) internal view returns (BurnAmounts memory a) {
         // Fees must be computed while both boundary ticks still hold their feeGrowthOutsideX128;
         // the effects in _burn may delete them.
@@ -1462,16 +1549,31 @@ contract LPVault {
         a.usdcOwed = a.usdcScaled / USDC_CLAIM_SCALE;
         a.tokenOwed = a.tokenScaled / LIQUIDITY_PRECISION;
 
-        (uint256 yes, uint256 no) = _tokenBalances();
-        a.pairs = yes < no ? yes : no;
+        (a.yes, a.no) = _tokenBalances();
+        a.resolved = _resolved();
+        bool isYes = a.tokenId == yesTokenId;
 
-        // The USDC ratio: principal and fees share it (ADR-9BSI), escrow stays out (FR-9BRM)
-        a.usdcPaid = _prorate(a.usdcOwed + a.feesOwed, _availableUsdc(a.pairs), totalUsdcOwed() + totalFeesOwed());
+        // The USDC ratio: principal and fees share it (ADR-9BSI), escrow stays out (FR-9BRM),
+        // and after the switch the token totals join it at the stored payout (FR-CYS5)
+        (uint256 held, uint256 total) = _usdcRatio(a.yes, a.no, a.resolved);
 
-        // The merge below consumes `pairs` of each token, so the band's token is what is left;
+        if (a.resolved) {
+            // The token leg in USDC at the stored payout, then one prorate of the sum: tokenPaid
+            // is the part of the sum the principal and the fees did not take (FR-CYS4)
+            uint256 tokenUsdc = _atPayout(isYes ? a.tokenOwed : 0, isYes ? 0 : a.tokenOwed);
+            uint256 paidSum = _prorate(a.usdcOwed + a.feesOwed + tokenUsdc, held, total);
+            a.usdcPaid = _prorate(a.usdcOwed + a.feesOwed, held, total);
+            a.tokenPaid = paidSum - a.usdcPaid;
+            return a;
+        }
+
+        a.usdcPaid = _prorate(a.usdcOwed + a.feesOwed, held, total);
+
+        // The merge below consumes the pairs of each token, so the band's token is what is left;
         // the band's ratio is independent of the USDC ratio (FR-9BRN to FR-9BRQ)
-        uint256 held = (a.tokenId == yesTokenId ? yes : no) - a.pairs;
-        a.tokenPaid = _prorate(a.tokenOwed, held, a.tokenId == yesTokenId ? totalYesOwed() : totalNoOwed());
+        uint256 pairs = _pairs(a.yes, a.no);
+        uint256 tokenHeld = (isYes ? a.yes : a.no) - pairs;
+        a.tokenPaid = _prorate(a.tokenOwed, tokenHeld, isYes ? totalYesOwed() : totalNoOwed());
     }
 
     /// @dev Values a claim under decision C26 (FR-7G4M, ADR-7G5F). Every level of the range holds
@@ -1540,14 +1642,31 @@ contract LPVault {
     }
 
     /// @dev The USDC a payout may draw on, the USDC ratio's numerator (decisions C6 and C7,
-    ///      FEAT-9BQZ FR-9BRM): the balance plus the pairs the merge is about to turn into USDC,
-    ///      less the escrow total, floored at zero. On chain a fill turns vault USDC into tokens
-    ///      (decision C8), so the balance can sit below totalEscrowed, and a checked subtraction
-    ///      would revert every exit.
-    function _availableUsdc(uint256 pairs) internal view returns (uint256) {
-        uint256 held = IERC20(usdc).balanceOf(address(this)) + pairs;
+    ///      FEAT-9BQZ FR-9BRM, FR-CYS5): the balance plus `incoming`, the USDC the settlement is
+    ///      about to produce (the pairs before the switch, the redeemed value after it), less the
+    ///      escrow total, floored at zero. On chain a fill turns vault USDC into tokens (decision
+    ///      C8), so the balance can sit below totalEscrowed, and a checked subtraction would
+    ///      revert every exit.
+    function _availableUsdc(uint256 incoming) internal view returns (uint256) {
+        uint256 held = IERC20(usdc).balanceOf(address(this)) + incoming;
         uint256 escrowed = totalEscrowed;
         return held > escrowed ? held - escrowed : 0;
+    }
+
+    /// @dev The two sides of the USDC ratio, read before the debit, for the burn and the collect
+    ///      (FEAT-9BQZ). Before the switch: what the vault holds above escrow counting the pairs,
+    ///      over the principal and the fees it owes (FR-9BRM). After the switch every asset is
+    ///      USDC: the numerator adds what the vault's YES and NO redeem for at the stored payout,
+    ///      and the denominator adds what the YES and NO totals redeem for, so one ratio covers
+    ///      every leg (FR-CYS5). The totals themselves stay per asset (ADR-9BSJ).
+    function _usdcRatio(uint256 yes, uint256 no, bool resolved) internal view returns (uint256 held, uint256 total) {
+        total = totalUsdcOwed() + totalFeesOwed();
+        if (resolved) {
+            held = _availableUsdc(_atPayout(yes, no));
+            total += _atPayout(totalYesOwed(), totalNoOwed());
+        } else {
+            held = _availableUsdc(_pairs(yes, no));
+        }
     }
 
     /// @dev Removes a burned position's liquidity from one boundary tick, the exact inverse of
@@ -1984,7 +2103,25 @@ contract LPVault {
     ///      order may depend on the vault's YES or NO balance.
     function mergeCompleteSets() external nonReentrant {
         (uint256 yes, uint256 no) = _tokenBalances();
-        _mergeCompleteSets(yes < no ? yes : no);
+        _mergeCompleteSets(_pairs(yes, no));
+    }
+
+    /// @dev The complete sets the vault holds, min(yes, no). One definition, because the public
+    ///      merge, the ratio, the burn, and the settlement all need the same number.
+    function _pairs(uint256 yes, uint256 no) internal pure returns (uint256) {
+        return yes < no ? yes : no;
+    }
+
+    /// @dev The settlement every payout runs as its first interaction: the merge of the pairs
+    ///      before the switch, the redemption of every token after it (FEAT-6HBN ADR-6HCK), so a
+    ///      token that arrived late never strands. Both return without a call when there is
+    ///      nothing to settle.
+    function _settle(uint256 yes, uint256 no, bool resolved) internal {
+        if (resolved) {
+            _redeemOutcomeTokens(yes, no);
+        } else {
+            _mergeCompleteSets(_pairs(yes, no));
+        }
     }
 
     /// @dev The vault's balance of both outcome tokens, read once. The public merge and both
@@ -2008,12 +2145,104 @@ contract LPVault {
         emit CompleteSetsMerged(msg.sender, amount);
     }
 
-    /// @dev The partition [1, 2]: index set 1 is YES and index set 2 is NO. The merge passes it
-    ///      now, and the Part 6 redemption passes it later, so it lives in one place.
+    /// @dev The partition [1, 2]: index set 1 is YES and index set 2 is NO. The merge and the
+    ///      redemption both pass it, so it lives in one place.
     function _binaryPartition() internal pure returns (uint256[] memory partition) {
         partition = new uint256[](2);
         partition[0] = 1;
         partition[1] = 2;
+    }
+
+    // ──────────────────────────────────────────────
+    // Outcome-token redemption (FEAT-6HBN, UC-6HBP)
+    // ──────────────────────────────────────────────
+
+    // SC-6HCD through SC-6HCI, SC-CYS6: the Oracle redeems the vault's tokens after the market
+    // resolves, and that call is the switch
+    /// @notice Redeems the vault's whole YES and NO balances through the ConditionalTokens contract
+    ///         into USDC held by the vault, after the result of the vault's condition is reported.
+    ///         The first successful call copies the payout into the vault, and every later burn
+    ///         and collect pays its token leg in USDC at that payout (the switch, ADR-6HCK).
+    /// @dev Oracle-only, because the switch changes the ratio shape for every LP. Reverts while
+    ///      the vault is Active (FR-6HC7): updateTick and mintPositionFor revert in WindDown and
+    ///      Cancelled, so once the switch is on no tick report can move value between claims that
+    ///      are now fixed USDC, and no mint can open a claim against a resolved market. Works in
+    ///      WindDown and Cancelled, paused or not, and runs again for tokens that arrive later. It
+    ///      changes no phase and refreshes no heartbeat. It does not merge first: redeemPositions
+    ///      with [1, 2] burns both balances at their payout. A numerator above uint128 reverts
+    ///      SafeCastOverflow and leaves the switch off (FR-CYS2), a state every exit works in.
+    ///      ORACLE TRUST ASSUMPTION: The Oracle can delay the switch. It cannot set the payout,
+    ///      which the vault reads from the ConditionalTokens contract inside this call and never
+    ///      from an argument, and it cannot direct the USDC anywhere except the vault, because the
+    ///      ConditionalTokens contract pays its caller and the caller is the vault. Before the
+    ///      switch an exit pays the winning token in kind, and the LP redeems it at the
+    ///      ConditionalTokens contract from the Safe for the same USDC, so no LP waits on the
+    ///      Oracle.
+    ///
+    ///      MEV analysis: the call moves value between nobody; the ConditionalTokens contract pays
+    ///      the vault exactly what its tokens are worth. The switch changes the ratio shape from
+    ///      three per-asset ratios to one USDC ratio, and the LP chooses the burn moment on both
+    ///      sides of it, so no third party can order this call around an exit to gain.
+    function redeemOutcomeTokens() external onlyOracle nonReentrant {
+        // --- Checks ---
+
+        if (phase == 1) revert VaultStillActive();
+
+        IConditionalTokens ctf = IConditionalTokens(conditionalTokens);
+        bytes32 condition = conditionId;
+
+        // The ConditionalTokens contract is the only source of the result (FR-6HC5)
+        if (ctf.payoutDenominator(condition) == 0) revert MarketNotResolved();
+
+        // --- Effects ---
+
+        // The switch: written once, from the contract, on the first successful call (FR-6HC4)
+        if (!_resolved()) {
+            payoutNumeratorYes = _toUint128(ctf.payoutNumerators(condition, 0));
+            payoutNumeratorNo = _toUint128(ctf.payoutNumerators(condition, 1));
+        }
+
+        // --- Interactions ---
+
+        (uint256 yes, uint256 no) = _tokenBalances();
+        _redeemOutcomeTokens(yes, no);
+    }
+
+    /// @notice The stored payout: `(0, 0)` until the Oracle's first successful redemption, then
+    ///         the two numerators the ConditionalTokens contract reported. The denominator is
+    ///         their sum. A non-zero pair means the switch is on.
+    function payoutNumerators() external view returns (uint128 numYes, uint128 numNo) {
+        return (payoutNumeratorYes, payoutNumeratorNo);
+    }
+
+    /// @dev Redeems both balances, and returns without a call when both are zero, so a payout
+    ///      can run it unconditionally (FR-6HC7). The caller passes the balances from
+    ///      _tokenBalances. No modifier: redeemOutcomeTokens, _burn, and _collect call it inside
+    ///      their guarded entry points, as their first interaction. The event's usdcAmount is
+    ///      what redeemPositions pays, reproduced by _atPayout, so no balance read follows the call.
+    function _redeemOutcomeTokens(uint256 yes, uint256 no) internal {
+        if (yes == 0 && no == 0) return;
+
+        IConditionalTokens(conditionalTokens).redeemPositions(usdc, bytes32(0), conditionId, _binaryPartition());
+        emit OutcomeTokensRedeemed(msg.sender, yes, no, _atPayout(yes, no));
+    }
+
+    /// @dev One definition of "the switch is on": the stored payout is non-zero. One storage
+    ///      read, because both numerators share a slot.
+    function _resolved() internal view returns (bool) {
+        return (payoutNumeratorYes | payoutNumeratorNo) != 0;
+    }
+
+    /// @dev The USDC that `yesAmount` YES and `noAmount` NO redeem for at the stored payout:
+    ///      each side rounded down on its own, exactly as redeemPositions pays per index set.
+    ///      Meaningful only after the switch (the denominator is zero before it). The products
+    ///      go through _mulDiv, the CLAUDE.md product rule. One valuation for the ratio's
+    ///      numerator and denominator, the burn's token leg, and the event's usdcAmount.
+    function _atPayout(uint256 yesAmount, uint256 noAmount) internal view returns (uint256) {
+        uint256 numYes = payoutNumeratorYes;
+        uint256 numNo = payoutNumeratorNo;
+        uint256 den = numYes + numNo;
+        return _mulDiv(yesAmount, numYes, den) + _mulDiv(noAmount, numNo, den);
     }
 
     // ──────────────────────────────────────────────
