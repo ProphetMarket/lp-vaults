@@ -2,8 +2,8 @@
 id: FEAT-7G40
 name: Burn LP Position
 use_cases: [UC-7G41, UC-7G42]
-scenarios: [SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B, SC-BMF1, SC-BMF2, SC-BMF3, SC-7G4C, SC-7G4D, SC-7G4E, SC-7G4F, SC-7G4G, SC-7G4H, SC-7G4I, SC-7G4J, SC-7G4K, SC-BMF4, SC-BMF5]
-last_update: 2026-09-13
+scenarios: [SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B, SC-BMF1, SC-BMF2, SC-BMF3, SC-7G4C, SC-7G4D, SC-7G4E, SC-7G4F, SC-7G4G, SC-7G4H, SC-7G4I, SC-7G4J, SC-7G4K, SC-BMF4, SC-BMF5, SC-BZC6]
+last_update: 2026-09-14
 ---
 
 # Architecture: Burn LP Position
@@ -185,6 +185,7 @@ stateDiagram-v2
 | SC-7G47 | Burning the last position at a tick deinitializes it | `src/LPVault.sol:_removeLiquidityFromTick()`, `src/LPVault.sol:_clearTickBitmapBit()` |
 | SC-7G48 | Revert when the caller is not the owner | `src/LPVault.sol:burnPosition()` (owner check) |
 | SC-7G49 | Burn in WindDown and in Cancelled succeeds identically to Active | `src/LPVault.sol:burnPosition()` (no phase gate) |
+| SC-BZC6 | A burn on a wrapped fee snapshot pays the growth since mint | `src/LPVault.sol:_burnAmounts()` |
 | SC-7G4A | Burn succeeds with zero registered operators | `src/LPVault.sol:burnPosition()` |
 | SC-7G4B | Revert on a nonexistent, burned, or merged-away position | `src/LPVault.sol:burnPosition()` (liveness check) |
 | SC-BMF1 | Burn merges the vault's pairs first | `src/LPVault.sol:_burn()`, `src/LPVault.sol:_mergeCompleteSets()` |
@@ -244,4 +245,5 @@ In the context of a vault that can hold less of an asset than its claims say, af
 | EIP-712 signatures | e2e | `vm.sign()` produces real ECDSA signatures; the fixture signs all four types to prove they are mutually non-interchangeable |
 | The claim across the range | e2e + fuzz | `updateTick` places `currentTick` below, at, and above the mint tick, then a burn; the fuzz test compares `PositionBurned` with a per-level loop |
 | Operator-registry independence | e2e | Remove every operator through the Admin path, then drive `burnPosition` to completion (SC-7G4A) |
-| The Cancelled phase | e2e | A real `emergencyCancelAll` after the timelock, because the burn must see the zeroed position the cancel leaves at this step |
+| The Cancelled phase | e2e | A real `emergencyCancelAll` after the timelock, because the burn must pay in full from the records the freeze leaves in place |
+| Wrapped fee snapshot | fixture | `VaultStorage.setFeeGrowthInsideLast` writes the wrapped value, as the collect and the retired cancel test did |

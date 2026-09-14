@@ -4,7 +4,7 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 7
+version: 8
 refs: []
 ---
 
@@ -26,15 +26,15 @@ refs: []
 |-------|------|-------|
 | Factory Owner | Deploys LPVaultFactory with implementation address and initial role assignments | One-time deployment; after deployment, role management passes to Admin |
 | Oracle | Calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` to deploy per-market vaults | Single wallet (`address public oracle`); MUST be separate from Operator |
-| Admin | Manages role registry on factory: add/remove operators, set oracle, two-step admin transfer, add/remove/renounce admins, pause | Registry-only; cannot call user-facing vault functions |
+| Admin | Manages role registry on factory: add/remove operators, set oracle, two-step admin transfer, add/remove/renounce admins, pause; sets the factory's default emergency-cancel timelock | Registry-only; cannot call user-facing vault functions |
 | Operator | Registered in role registry for transactional use by later features | Not invoked in this feature; gated by `onlyOperator` modifier |
 
 ## Functional Requirements
 
 ### Factory Deployment
 
-**FR-REQI** `When the Factory Owner deploys the LPVaultFactory, the system shall initialize the role registry with the provided Admin, Oracle, and Operator wallets, store the implementation contract address, USDC address, CTF Exchange address, ConditionalTokens address, Safe factory address, and Safe proxy bytecode hash, and set adminCount to 1.`
-Fit Criterion: Given valid constructor arguments, `admins[initialAdmin] == 1`, `oracle == initialOracle`, `operators[initialOperator] == 1`, `adminCount == 1`, and all address storage variables match. `safeFactory` and `safeProxyBytecodeHash` are `immutable`, and no function changes them. A zero `safeFactory` reverts with `ZeroAddress`, and a zero hash reverts with `ZeroBytecodeHash`.
+**FR-REQI** `When the Factory Owner deploys the LPVaultFactory, the system shall initialize the role registry with the provided Admin, Oracle, and Operator wallets, store the implementation contract address, USDC address, CTF Exchange address, ConditionalTokens address, Safe factory address, and Safe proxy bytecode hash, set adminCount to 1, and set the default emergency-cancel timelock to 7 days.`
+Fit Criterion: Given valid constructor arguments, `admins[initialAdmin] == 1`, `oracle == initialOracle`, `operators[initialOperator] == 1`, `adminCount == 1`, `defaultEmergencyCancelTimelock == 7 days`, and all address storage variables match. `safeFactory` and `safeProxyBytecodeHash` are `immutable`, and no function changes them. A zero `safeFactory` reverts with `ZeroAddress`, and a zero hash reverts with `ZeroBytecodeHash`. The constructor takes no timelock argument: the default starts at 7 days (decision C10), so the deploy script and its environment variables do not change.
 Linked to: UC-REQ0
 
 **FR-REQJ** `When the Factory Owner deploys the LPVaultFactory, the system shall call _disableInitializers() in the implementation contract's constructor to prevent direct initialization of the implementation.`
@@ -44,7 +44,7 @@ Linked to: UC-REQ0
 ### Vault Creation
 
 **FR-REQK** `When the Oracle calls createVault with a marketId, a tickSpacing, a minimumFirstLiquidity, and the market's outcome-token identity (conditionId, yesTokenId, noTokenId), the system shall verify the identity, deploy an EIP-1167 minimal-proxy clone of the implementation contract, call initialize() on the clone with those values, and register the clone address in the marketId-to-vault mapping.`
-Fit Criterion: Given a valid unregistered marketId and a valid identity, `vaultForMarket[marketId]` returns the clone address, a `VaultCreated` event is emitted, and the clone's storage matches the initialization parameters, including `conditionId`, `yesTokenId`, and `noTokenId`.
+Fit Criterion: Given a valid unregistered marketId and a valid identity, `vaultForMarket[marketId]` returns the clone address, a `VaultCreated` event is emitted, and the clone's storage matches the initialization parameters, including `conditionId`, `yesTokenId`, `noTokenId`, and `emergencyCancelTimelock == defaultEmergencyCancelTimelock` as the factory held it at the moment of the call, because initialize() reads it from the factory (FR-REQN). The `createVault` signature, the `initialize` signature, and the `VaultCreated` event do not change: the vault exposes `emergencyCancelTimelock()`.
 Linked to: UC-REQ1
 
 **FR-REQL** `If the Oracle calls createVault with a marketId that already has a registered vault, then the system shall revert.`
@@ -69,8 +69,8 @@ Linked to: UC-REQ1
 
 ### Vault Initialization
 
-**FR-REQN** `When initialize() is called on a new vault clone, the system shall store marketId, USDC address, CTF Exchange address, ConditionalTokens address, conditionId, yesTokenId, noTokenId, tickSpacing, and factory address in storage, and set the vault phase to Active.`
-Fit Criterion: Given a freshly initialized clone, all storage variables match factory-provided values, `phase == Active`, and the vault's `factory` address matches the deploying factory. `conditionId`, `yesTokenId`, and `noTokenId` are public, and each is storage, never `immutable`, because EIP-1167 clones share the implementation's bytecode. `initialize()` does not verify the identity: only the factory can call it (FR-REQQ), and the factory verifies the identity before it deploys the clone.
+**FR-REQN** `When initialize() is called on a new vault clone, the system shall store marketId, USDC address, CTF Exchange address, ConditionalTokens address, conditionId, yesTokenId, noTokenId, tickSpacing, emergencyCancelTimelock, and factory address in storage, and set the vault phase to Active.`
+Fit Criterion: Given a freshly initialized clone, all storage variables match factory-provided values, `phase == Active`, and the vault's `factory` address matches the deploying factory. `conditionId`, `yesTokenId`, `noTokenId`, and `emergencyCancelTimelock` are public, and each is storage, never `immutable`, because EIP-1167 clones share the implementation's bytecode. `emergencyCancelTimelock` is a `uint32` that packs into the slot of `tickSpacing` and `minimumFirstLiquidity`; `initialize()` reads it from the calling factory's `defaultEmergencyCancelTimelock()` once, and no function writes it afterwards. `initialize()` does not verify the identity or the timelock: only the factory can call it (FR-REQQ), and the factory verifies both before it deploys the clone. `initialize` keeps eleven parameters: a twelfth does not compile under `forge coverage`, which turns the optimizer off (stack too deep in the ABI decoder, measured in R10), so the timelock is a read and not an argument.
 Linked to: UC-REQ1
 
 **FR-REQO** `When initialize() is called on a new vault clone, the system shall grant the CTF Exchange unlimited ERC-20 approval for USDC and call setApprovalForAll on the ConditionalTokens contract for the CTF Exchange.`
@@ -147,6 +147,16 @@ Linked to: UC-REQ1
 Fit Criterion: Given `minimumFirstLiquidity == 0` in `createVault`, the call reverts. Given `newMin == 0` in `setMinimumFirstLiquidity`, the call reverts. The vault's `minimumFirstLiquidity` is never zero in any reachable state.
 Linked to: UC-REQ1
 
+### Default Emergency-Cancel Timelock
+
+**FR-BZC0** `When an Admin calls setDefaultEmergencyCancelTimelock(newTimelock) with a value above zero and at most 30 days, the system shall store it as the factory's default emergency-cancel timelock and emit DefaultEmergencyCancelTimelockUpdated.`
+Fit Criterion: Given an Admin calls `setDefaultEmergencyCancelTimelock(14 days)`, `defaultEmergencyCancelTimelock() == 14 days` and `DefaultEmergencyCancelTimelockUpdated(7 days, 14 days)` is emitted. A vault created after the call has `emergencyCancelTimelock() == 14 days`. A vault created before the call keeps its own value, because the vault reads its storage and never the factory (decision C10, ADR-BZC5). The setter is Admin-only: a protocol-wide default is factory configuration, the Admin's registry role, not the Oracle's market-lifecycle role.
+Linked to: UC-REQ1
+
+**FR-BZC1** `If an Admin calls setDefaultEmergencyCancelTimelock with zero, or with a value above 30 days, then the system shall revert.`
+Fit Criterion: `setDefaultEmergencyCancelTimelock(0)` reverts `ZeroTimelock`, and `setDefaultEmergencyCancelTimelock(30 days + 1)` reverts `TimelockTooLong`; `setDefaultEmergencyCancelTimelock(30 days)` succeeds. The maximum is the constant `MAX_EMERGENCY_CANCEL_TIMELOCK = 30 days`. A zero timelock would let any address freeze a vault in the block after any Operator call, and a timelock above 30 days would hold LPs to a silent Operator for longer than the product accepts. The user chose both bounds on 2026-09-11 (decision C10, round 1 finding V1-17 of the plan validation).
+Linked to: UC-REQ1
+
 ### Role Management
 
 **FR-REQS** `When an Admin calls addOperator with a valid address, the system shall register that address as an operator.`
@@ -177,9 +187,9 @@ Linked to: UC-REQ2
 Fit Criterion: Given the pending admin calls `acceptAdmin()`, `admins[caller] == 1`, `adminCount` incremented, and `pendingAdmin == address(0)`.
 Linked to: UC-REQ2
 
-**FR-REQZ** `If a non-Admin address calls addOperator, removeOperator, setOracle, transferAdmin, addAdmin, removeAdmin, or renounceAdminRole, then the system shall revert.`
-Fit Criterion: Given a non-Admin caller, the call reverts with a NotAdmin error.
-Linked to: UC-REQ2
+**FR-REQZ** `If a non-Admin address calls addOperator, removeOperator, setOracle, transferAdmin, addAdmin, removeAdmin, renounceAdminRole, or setDefaultEmergencyCancelTimelock, then the system shall revert.`
+Fit Criterion: Given a non-Admin caller (an Operator, the Oracle, an LP, or an arbitrary address), the call reverts with a NotAdmin error and `defaultEmergencyCancelTimelock` is unchanged.
+Linked to: UC-REQ2, UC-REQ1
 
 **FR-5UJ8** `When an Admin calls addAdmin with a non-zero address that does not hold the admin role, the system shall grant that address the admin role and increment adminCount.`
 Fit Criterion: Given Y does not hold the admin role, after an Admin calls `addAdmin(Y)`, `admins[Y] == 1`, `adminCount` has increased by 1, and `NewAdmin(Y, caller)` is emitted. Given X already holds the admin role, `addAdmin(X)` leaves `adminCount` unchanged and still emits `NewAdmin(X, caller)`.
@@ -235,4 +245,5 @@ Linked to: UC-REQ2
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
 - Factory role rotation (addOperator, removeOperator, setOracle, transferAdmin/acceptAdmin, addAdmin, removeAdmin, renounceAdminRole) propagates immediately to all existing vaults deployed by that factory
 - Vault clones contain no local role state (operators, oracle, admins, pendingAdmin, adminCount) -- all authorization delegated to factory
+- The factory holds a default emergency-cancel timelock of 7 days that an Admin sets within (0, 30 days]; each vault copies it at creation and never changes it, so a default change reaches only later vaults
 - FEATURES.md status is `implemented`

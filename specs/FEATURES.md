@@ -14,10 +14,10 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
-| FEAT-REPZ | Deploy LP Vault for a Market | Factory pattern and role registry for deploying per-market LP vaults as EIP-1167 clones with factory-delegated authorization, holding the Safe derivation inputs as immutables | implemented |
+| FEAT-REPZ | Deploy LP Vault for a Market | Factory pattern and role registry for deploying per-market LP vaults as EIP-1167 clones with factory-delegated authorization, holding the Safe derivation inputs as immutables and the default emergency-cancel timelock that each vault copies at creation | implemented |
 | FEAT-J92H | Deploy Contracts | Foundry deploy script that deploys LPVault implementation and LPVaultFactory with env-var-driven configuration for Polygon Amoy and mainnet, reading the Safe proxy bytecode hash from the live Safe factory | implemented |
 | FEAT-JGE7 | Vault Wind-Down Lifecycle | Oracle-driven phase transition from Active to WindDown that gates off new mints while keeping exit paths open for existing LPs | implemented |
-| FEAT-JXQO | Emergency Cancel All Positions | Position-holder-triggered force-close of all positions after operator-silence timelock, distributing principal + fees and entering terminal Cancelled state | implemented |
+| FEAT-JXQO | Emergency Cancel All Positions | Any-address freeze after the vault's operator-silence timelock that sets the terminal Cancelled phase and changes nothing else, so every LP exits alone through the paths that work in every phase | implemented |
 | FEAT-K1MD | Pause Trading | Admin-callable circuit breaker that halts trading entry points while keeping LP exit paths live | implemented |
 | FEAT-KX5N | Upgradeable Vault Implementation Pointer | Admin-driven two-step timelocked upgrade of the factory's implementation pointer with per-clone version tracking | implemented |
 | FEAT-6HBN | Complete-Set Merge and Resolution Redemption | Any wallet merges the vault's matched YES and NO tokens into USDC held by the vault, in every phase, and every payout merges first; the Oracle's redemption after resolution is reserved for Part 6 of the audit plan | implemented |

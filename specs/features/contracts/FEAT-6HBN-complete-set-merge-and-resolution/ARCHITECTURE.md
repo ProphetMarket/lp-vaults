@@ -158,4 +158,4 @@ In the context of decision C9, where the freeze changes only the phase and every
 |-----------------|----------|--------|
 | ConditionalTokens (ERC-1155) | e2e | Deploy the real Gnosis bytecode from `lib/ctf-exchange/artifacts/ConditionalTokens.json` through `test/fixtures/ConditionalTokensFixture.sol`, because the vault calls `balanceOf` and `mergePositions`, and a mock would test the mock |
 | USDC (ERC-20) | e2e with mock token | The shared `MockERC20` in the fixture, because the vault and the ConditionalTokens contract need only `balanceOf`, `transfer`, and `transferFrom` semantics from USDC |
-| Cancelled-phase setup | fixture | `VaultStorage.setPhase` writes phase 3, because the merge reads no other state, and the real `emergencyCancelAll` path needs a signed mint and a 7-day silence that the emergency-cancel tests already prove |
+| Cancelled-phase setup | fixture | `VaultStorage.setPhase` writes phase 3, because the merge reads no other state, and the real `emergencyCancelAll` path needs a 7-day silence that the emergency-cancel tests already prove |

@@ -4,7 +4,7 @@ name: Collect Fees on a Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 2
+version: 3
 refs: [FEAT-TVS0, FEAT-6HBN, FEAT-3ZRI, FEAT-JAIJ]
 ---
 
@@ -68,7 +68,7 @@ Linked to: UC-U07A
 ### Phase Independence
 
 **FR-U07O** `While the vault is in any phase (Active, WindDown, or Cancelled), and whether or not trading is paused, the system shall allow collect and collectFor to proceed.`
-Fit Criterion: Given a vault in WindDown phase, collect succeeds for valid positions with accrued fees, identical to Active phase behavior. Given a vault in Cancelled phase, collect does not revert; at this step the cancel has zeroed the position, so it pays zero, and after R10 it pays the fees. Decision C9.
+Fit Criterion: Given a vault in WindDown or in Cancelled, collect and collectFor succeed for valid positions with accrued fees and pay the same amount as in the Active phase, because the freeze keeps every record (FEAT-JXQO FR-JXQP). Decision C9.
 Linked to: UC-U07A, UC-BMF8
 
 ### Operator-Relayed Path

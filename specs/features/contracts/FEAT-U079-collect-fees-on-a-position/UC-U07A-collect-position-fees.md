@@ -3,7 +3,7 @@ id: UC-U07A
 name: Collect Position Fees
 feature: FEAT-U079
 status: implemented
-version: 3
+version: 4
 actor: LP
 ---
 
@@ -206,24 +206,25 @@ The LP's Safe calls `collect(positionId)`.
 
 ---
 
-### SC-BMFD: Collect in the Cancelled phase does not revert
+### SC-BMFD: Collect in the Cancelled phase pays the accrued fees
 
 **Given:**
-- A position holder called `emergencyCancelAll` after the timelock, so the vault phase is Cancelled (3) and every position's liquidity and `tokensOwed` are zero
-- The Safe owns one of those positions
+- Any address called `emergencyCancelAll` after the timelock, so the vault phase is Cancelled (3) and every position keeps its liquidity and its fee snapshot
+- The Safe owns a position with 499 USDC of accrued fees (500 reported over its liquidity, rounded down)
 
 **Steps:**
 1. The Safe calls collect(positionId)
 2. System applies no phase check and verifies the caller is position.owner
-3. System computes owed = 0 from the zeroed record
+3. System computes the fees owed from the intact record, merges any pairs, and pays the Safe
 
 **Outcomes:**
-- Transaction succeeds without revert
-- LP receives no USDC, because at this step the cancel paid the position; after R10 the cancel is a freeze and the collect pays the fees
+- Transaction succeeds
+- The Safe receives 499 USDC, the same amount as the identical collect in Active phase
 
 **Side Effects:**
-- No USDC transfer
-- No FeesCollected event emitted
+- USDC transferred to the Safe
+- `FeesCollected(positionId, safe, 499)` emitted
+- `tokensOwed == 0` and the snapshot advanced
 - No phase change
 
 ---

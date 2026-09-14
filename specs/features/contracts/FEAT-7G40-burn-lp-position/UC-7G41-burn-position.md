@@ -3,7 +3,7 @@ id: UC-7G41
 name: Burn Position
 feature: FEAT-7G40
 status: implemented
-version: 2
+version: 3
 actor: LP
 ---
 
@@ -193,22 +193,42 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 
 **Given:**
 - Case A: the Oracle has called `startWindDown` and the vault's phase is WindDown, and the Safe owns a live in-range position identical to the one in SC-7G43
-- Case B: a position holder has called `emergencyCancelAll` and the vault's phase is Cancelled (3)
+- Case B: any address has called `emergencyCancelAll` after the timelock and the vault's phase is Cancelled (3), and the Safe owns the same in-range position
 
 **Steps:**
 1. The Safe calls `burnPosition` for the position
 2. System applies no phase gate to the burn path
-3. In case A, system values the claim, updates tick and liquidity state, and pays the Safe
-4. In case B, system finds the position's liquidity zeroed by the cancel and reverts
+3. System values the claim at `currentTick`, updates tick and liquidity state, deletes the record, and pays the Safe
 
 **Outcomes:**
-- Case A: the `PositionBurned` amounts, the tick updates, and the `activeLiquidity` delta are identical to the same burn in Active phase
-- Case B: the call reverts `PositionNotFound`, because at this step the cancel zeroes every position; after R10 the cancel is a freeze and the burn pays in full
+- In both cases the `PositionBurned` amounts, the tick updates, and the `activeLiquidity` delta are identical to the same burn in Active phase
 
 **Side Effects:**
-- Case A: `PositionBurned` emitted, `positions[positionId]` deleted, ticks and `activeLiquidity` updated as in Active phase, USDC transferred to the Safe
-- Case B: no state change, no event
+- `PositionBurned` emitted, `positions[positionId]` deleted, ticks and `activeLiquidity` updated as in Active phase, USDC transferred to the Safe, in both cases
 - No phase change in either case
+
+---
+
+### SC-BZC6: A burn on a wrapped fee snapshot pays the growth since mint
+
+**Given:**
+- The Safe owns a position of 1,000 USDC over [0, 100) (liquidity 10e18) whose `feeGrowthInsideLastX128` was written to a wrapped value near 2^256 (`type(uint256).max - 1000`) through the storage fixture, as a late-initialized shared tick produces (FEAT-T7AF ADR-8L1F, FEAT-U079 SC-8L1E)
+- `currentTick == 0`, so the position is in range, beside the Safe's second, ordinary position of 9,000 USDC over [0, 300) (liquidity 30e18)
+- `notifyFees` then reported 501 USDC over the in-range liquidity, so the wrapped position's share is 125.25 USDC, which rounds down to 125. The report is 501 and not 500, because the wrapped snapshot models 1,001 growth units below zero, and that offset would push a share that sits within 10^-19 of an integer over it
+
+**Steps:**
+1. The Safe calls `burnPosition` for the wrapped position
+2. System computes `feeGrowthInsideX128 - feeGrowthInsideLastX128` inside `unchecked`, so the subtraction wraps modulo 2^256 and cancels the offset to the true delta
+3. System pays the claim's USDC plus the fees
+
+**Outcomes:**
+- The call does not revert with an arithmetic panic
+- `PositionBurned.feesOwed == 125` USDC (`liquidity × feeGrowthGlobalX128 / Q128`), the growth since the snapshot and nothing else
+- The Safe receives 1,000 USDC of principal plus the 125 USDC of fees
+- The ordinary position is untouched
+
+**Side Effects:**
+- `PositionBurned` emitted, the record deleted, both ticks updated, USDC transferred to the Safe
 
 ---
 

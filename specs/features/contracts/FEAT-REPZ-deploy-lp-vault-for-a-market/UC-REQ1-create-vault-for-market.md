@@ -3,7 +3,7 @@ id: UC-REQ1
 name: Create Vault for Market
 feature: FEAT-REPZ
 status: implemented
-version: 7
+version: 8
 actor: Oracle
 ---
 
@@ -17,7 +17,7 @@ actor: Oracle
 
 ## Trigger
 
-Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` on the LPVaultFactory, or calls `setMinimumFirstLiquidity(newMin)` on an existing vault to adjust its first-LP floor.
+Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)` on the LPVaultFactory, or calls `setMinimumFirstLiquidity(newMin)` on an existing vault to adjust its first-LP floor. An Admin calls `setDefaultEmergencyCancelTimelock(newTimelock)` on the LPVaultFactory to set the emergency-cancel timelock that later vaults copy.
 
 ---
 
@@ -35,7 +35,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditio
 2. System checks the identity: non-zero values, distinct IDs, outcome slot count 2, and the index set 1 and index set 2 position IDs
 3. System deploys an EIP-1167 minimal-proxy clone of the implementation contract
 4. System calls `initialize(marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity, version, conditionId, yesTokenId, noTokenId)` on the clone
-5. Clone stores all config in storage (not immutable -- EIP-1167 constraint), sets `phase = Active`, sets `activeLiquidity = 0`, sets `minimumFirstLiquidity` to the passed value, and records `conditionId`, `yesTokenId`, and `noTokenId`
+5. Clone stores all config in storage (not immutable -- EIP-1167 constraint), sets `phase = Active`, sets `activeLiquidity = 0`, sets `minimumFirstLiquidity` to the passed value, records `conditionId`, `yesTokenId`, and `noTokenId`, and reads `defaultEmergencyCancelTimelock()` from the factory once into `emergencyCancelTimelock`
 6. Clone approves CTF Exchange for unlimited USDC spending and calls `setApprovalForAll` on ConditionalTokens for the exchange
 7. System registers `vaultForMarket[marketId] = cloneAddress`
 
@@ -45,6 +45,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditio
 - The vault delegates operator, oracle, and admin authorization to the factory contract -- no local role state is stored
 - The minimum-first-liquidity floor is set to the Oracle-supplied value
 - `conditionId`, `yesTokenId`, and `noTokenId` are readable on the vault
+- `emergencyCancelTimelock()` on the vault equals the factory's `defaultEmergencyCancelTimelock()` at the moment of the call (7 days on a fresh factory)
 - The vault can receive its two ERC-1155 outcome tokens from its ConditionalTokens contract and rejects every other token ID (SC-3WLL, SC-3WLM, SC-6HBY)
 
 **Side Effects:**
@@ -279,6 +280,75 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditio
 **Side Effects:**
 - No state changes
 - No events emitted
+
+---
+
+### SC-BZC2: Admin changes the default timelock, and only later vaults copy it
+
+**Given:**
+- A factory with `defaultEmergencyCancelTimelock == 7 days` and one vault V1 created from it
+- The caller is an Admin
+
+**Steps:**
+1. Admin calls `setDefaultEmergencyCancelTimelock(14 days)` on the factory
+2. System checks the `onlyAdmin` modifier and the bounds
+3. System stores the new default
+4. Oracle calls `createVault` for a second market, V2
+
+**Outcomes:**
+- `defaultEmergencyCancelTimelock() == 14 days`
+- `V1.emergencyCancelTimelock() == 7 days`, unchanged
+- `V2.emergencyCancelTimelock() == 14 days`
+- On V1 the freeze succeeds after 7 days of silence; on V2 it reverts `TimelockNotElapsed` at 7 days and succeeds at 14
+
+**Side Effects:**
+- `DefaultEmergencyCancelTimelockUpdated(7 days, 14 days)` emitted by the factory
+- `VaultCreated` for V2
+- No state change on V1
+
+---
+
+### SC-BZC3: The default timelock setter rejects zero and a value above 30 days
+
+**Given:**
+- A factory with `defaultEmergencyCancelTimelock == 7 days`
+- The caller is an Admin
+
+**Steps:**
+1. Admin calls `setDefaultEmergencyCancelTimelock(0)`
+2. System reverts `ZeroTimelock`
+3. Admin calls `setDefaultEmergencyCancelTimelock(30 days + 1)`
+4. System reverts `TimelockTooLong`
+5. Admin calls `setDefaultEmergencyCancelTimelock(30 days)`
+6. System stores it
+
+**Outcomes:**
+- After steps 2 and 4 the default is still 7 days
+- After step 6 it is 30 days
+
+**Side Effects:**
+- No event from the reverted calls
+- `DefaultEmergencyCancelTimelockUpdated(7 days, 30 days)` from step 6
+
+---
+
+### SC-BZC4: Non-Admin cannot change the default timelock
+
+**Given:**
+- A factory with `defaultEmergencyCancelTimelock == 7 days`
+- The caller is the Operator, the Oracle, an LP's Safe, or an arbitrary address
+
+**Steps:**
+1. The caller calls `setDefaultEmergencyCancelTimelock(14 days)`
+2. System checks the `onlyAdmin` modifier
+
+**Outcomes:**
+- The call reverts `NotAdmin`
+- The default stays 7 days
+
+**Side Effects:**
+- No state change
+- No event emitted
 
 ---
 

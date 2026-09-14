@@ -3,7 +3,7 @@ id: FEAT-U079
 name: Collect Fees on a Position
 use_cases: [UC-U07A, UC-BMF8]
 scenarios: [SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-BMFF, SC-BMFG, SC-BMFH, SC-BMFI, SC-BMFJ, SC-BMFK, SC-BMFL, SC-BMFM, SC-BMG6]
-last_update: 2026-09-13
+last_update: 2026-09-14
 ---
 
 # Architecture: Collect Fees on a Position
@@ -159,7 +159,7 @@ erDiagram
 | SC-U07G | Second collect only pays new fees | `src/LPVault.sol:collect()`, `src/LPVault.sol:_computeFeeGrowthInside()`, `src/LPVault.sol:_safeTransfer()` |
 | SC-8L1D | Immediate collect on a wrapped snapshot owes zero | `src/LPVault.sol:collect()`, `src/LPVault.sol:_computeFeeGrowthInside()` |
 | SC-8L1E | Collect after the price re-enters the wrapped range pays growth since mint | `src/LPVault.sol:collect()`, `src/LPVault.sol:_computeFeeGrowthInside()`, `src/LPVault.sol:_safeTransfer()` |
-| SC-BMFD | Collect in the Cancelled phase does not revert | `src/LPVault.sol:collect()` (no phase gate) |
+| SC-BMFD | Collect in the Cancelled phase pays the accrued fees | `src/LPVault.sol:collect()` (no phase gate) |
 | SC-BMFE | Collect merges the vault's pairs first | `src/LPVault.sol:_collect()`, `src/LPVault.sol:_mergeCompleteSets()` |
 | SC-BMFF | Collect keeps its unpaid remainder | `src/LPVault.sol:_collect()`, `src/LPVault.sol:_availableUsdc()` |
 | UC-BMF8 | Operator Collect Fees for LP | `src/LPVault.sol:collectFor()`, `src/LPVault.sol:_collect()` |
@@ -185,4 +185,4 @@ Collect follows the Uniswap v3 fee collection pattern (compute feeGrowthInside, 
 | feeGrowthInside accuracy | fuzz | Fuzz with varying tick positions and fee accumulator states to verify the v3 formula |
 | ConditionalTokens (ERC-1155) | e2e | The real Gnosis bytecode through `test/fixtures/ConditionalTokensFixture.sol`, because a paying collect merges through it |
 | EIP-712 signatures | e2e | `vm.sign()` produces real signatures; the fixture signs all four types to prove they are mutually non-interchangeable |
-| The Cancelled phase | e2e | A real `emergencyCancelAll` after the timelock, because the collect must see the zeroed position the cancel leaves at this step |
+| The Cancelled phase | e2e | A real `emergencyCancelAll` after the timelock, because the collect must pay the fees from the record the freeze leaves in place |

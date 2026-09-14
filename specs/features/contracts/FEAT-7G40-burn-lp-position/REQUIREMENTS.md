@@ -4,7 +4,7 @@ name: Burn LP Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 2
+version: 3
 refs: [FEAT-T7AF, FEAT-U079, FEAT-TVS0, FEAT-JGE7, FEAT-6HBN, FEAT-3ZRI]
 ---
 
@@ -76,7 +76,7 @@ Fit Criterion: Given a burn through `burnPositionFor` submitted by the Operator,
 Linked to: UC-7G41, UC-7G42
 
 **FR-7G4V** `While the vault is in any phase (Active, WindDown, or Cancelled), and whether or not trading is paused, the system shall allow burns through both entry points.`
-Fit Criterion: Given a vault in WindDown, a burn produces the same `PositionBurned` amounts, the same tick updates, and the same `activeLiquidity` delta as the identical burn in Active phase. Given a vault in the Cancelled phase, the burn reverts on no phase check; at this step the cancel has zeroed every position, so the burn reverts `PositionNotFound`, and after R10 it pays in full. Decisions C5 and C9.
+Fit Criterion: Given a vault in WindDown or in Cancelled, a burn produces the same `PositionBurned` amounts, the same tick updates, and the same `activeLiquidity` delta as the identical burn in Active phase at the same `currentTick`. The freeze keeps every record (FEAT-JXQO FR-JXQP), so an in-range burn after it subtracts its liquidity from `activeLiquidity` without underflow. Decisions C5 and C9.
 Linked to: UC-7G41, UC-7G42
 
 **FR-7G4W** `If a burn is attempted for a positionId with no owner or with zero liquidity, then the system shall revert PositionNotFound.`

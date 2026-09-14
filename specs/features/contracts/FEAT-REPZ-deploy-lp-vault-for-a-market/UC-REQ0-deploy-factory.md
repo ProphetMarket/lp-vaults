@@ -3,7 +3,7 @@ id: UC-REQ0
 name: Deploy Factory
 feature: FEAT-REPZ
 status: implemented
-version: 2
+version: 3
 actor: Factory Owner
 ---
 
@@ -36,11 +36,13 @@ Factory Owner sends the LPVaultFactory deployment transaction.
 3. System sets `admins[initialAdmin] = 1` and `adminCount = 1`
 4. System sets `oracle = initialOracle`
 5. System sets `operators[initialOperator] = 1`
+6. System sets `defaultEmergencyCancelTimelock = 7 days`
 
 **Outcomes:**
 - Factory contract exists at a deployed address with all configuration stored
 - Role registry is initialized: one admin, one oracle, one operator
 - `safeFactory()` and `safeProxyBytecodeHash()` return the constructor values
+- `defaultEmergencyCancelTimelock()` returns 7 days
 
 **Side Effects:**
 - No events emitted (constructor-only; standard EVM creation receipt)
