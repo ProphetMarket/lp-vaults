@@ -4,8 +4,8 @@ pragma solidity 0.8.20;
 // FEAT-7G40: Burn LP Position
 // UC-7G41: Burn Position
 // Integration tests for every scenario in this use case, against the real ConditionalTokens
-// bytecode: the claim model of decision C26, the merge-first rule, the pay-what-is-there rule
-// (decision O2), and the tick deinitialization that closes audit issue 6.15.
+// bytecode: the claim model of decision C26, the merge-first rule, the pro-rata rule of
+// decision O2 (FEAT-9BQZ), and the tick deinitialization that closes audit issue 6.15.
 // Covers: SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B,
 //         SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6
 
@@ -67,7 +67,7 @@ contract BurnPositionTestBase is LPVaultFixture {
         uint256 tokenPaid
     );
     event CompleteSetsMerged(address indexed caller, uint256 amount);
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
+    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
     event Transfer(address indexed from, address indexed to, uint256 value);
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
@@ -210,8 +210,8 @@ contract BurnAtMintTickTest is BurnPositionTestBase {
 
         _burn(positionId);
 
-        (uint128 gLower, int128 nLower,) = vault.ticks(LOWER);
-        (uint128 gUpper, int128 nUpper,) = vault.ticks(UPPER);
+        (uint128 gLower, int128 nLower,,) = vault.ticks(LOWER);
+        (uint128 gUpper, int128 nUpper,,) = vault.ticks(UPPER);
         assertEq(gLower, 0, "tick 5500 liquidityGross");
         assertEq(nLower, 0, "tick 5500 liquidityNet");
         assertEq(gUpper, 0, "tick 6500 liquidityGross");
@@ -435,7 +435,7 @@ contract BurnDeinitializesTickTest is BurnPositionTestBase {
     function test_whenLastReferenceBurnsThenTickIsDeinitialized() public {
         _burn(positionId);
 
-        (uint128 gross, int128 net, uint256 outside) = vault.ticks(UPPER);
+        (uint128 gross, int128 net, uint256 outside,) = vault.ticks(UPPER);
         assertEq(gross, 0, "tick 6500 liquidityGross");
         assertEq(net, 0, "tick 6500 liquidityNet");
         assertEq(outside, 0, "tick 6500 feeGrowthOutside");
@@ -444,11 +444,11 @@ contract BurnDeinitializesTickTest is BurnPositionTestBase {
 
     // SC-7G47: tick 5500 keeps its bit, its net, and its feeGrowthOutside
     function test_whenAnotherReferenceRemainsThenTickIsPreserved() public {
-        (uint128 grossBefore, int128 netBefore, uint256 outsideBefore) = vault.ticks(LOWER);
+        (uint128 grossBefore, int128 netBefore, uint256 outsideBefore,) = vault.ticks(LOWER);
 
         _burn(positionId);
 
-        (uint128 gross, int128 net, uint256 outside) = vault.ticks(LOWER);
+        (uint128 gross, int128 net, uint256 outside,) = vault.ticks(LOWER);
         assertEq(gross, grossBefore - LIQUIDITY, "tick 5500 liquidityGross decreased by the example's liquidity");
         assertEq(net, netBefore - int128(LIQUIDITY), "tick 5500 liquidityNet decreased by the example's liquidity");
         assertEq(outside, outsideBefore, "tick 5500 feeGrowthOutside preserved");
@@ -683,22 +683,27 @@ contract BurnMergesFirstTest is BurnPositionTestBase {
 }
 
 // ──────────────────────────────────────────────
-// SC-BMF2: Burn pays what the vault holds when it is short
+// SC-BMF2: Burn pays its share when the vault is short
 // What: Case A: the claim is 247.3545 USDC plus 90 YES, the vault holds 200 USDC and 60
-//       YES; the burn pays 200 and 60, emits owed and paid, and deletes the record.
-//       Case B: the vault's USDC balance is below totalEscrowed; the burn pays zero USDC
-//       and does not revert. Case C: a vault richer than the claim pays the claim exactly.
-// Why:  Decisions C6, C7, and O2. A checked subtraction would revert every exit once a
-//       fill took the balance below the escrow total.
+//       YES; with this one claim each ratio is what is held over what is owed, so the burn
+//       pays 200 and 60, emits owed and paid, deletes the record, and debits the totals by
+//       the full claim. Case B: the vault's USDC balance is below totalEscrowed; the burn
+//       pays zero USDC and does not revert. Case C: a vault richer than the claim pays the
+//       claim exactly.
+// Why:  Decisions C6, C7, and O2 (FR-COEX, FEAT-9BQZ FR-9BRM to FR-9BRR). A checked
+//       subtraction would revert every exit once a fill took the balance below the escrow
+//       total, and a debit by the paid amount would leave a phantom claim in the ledger.
 // Setup: the exchange's standing approval moves USDC out of the vault, as a fill would.
 // ──────────────────────────────────────────────
 contract BurnShortVaultTest is BurnPositionTestBase {
     // SC-BMF2: case A — short in USDC and in the token, per asset
-    function test_whenVaultIsShortThenBurnPaysWhatItHolds() public {
+    function test_whenVaultIsShortThenBurnPaysItsShare() public {
         _moveTick(5700);
         _fundVault(60e6, 0);
         _drainThroughExchange(PRINCIPAL - 200e6);
         assertEq(mockUsdc.balanceOf(address(vault)), 200e6, "precondition: 200 USDC above escrow");
+        assertEq(vault.totalUsdcOwed(), FELL_USDC, "precondition: one claim in the ledger");
+        assertEq(vault.totalYesOwed(), BAND_TOKENS, "precondition: one claim in the ledger");
 
         vm.expectEmit(true, true, false, true, address(vault));
         emit PositionBurned(positionId, safe, FELL_USDC, 0, 200e6, vault.yesTokenId(), BAND_TOKENS, 60e6);
@@ -707,6 +712,20 @@ contract BurnShortVaultTest is BurnPositionTestBase {
         assertEq(mockUsdc.balanceOf(safe), 200e6, "the USDC the vault held");
         assertEq(_yesOf(safe), 60e6, "the YES the vault held");
         _assertDeleted(positionId);
+    }
+
+    // SC-BMF2: the totals fall by the full claim, whatever was paid
+    function test_whenVaultIsShortThenTotalsFallByTheFullClaim() public {
+        _moveTick(5700);
+        _fundVault(60e6, 0);
+        _drainThroughExchange(PRINCIPAL - 200e6);
+
+        _burn(positionId);
+
+        assertEq(vault.totalUsdcOwed(), 0, "the USDC total falls by 247,354,500, not by the 200 paid");
+        assertEq(vault.totalYesOwed(), 0, "the YES total falls by 90, not by the 60 paid");
+        assertEq(vault.totalUsdcOwedScaled(), 0, "no phantom claim in the scaled total");
+        assertEq(vault.totalYesOwedScaled(), 0, "no phantom claim in the scaled total");
     }
 
     // SC-BMF2: case B — a balance below totalEscrowed pays zero USDC and does not revert
@@ -724,6 +743,7 @@ contract BurnShortVaultTest is BurnPositionTestBase {
 
         assertEq(mockUsdc.balanceOf(safe), 0, "nothing to pay");
         assertEq(vault.totalEscrowed(), 500e6, "escrowed USDC never pays a burn");
+        assertEq(vault.totalUsdcOwed(), 0, "the claim settled in the ledger");
         _assertDeleted(positionId);
     }
 

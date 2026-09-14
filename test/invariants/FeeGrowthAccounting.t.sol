@@ -16,8 +16,11 @@ pragma solidity 0.8.20;
 // takes the USDC it credits, so the vault's balance covers escrow, principal,
 // and every claimable fee, with no exchange fill (see invariant_feeCreditsAreBacked).
 // Since R9 the handler also burns (FEAT-7G40): a burn pays the position's fees with
-// its principal, so the ghost totals move by what the event reports, and a short
-// collect leaves its remainder in tokensOwed, which the claimable sum reads.
+// its principal, so the ghost totals move by what the event reports. Since R11 a
+// collect settles its claim at the USDC ratio of the solvency ledger (FEAT-9BQZ) with
+// no remainder; this harness never drains the vault, so every ratio here is 1 and the
+// paid amount the handler counts equals the owed amount. The bound stays exact under a
+// cut too, because a settled claim that paid less leaves the sum below the total.
 
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {Vm} from "forge-std/Vm.sol";
@@ -268,8 +271,8 @@ contract FeeGrowthAccountingInvariantTest is StdInvariant, LPVaultFixture {
     ///      unchecked wraparound) using only external view getters, so the
     ///      invariant can independently recompute what collect() would pay.
     function _computeFeeGrowthInside(int24 tickLower, int24 tickUpper) internal view returns (uint256) {
-        (,, uint256 outsideLower) = vault.ticks(tickLower);
-        (,, uint256 outsideUpper) = vault.ticks(tickUpper);
+        (,, uint256 outsideLower,) = vault.ticks(tickLower);
+        (,, uint256 outsideUpper,) = vault.ticks(tickUpper);
         int24 currentTick = vault.currentTick();
         uint256 global = vault.feeGrowthGlobalX128();
 

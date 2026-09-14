@@ -155,7 +155,7 @@ contract OperatorBurnAtMintTickTest is OperatorBurnTestBase {
         vault.burnPosition(twin);
 
         assertEq(mockUsdc.balanceOf(safe), mockUsdc.balanceOf(safeB), "both paths pay the same USDC");
-        (uint128 gLower,,) = vault.ticks(LOWER);
+        (uint128 gLower,,,) = vault.ticks(LOWER);
         assertEq(gLower, 0, "both paths removed their liquidity from the shared tick");
     }
 }

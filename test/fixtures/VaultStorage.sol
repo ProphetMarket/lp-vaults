@@ -6,13 +6,17 @@ pragma solidity 0.8.20;
 // Shared test fixture: writes LPVault storage fields that no entry point sets on demand.
 // Test files import it. src/ never does.
 
-import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
+import {StdStorage, stdStorage, stdStorageSafe, FindData} from "forge-std/StdStorage.sol";
+import {Vm} from "forge-std/Vm.sol";
 
 /// @dev Each write goes through forge-std stdStorage, which finds the slot at run time by
 ///      probing the public getter, so a storage layout change in src/LPVault.sol changes
 ///      nothing here. `depth` selects the word of the getter's return tuple.
 library VaultStorage {
     using stdStorage for StdStorage;
+
+    /// @dev The cheatcode address, for the one raw write below.
+    Vm private constant vm = Vm(address(uint160(uint256(keccak256("hevm cheat code")))));
 
     /// @dev Overwrites positions[positionId].feeGrowthInsideLastX128, the sixth field of a Position.
     function setFeeGrowthInsideLast(StdStorage storage store, address vault, uint256 positionId, uint256 value)
@@ -27,6 +31,14 @@ library VaultStorage {
         // casting to 'uint256' is safe because the two's complement bit pattern is the key itself
         // forge-lint: disable-next-line(unsafe-typecast)
         store.target(vault).sig("ticks(int24)").with_key(bytes32(uint256(int256(tick)))).depth(2).checked_write(value);
+    }
+
+    /// @dev Overwrites totalFeesOwedX128, the solvency ledger's fee total (FEAT-9BQZ). A test that
+    ///      plants a wrapped fee snapshot gives a position a fee claim that no report credited, so
+    ///      it credits the ledger here by the same amount, or the merge's checked dust debit
+    ///      (FR-9BRH) would underflow on a claim the ledger never carried.
+    function setTotalFeesOwedX128(StdStorage storage store, address vault, uint256 value) internal {
+        store.target(vault).sig("totalFeesOwedX128()").checked_write(value);
     }
 
     /// @dev Overwrites phase. Used to reach the Cancelled phase where the tested function reads
@@ -64,17 +76,26 @@ library VaultStorage {
         store.target(vault).sig("tickBitmap(int16)").with_key(key).checked_write(word | (uint256(1) << bitPos));
     }
 
-    /// @dev Overwrites currentTick. The write moves no liquidity: `activeLiquidity` and every
-    ///      tick record stay as they are, so a test calls it only when no position is in range at
-    ///      the old tick and none at the new tick. Otherwise the next crossing runs `_addDelta` on
-    ///      a stale `activeLiquidity` and reverts `SafeCastOverflow` for a reason unrelated to the
-    ///      search. It exists so a search test can start inside an extreme bitmap word: a real
-    ///      move from 0 to 8,388,000 reads 32,766 words, which is the large jump that NFR-5IDG
-    ///      leaves to chunking.
+    /// @dev Overwrites currentTick. The write moves no liquidity: `activeLiquidity`, the ledger,
+    ///      and every tick record stay as they are, so a test calls it only when no position is in
+    ///      range at the old tick and none at the new tick. Otherwise the next crossing runs
+    ///      `_addDelta` on a stale `activeLiquidity` and reverts `SafeCastOverflow` for a reason
+    ///      unrelated to the search. It exists so a search test can start inside an extreme bitmap
+    ///      word: a real move from 0 to 8,388,000 reads 32,766 words, which is the large jump that
+    ///      NFR-5IDG leaves to chunking.
+    ///      `currentTick` shares its slot with `noSideLiquidity` (FEAT-9BQZ), so the write goes
+    ///      through the packed-slot finder and replaces only the tick's 24 bits; the counter keeps
+    ///      its value, which the caller can read back as zero. The write is raw, because
+    ///      `checked_write` compares the getter's sign-extended return with the 24-bit pattern it
+    ///      wrote and rejects every negative tick.
     function setCurrentTick(StdStorage storage store, address vault, int24 tick) internal {
-        // The slot holds the sign-extended word, so a negative tick reads back as written.
-        // casting to 'uint256' is safe because the two's complement bit pattern is the stored word
+        FindData storage data = stdStorageSafe.find(store.enable_packed_slots().target(vault).sig("currentTick()"));
+        bytes32 current = vm.load(vault, bytes32(data.slot));
+        // casting to 'uint24' then 'uint256' is safe because the 24-bit two's complement pattern is
+        // exactly the bits the slot stores for an int24, and the getter sign-extends it on the read
         // forge-lint: disable-next-line(unsafe-typecast)
-        store.target(vault).sig("currentTick()").checked_write(bytes32(uint256(int256(tick))));
+        uint256 packed = uint256(uint24(tick));
+        bytes32 updated = stdStorageSafe.getUpdatedSlotValue(current, packed, data.offsetLeft, data.offsetRight);
+        vm.store(vault, bytes32(data.slot), updated);
     }
 }

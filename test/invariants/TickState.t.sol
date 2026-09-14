@@ -6,18 +6,23 @@ pragma solidity 0.8.20;
 // FEAT-K1M2: Merge Positions (FR-AFPU, the merge conservation invariant)
 // FEAT-7G40: Burn LP Position (FR-7G4O, FR-7G4P, the bitmap invariant)
 // FEAT-JXQO: Emergency Cancel All Positions (FR-JXQP, the freeze keeps activeLiquidity)
+// FEAT-9BQZ: Vault Solvency Ledger (the per-mint-tick state, ADR-COEW in FEAT-TVS0)
 // Invariants required by CLAUDE.md's Foundry conventions (an invariant on every
 // state-machine property), for the tick state machine under mints, tick moves,
 // merges, and burns, with the target-bounded bitmap search:
-//   1. activeLiquidity == Σ position.liquidity over positions whose range holds currentTick
-//   2. ticks[t].liquidityGross == Σ position.liquidity over positions that reference t
+//   1. activeLiquidity == Σ position.liquidity over positions whose range holds currentTick,
+//      and noSideLiquidity == the same sum over those whose mintTick <= currentTick
+//   2. ticks[t].liquidityGross == Σ position.liquidity over positions that reference t as
+//      tickLower, as tickUpper, or as an interior mint tick, and ticks[t].noLiquidityNet ==
+//      Σ L over positions with mintTick == t < tickUpper − Σ L over positions with
+//      tickUpper == t > mintTick
 //   3. updateTick reverts only for a documented reason (never an arithmetic panic, FR-5IDF)
 //   4. a move of at most 2,000 ticks costs less than 200,000 gas plus 30,000 per tick it
 //      crossed, so a zero-crossing move stays under 200,000 (NFR-5IDG)
-//   5. Σ position.liquidity over all positions == Σ liquidityGross over the distinct
-//      referenced ticks / 2, so a merge never creates or loses liquidity (FR-AFPU). This
-//      is the summed form of invariant 2, kept as its own named check because audit
-//      issue 6.14 asked for it.
+//   5. Σ liquidityGross over the distinct referenced ticks == Σ position.liquidity x
+//      (2 + [tickLower < mintTick < tickUpper]), so a merge never creates or loses
+//      liquidity (FR-AFPU). This is the summed form of invariant 2, kept as its own named
+//      check because audit issue 6.14 asked for it.
 //   6. mergePositions([a, a]) always reverts DuplicatePositionId (FR-AFPS), so the
 //      rejection is documented in the run and not mistaken for a gap
 //   7. every tick a mint ever referenced has its bitmap bit set exactly when its
@@ -93,8 +98,9 @@ contract TickStateHandler is LPVaultFixture {
     uint256 public duplicateMergeAttempts;
     bytes4 public undocumentedDuplicateMergeRevert;
 
-    /// @dev Every tick a mint ever referenced, with repeats, so the bitmap invariant can read
-    ///      a tick after the burn that deleted the position which referenced it.
+    /// @dev Every tick a mint ever referenced, both bounds and the mint tick, with repeats, so
+    ///      the bitmap invariant can read a tick after the burn that deleted the position which
+    ///      referenced it.
     int24[] public referencedTicks;
     /// @dev How many burns completed, and the first burn revert selector that is not a
     ///      documented rejection. Zero while every burn revert was documented.
@@ -161,6 +167,8 @@ contract TickStateHandler is LPVaultFixture {
         positionIds.push(id);
         referencedTicks.push(tickLower);
         referencedTicks.push(tickUpper);
+        (,,, int24 mintTick,,,) = vault.positions(id);
+        referencedTicks.push(mintTick);
     }
 
     function referencedTickCount() external view returns (uint256) {
@@ -356,6 +364,7 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
     struct PositionView {
         int24 tickLower;
         int24 tickUpper;
+        int24 mintTick;
         uint128 liquidity;
     }
 
@@ -385,24 +394,32 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
     }
 
     // FR-A2ZS: activeLiquidity equals the sum of the liquidity of every position whose range
-    // contains currentTick. A consumed position has zero liquidity and adds nothing.
+    // contains currentTick, and noSideLiquidity the same sum over the positions on the NO side
+    // of their mint tick. A consumed position has zero liquidity and adds nothing.
     function invariant_activeLiquidityEqualsInRangeLiquidity() public view {
         PositionView[] memory all = _positions();
         int24 currentTick = vault.currentTick();
         uint256 sum = 0;
+        uint256 noSide = 0;
         for (uint256 i = 0; i < all.length; i++) {
-            if (all[i].tickLower <= currentTick && currentTick < all[i].tickUpper) sum += all[i].liquidity;
+            if (all[i].tickLower <= currentTick && currentTick < all[i].tickUpper) {
+                sum += all[i].liquidity;
+                if (all[i].mintTick <= currentTick) noSide += all[i].liquidity;
+            }
         }
         assertEq(vault.activeLiquidity(), sum, "activeLiquidity must equal the in-range position liquidity");
+        assertEq(vault.noSideLiquidity(), noSide, "noSideLiquidity must equal the in-range NO-side liquidity");
     }
 
     // FR-A2ZS: each referenced tick's liquidityGross equals the sum of the liquidity of every
-    // position that references it as tickLower or tickUpper.
+    // position that references it as tickLower, as tickUpper, or as an interior mint tick, and
+    // its noLiquidityNet equals the net of the NO sub-ranges [mintTick, tickUpper) at it.
     function invariant_liquidityGrossEqualsReferencingLiquidity() public view {
         PositionView[] memory all = _positions();
         for (uint256 i = 0; i < all.length; i++) {
-            _assertLiquidityGross(all, all[i].tickLower);
-            _assertLiquidityGross(all, all[i].tickUpper);
+            _assertTickState(all, all[i].tickLower);
+            _assertTickState(all, all[i].tickUpper);
+            if (_isInteriorMintTick(all[i])) _assertTickState(all, all[i].mintTick);
         }
     }
 
@@ -434,20 +451,24 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         );
     }
 
-    // FR-AFPU: the sum of every position's liquidity equals half the sum of liquidityGross over
-    // the distinct ticks the positions reference, because every position references exactly two
-    // ticks. A merge that created or lost liquidity would break it, since a merge never touches
-    // tick state. This is the summed form of invariant 2, read from vault state only.
+    // FR-AFPU: the sum of liquidityGross over the distinct ticks the positions reference equals
+    // the sum of every position's liquidity times its reference count, two for the bounds plus
+    // one for an interior mint tick. A merge that created or lost liquidity would break it, since
+    // a merge never touches tick state. This is the summed form of invariant 2, read from vault
+    // state only.
     function invariant_mergeConservesLiquidity() public view {
         PositionView[] memory all = _positions();
-        uint256 positionSum = 0;
+        uint256 weightedSum = 0;
         uint256 grossSum = 0;
         for (uint256 i = 0; i < all.length; i++) {
-            positionSum += all[i].liquidity;
+            weightedSum += uint256(all[i].liquidity) * (_isInteriorMintTick(all[i]) ? 3 : 2);
             if (_firstReferenceIndex(all, all[i].tickLower) == i) grossSum += _liquidityGrossAt(all[i].tickLower);
             if (_firstReferenceIndex(all, all[i].tickUpper) == i) grossSum += _liquidityGrossAt(all[i].tickUpper);
+            if (_isInteriorMintTick(all[i]) && _firstReferenceIndex(all, all[i].mintTick) == i) {
+                grossSum += _liquidityGrossAt(all[i].mintTick);
+            }
         }
-        assertEq(positionSum * 2, grossSum, "a merge must conserve the sum of position liquidity");
+        assertEq(weightedSum, grossSum, "a merge must conserve the sum of position liquidity");
     }
 
     // FR-AFPS: every mergePositions([a, a]) in the run reverted DuplicatePositionId, so a merge
@@ -467,7 +488,7 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         uint256 count = handler.referencedTickCount();
         for (uint256 i = 0; i < count; i++) {
             int24 tick = handler.referencedTicks(i);
-            (uint128 liquidityGross,,) = vault.ticks(tick);
+            (uint128 liquidityGross,,,) = vault.ticks(tick);
             assertEq(
                 _bitIsSet(tick),
                 liquidityGross > 0,
@@ -506,16 +527,23 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         return (vault.tickBitmap(wordPos) >> bitPos) & 1 == 1;
     }
 
+    /// @dev A position references its mint tick on its own only when the tick lies strictly
+    ///      inside the range; at a bound the bound's own reference already covers it.
+    function _isInteriorMintTick(PositionView memory p) internal pure returns (bool) {
+        return p.tickLower < p.mintTick && p.mintTick < p.tickUpper;
+    }
+
     /// @dev The index of the first position that references `tick`, so each tick is counted once.
     function _firstReferenceIndex(PositionView[] memory all, int24 tick) internal pure returns (uint256) {
         for (uint256 i = 0; i < all.length; i++) {
             if (all[i].tickLower == tick || all[i].tickUpper == tick) return i;
+            if (_isInteriorMintTick(all[i]) && all[i].mintTick == tick) return i;
         }
         revert("a referenced tick must have a referencing position");
     }
 
     function _liquidityGrossAt(int24 tick) internal view returns (uint256) {
-        (uint128 liquidityGross,,) = vault.ticks(tick);
+        (uint128 liquidityGross,,,) = vault.ticks(tick);
         return liquidityGross;
     }
 
@@ -528,9 +556,9 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         PositionView[] memory every = new PositionView[](count);
         uint256 live = 0;
         for (uint256 i = 0; i < count; i++) {
-            (address owner, int24 tickLower, int24 tickUpper,, uint128 liquidity,,) = vault.positions(i);
+            (address owner, int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity,,) = vault.positions(i);
             if (owner == address(0)) continue;
-            every[live++] = PositionView(tickLower, tickUpper, liquidity);
+            every[live++] = PositionView(tickLower, tickUpper, mintTick, liquidity);
         }
         all = new PositionView[](live);
         for (uint256 i = 0; i < live; i++) {
@@ -538,16 +566,29 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         }
     }
 
-    function _assertLiquidityGross(PositionView[] memory all, int24 tick) internal view {
+    function _assertTickState(PositionView[] memory all, int24 tick) internal view {
         uint256 sum = 0;
+        int256 noNet = 0;
         for (uint256 i = 0; i < all.length; i++) {
-            if (all[i].tickLower == tick || all[i].tickUpper == tick) sum += all[i].liquidity;
+            PositionView memory p = all[i];
+            if (p.tickLower == tick || p.tickUpper == tick) sum += p.liquidity;
+            if (_isInteriorMintTick(p) && p.mintTick == tick) sum += p.liquidity;
+            // The NO sub-range [mintTick, tickUpper): +L at its start, -L at its end, when it exists
+            if (p.mintTick < p.tickUpper) {
+                if (p.mintTick == tick) noNet += int256(uint256(p.liquidity));
+                if (p.tickUpper == tick) noNet -= int256(uint256(p.liquidity));
+            }
         }
-        (uint128 liquidityGross,,) = vault.ticks(tick);
+        (uint128 liquidityGross,,, int128 noLiquidityNet) = vault.ticks(tick);
         assertEq(
             liquidityGross,
             sum,
             string.concat("liquidityGross at tick ", vm.toString(tick), " must equal the referencing liquidity")
+        );
+        assertEq(
+            int256(noLiquidityNet),
+            noNet,
+            string.concat("noLiquidityNet at tick ", vm.toString(tick), " must equal the NO sub-ranges' net")
         );
     }
 }

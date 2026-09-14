@@ -119,15 +119,15 @@ contract MergePositionsSuccessTest is MergePositionsTestBase {
     // SC-K1M9: tick liquidityGross unchanged after merge
     function test_tickLiquidityGrossUnchanged() public {
         // Record tick state before merge
-        (uint128 grossLowerBefore,,) = vault.ticks(int24(0));
-        (uint128 grossUpperBefore,,) = vault.ticks(int24(100));
+        (uint128 grossLowerBefore,,,) = vault.ticks(int24(0));
+        (uint128 grossUpperBefore,,,) = vault.ticks(int24(100));
 
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
         // Tick state must be identical — total liquidity on the range hasn't changed
-        (uint128 grossLowerAfter,,) = vault.ticks(int24(0));
-        (uint128 grossUpperAfter,,) = vault.ticks(int24(100));
+        (uint128 grossLowerAfter,,,) = vault.ticks(int24(0));
+        (uint128 grossUpperAfter,,,) = vault.ticks(int24(100));
         assertEq(grossLowerAfter, grossLowerBefore, "tickLower liquidityGross unchanged");
         assertEq(grossUpperAfter, grossUpperBefore, "tickUpper liquidityGross unchanged");
     }
@@ -453,6 +453,28 @@ contract MergePositionsFeeAccountingTest is MergePositionsTestBase {
         assertGt(survivorOwed, 0, "survivor should have nonzero owed fees");
     }
 
+    // FR-K1M6, SC-K1MC: the solvency ledger's fee total falls by the two remainders the floors
+    // drop, so it still equals the survivor's scaled fee claim, and no principal total moves
+    // (FEAT-9BQZ FR-9BRH, SC-9BS6)
+    function test_mergeDebitsTheFeeTotalByTheDustTheFloorsDrop() public {
+        (,,,, uint128 liqA, uint256 feeGrowthLastA,) = vault.positions(posA);
+        (,,,, uint128 liqB, uint256 feeGrowthLastB,) = vault.positions(posB);
+        uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
+        uint256 productA = uint256(liqA) * (feeGrowthGlobal - feeGrowthLastA);
+        uint256 productB = uint256(liqB) * (feeGrowthGlobal - feeGrowthLastB);
+        assertTrue(productA % Q128 != 0 && productB % Q128 != 0, "precondition: the products do not divide by 2^128");
+        uint256 feesBefore = vault.totalFeesOwedX128();
+        uint256 usdcBefore = vault.totalUsdcOwedScaled();
+
+        vm.prank(operatorAddr);
+        vault.mergePositions(_buildIds(posA, posB));
+
+        assertEq(feesBefore - vault.totalFeesOwedX128(), productA % Q128 + productB % Q128, "the dust debit");
+        (,,,,,, uint256 survivorOwed) = vault.positions(posA);
+        assertEq(vault.totalFeesOwedX128(), survivorOwed * Q128, "the fee total equals the survivor's scaled claim");
+        assertEq(vault.totalUsdcOwedScaled(), usdcBefore, "no principal total moves");
+    }
+
     // SC-K1MC: survivor feeGrowthInsideLastX128 equals current feeGrowthInside
     function test_survivorFeeGrowthInsideLastEqualsCurrentValue() public {
         // Current feeGrowthInside for [0, 100) should equal feeGrowthGlobal
@@ -590,9 +612,17 @@ contract MergePositionsWraparoundTestBase is LPVaultFixture {
         return ids;
     }
 
-    /// @dev Overwrites positions[id].feeGrowthInsideLastX128 directly.
+    /// @dev Overwrites positions[id].feeGrowthInsideLastX128 directly, and credits the solvency
+    ///      ledger (FEAT-9BQZ) with the fee claim the wrapped value models (liquidity times the
+    ///      offset below zero), because no report ever credited it and the merge's dust debit is
+    ///      checked (FR-9BRH).
     function _setFeeGrowthInsideLast(uint256 id, uint256 value) internal {
         VaultStorage.setFeeGrowthInsideLast(stdstore, address(vault), id, value);
+        (,,,, uint128 liquidity,,) = vault.positions(id);
+        uint256 offset = type(uint256).max - value + 1;
+        VaultStorage.setTotalFeesOwedX128(
+            stdstore, address(vault), vault.totalFeesOwedX128() + uint256(liquidity) * offset
+        );
     }
 }
 

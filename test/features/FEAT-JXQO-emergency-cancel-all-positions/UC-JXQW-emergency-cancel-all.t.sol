@@ -157,16 +157,16 @@ contract FreezeChangesOnlyPhaseTest is EmergencyCancelTestBase {
 
     // SC-JXQX: both boundary tick records and their bitmap bits are untouched
     function test_tickRecordsAndBitmapUnchanged() public {
-        (uint128 grossLowBefore, int128 netLowBefore, uint256 outsideLowBefore) = vault.ticks(int24(0));
-        (uint128 grossUpBefore, int128 netUpBefore, uint256 outsideUpBefore) = vault.ticks(int24(100));
+        (uint128 grossLowBefore, int128 netLowBefore, uint256 outsideLowBefore,) = vault.ticks(int24(0));
+        (uint128 grossUpBefore, int128 netUpBefore, uint256 outsideUpBefore,) = vault.ticks(int24(100));
         uint256 wordBefore = vault.tickBitmap(int16(0));
         assertTrue(grossLowBefore > 0 && grossUpBefore > 0, "precondition: both ticks initialized");
 
         vm.prank(lpA);
         vault.emergencyCancelAll();
 
-        (uint128 grossLow, int128 netLow, uint256 outsideLow) = vault.ticks(int24(0));
-        (uint128 grossUp, int128 netUp, uint256 outsideUp) = vault.ticks(int24(100));
+        (uint128 grossLow, int128 netLow, uint256 outsideLow,) = vault.ticks(int24(0));
+        (uint128 grossUp, int128 netUp, uint256 outsideUp,) = vault.ticks(int24(100));
         assertEq(grossLow, grossLowBefore, "ticks[0].liquidityGross must not move");
         assertEq(netLow, netLowBefore, "ticks[0].liquidityNet must not move");
         assertEq(outsideLow, outsideLowBefore, "ticks[0].feeGrowthOutsideX128 must not move");
@@ -433,7 +433,7 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
     bytes32 constant ESCROW_INTENT = keccak256("cancelled-escrow");
 
     event DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
+    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
 
     function setUp() public override {
         super.setUp();
@@ -497,7 +497,7 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
         uint256 before_ = mockUsdc.balanceOf(lpA);
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionIdA, lpA, 499);
+        emit FeesCollected(positionIdA, lpA, 499, 499);
         vm.prank(lpA);
         vault.collect(positionIdA);
 

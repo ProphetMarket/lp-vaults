@@ -141,7 +141,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function test_lowerTickInitializedCorrectly() public {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside) = vault.ticks(tickLower);
+        (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside,) = vault.ticks(tickLower);
         assertEq(feeGrowthOutside, 1000, "tick 20 feeGrowthOutside should equal feeGrowthGlobal");
         assertEq(liqGross, uint128(10e18), "tick 20 liquidityGross should equal position liquidity");
         assertEq(liqNet, int128(int256(uint256(10e18))), "tick 20 liquidityNet should be positive");
@@ -151,7 +151,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function test_upperTickInitializedCorrectly() public {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside) = vault.ticks(tickUpper);
+        (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside,) = vault.ticks(tickUpper);
         assertEq(feeGrowthOutside, 0, "tick 80 feeGrowthOutside should be 0 (above currentTick)");
         assertEq(liqGross, uint128(10e18), "tick 80 liquidityGross should equal position liquidity");
         assertEq(liqNet, -int128(int256(uint256(10e18))), "tick 80 liquidityNet should be negative");
@@ -163,6 +163,24 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
         assertEq(vault.activeLiquidity(), before_ + uint128(10e18), "activeLiquidity should increase");
+    }
+
+    // SC-T7AH: the interior mint tick 50 is initialized as a crossable tick, the NO sub-range
+    // [50, 80) is booked at 50 and at 80, and the in-range mint enters on the NO side
+    // (FR-T7AV, FEAT-TVS0 ADR-COEW)
+    function test_interiorMintTickIsInitializedAndTheNoSubRangeIsBooked() public {
+        _mint(tickLower, tickUpper, usdcAmount, intentId);
+
+        (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside, int128 noNet) = vault.ticks(int24(50));
+        assertEq(liqGross, uint128(10e18), "tick 50 liquidityGross counts the position");
+        assertEq(liqNet, 0, "tick 50 liquidityNet is zero: no position bounds it");
+        assertEq(feeGrowthOutside, 1000, "tick 50 feeGrowthOutside equals feeGrowthGlobal (at or below currentTick)");
+        assertEq(noNet, int128(int256(uint256(10e18))), "tick 50 noLiquidityNet starts the NO sub-range");
+        (,,, int128 noNetUpper) = vault.ticks(tickUpper);
+        assertEq(noNetUpper, -int128(int256(uint256(10e18))), "tick 80 noLiquidityNet ends the NO sub-range");
+        assertEq((vault.tickBitmap(int16(0)) >> 50) & 1, 1, "tick 50's bitmap bit is set");
+        assertEq(vault.noSideLiquidity(), uint128(10e18), "the mint enters on the NO side");
+        assertEq(vault.totalUsdcOwedScaled(), uint256(10e18) * 60 * 10_000, "the ledger credits the deposit");
     }
 
     // SC-T7AH: the mint moves no USDC; the escrow already holds it
@@ -248,8 +266,8 @@ contract MintPositionOutOfRangeTest is MintPositionTestBase {
     function test_bothTicksInitializedWithZeroFeeGrowthOutside() public {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (,, uint256 fgOutLower) = vault.ticks(tickLower);
-        (,, uint256 fgOutUpper) = vault.ticks(tickUpper);
+        (,, uint256 fgOutLower,) = vault.ticks(tickLower);
+        (,, uint256 fgOutUpper,) = vault.ticks(tickUpper);
         assertEq(fgOutLower, 0, "tick 60 feeGrowthOutside should be 0 (above current)");
         assertEq(fgOutUpper, 0, "tick 90 feeGrowthOutside should be 0 (above current)");
     }
@@ -293,25 +311,25 @@ contract MintPositionExistingTickTest is MintPositionTestBase {
 
     // SC-T7AJ: second position accumulates liquidityGross on shared tick
     function test_liquidityGrossAccumulatesOnExistingTick() public {
-        (uint128 liqGrossBefore,,) = vault.ticks(int24(20));
+        (uint128 liqGrossBefore,,,) = vault.ticks(int24(20));
 
         _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, intentId2);
 
         // Second position liquidity: 600 * 1e18 / 60 = 10e18
-        (uint128 liqGrossAfter,,) = vault.ticks(int24(20));
+        (uint128 liqGrossAfter,,,) = vault.ticks(int24(20));
         assertEq(liqGrossAfter, liqGrossBefore + uint128(10e18), "liquidityGross should accumulate");
     }
 
     // SC-T7AJ: feeGrowthOutside preserved on existing tick (NOT re-initialized)
     function test_feeGrowthOutsidePreservedOnExistingTick() public {
-        (,, uint256 fgOutBefore) = vault.ticks(int24(20));
+        (,, uint256 fgOutBefore,) = vault.ticks(int24(20));
 
         // Simulate fee growth changing between mints
         _setFeeGrowthGlobalX128(5000);
 
         _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, intentId2);
 
-        (,, uint256 fgOutAfter) = vault.ticks(int24(20));
+        (,, uint256 fgOutAfter,) = vault.ticks(int24(20));
         assertEq(fgOutAfter, fgOutBefore, "feeGrowthOutside should be preserved, not re-initialized");
     }
 
@@ -404,12 +422,12 @@ contract MintOverStaleSharedTickTest is MintPositionTestBase {
     // SC-8L1C: tick 50 initializes to the current global, tick 100 keeps its
     // stale G1 and only accumulates liquidityGross
     function test_freshTickTakesGlobalAndSharedTickKeepsStaleOutside() public {
-        (uint128 gross100Before,,) = vault.ticks(int24(100));
+        (uint128 gross100Before,,,) = vault.ticks(int24(100));
 
         _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
 
-        (,, uint256 outside50) = vault.ticks(int24(50));
-        (uint128 gross100After,, uint256 outside100) = vault.ticks(int24(100));
+        (,, uint256 outside50,) = vault.ticks(int24(50));
+        (uint128 gross100After,, uint256 outside100,) = vault.ticks(int24(100));
         assertEq(outside50, g2, "tick 50 feeGrowthOutside should equal the current global G2");
         assertEq(outside100, g1, "tick 100 feeGrowthOutside should stay at the stale G1");
         assertEq(gross100After, gross100Before + uint128(10e18), "tick 100 liquidityGross should accumulate");

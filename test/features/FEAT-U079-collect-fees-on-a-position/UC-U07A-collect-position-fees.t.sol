@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-U07A: Collect Position Fees
 // Integration tests for every scenario in this use case.
-// Covers: SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-BMFF
+// Covers: SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-COEZ
 
 import {Test} from "forge-std/Test.sol";
 import {Vm} from "forge-std/Vm.sol";
@@ -38,7 +38,7 @@ contract CollectFeesTestBase is LPVaultFixture {
     uint256 constant Q128 = 2 ** 128;
 
     // Events declared for expectEmit and log reads
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
+    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
     event CompleteSetsMerged(address indexed caller, uint256 amount);
 
     // Position minted in setUp: range [0, 100), 1000 USDC, positionId = 0
@@ -132,7 +132,7 @@ contract CollectFeesFirstCollectTest is CollectFeesTestBase {
         uint256 expectedOwed = uint256(positionLiquidity) * feeGrowthGlobal / Q128;
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, lp, expectedOwed);
+        emit FeesCollected(positionId, lp, expectedOwed, expectedOwed);
 
         vm.prank(lp);
         vault.collect(positionId);
@@ -292,7 +292,7 @@ contract CollectFeesDuringWindDownTest is CollectFeesTestBase {
         uint256 expectedOwed = uint256(positionLiquidity) * feeGrowthGlobal / Q128;
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, lp, expectedOwed);
+        emit FeesCollected(positionId, lp, expectedOwed, expectedOwed);
 
         vm.prank(lp);
         vault.collect(positionId);
@@ -375,7 +375,7 @@ contract CollectFeesAntiDoubleCountTest is CollectFeesTestBase {
         uint256 expectedOwed = uint256(positionLiquidity) * delta / Q128;
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, lp, expectedOwed);
+        emit FeesCollected(positionId, lp, expectedOwed, expectedOwed);
 
         vm.prank(lp);
         vault.collect(positionId);
@@ -585,7 +585,7 @@ contract FeeGrowthWraparoundCollectTest is FeeGrowthWraparoundTestBase {
     // tick sits on, not merely that the call doesn't revert.
     function test_preexistingPositionSharingStaleTickStillCollectible() public {
         (,,,, uint128 posP2Liquidity,,) = vault.positions(posP2);
-        (,, uint256 tick100Outside) = vault.ticks(int24(100));
+        (,, uint256 tick100Outside,) = vault.ticks(int24(100));
         uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
 
         // posP2 was minted at currentTick=0, before any fees, so its own
@@ -667,7 +667,7 @@ contract CollectInCancelledPhaseTest is CollectFeesTestBase {
         assertEq(expectedOwed, 499, "precondition: 500 reported over the liquidity, rounded down");
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, lp, 499);
+        emit FeesCollected(positionId, lp, 499, 499);
         vm.prank(lp);
         vault.collect(positionId);
 
@@ -739,16 +739,17 @@ contract CollectMergesFirstTest is CollectFeesTestBase {
 }
 
 // ──────────────────────────────────────────────
-// SC-BMFF: Collect keeps its unpaid remainder
-// What: Case A: the vault holds 4 USDC above escrow against 10 owed; the collect pays 4,
-//       keeps 6 in tokensOwed, and a later collect pays the 6 once the vault holds them.
-//       Case B: the vault's balance is below totalEscrowed; the collect pays zero, does not
-//       revert, and keeps the whole amount.
-// Why:  Decisions C6, C7, and O2: no revert on the comparison, escrowed USDC never pays a
-//       fee, and the snapshot has already advanced so the remainder must wait in tokensOwed.
+// SC-COEZ: Collect pays its share and settles
+// What: Case A: the vault holds above escrow 40 percent of the principal and the fees it
+//       owes; the collect pays 40 percent of the fees owed, sets tokensOwed to zero, debits
+//       the whole scaled claim, and emits both amounts, and a later collect owes only the
+//       fees that grew since. Case B: the vault's balance is below totalEscrowed; the collect
+//       pays zero, does not revert, emits (owed, 0), and settles the claim all the same.
+// Why:  Decisions C6, C7, and O2 (FR-U07K, FEAT-9BQZ ADR-COEN): no revert on the
+//       comparison, escrowed USDC never pays a fee, and a cut is final.
 // Setup: the exchange's standing approval moves USDC out of the vault, as a fill would.
 // ──────────────────────────────────────────────
-contract CollectKeepsRemainderTest is CollectFeesTestBase {
+contract CollectPaysItsShareTest is CollectFeesTestBase {
     uint256 constant LP_B_PK = 0xB0B;
     uint256 owed;
 
@@ -764,47 +765,71 @@ contract CollectKeepsRemainderTest is CollectFeesTestBase {
         mockUsdc.transferFrom(address(vault), exchangeAddr, amount);
     }
 
-    // SC-BMFF: case A — pays 4, keeps the rest, and pays the rest later
-    function test_whenVaultIsShortThenCollectPaysWhatItHoldsAndKeepsTheRest() public {
-        _drainThroughExchange(mockUsdc.balanceOf(address(vault)) - 4);
+    // SC-COEZ: case A — pays its share at the USDC ratio and settles
+    function test_whenVaultIsShortThenCollectPaysItsShareAndSettles() public {
+        // The USDC ratio: what the vault holds above escrow over the principal plus the fees
+        // it owes, 0.4 here (FEAT-9BQZ FR-9BRM)
+        uint256 total = vault.totalUsdcOwed() + vault.totalFeesOwed();
+        uint256 held = total * 4 / 10;
+        _drainThroughExchange(mockUsdc.balanceOf(address(vault)) - held);
+        uint256 expectedPaid = owed * held / total;
+        assertTrue(expectedPaid > 0 && expectedPaid < owed, "precondition: a real cut");
+        uint256 feesBefore = vault.totalFeesOwedX128();
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, lp, 4);
+        emit FeesCollected(positionId, lp, owed, expectedPaid);
         vm.prank(lp);
         vault.collect(positionId);
 
-        assertEq(mockUsdc.balanceOf(lp), 4, "the 4 USDC the vault held");
+        assertEq(mockUsdc.balanceOf(lp), expectedPaid, "the owed amount times the ratio");
         (,,,,,, uint256 remainder) = vault.positions(positionId);
-        assertEq(remainder, owed - 4, "the rest waits in tokensOwed");
+        assertEq(remainder, 0, "nothing waits in tokensOwed: the cut is final");
+        assertEq(feesBefore - vault.totalFeesOwedX128(), feesBefore, "the whole scaled claim settled");
 
-        // The vault gains the remainder, and a later collect pays it
-        mockUsdc.mint(address(vault), remainder);
+        // A later collect owes only the fees that grew since, at the ratio then in force
+        _distributeFees(3);
+        uint256 newOwed = uint256(positionLiquidity) * (vault.feeGrowthGlobalX128() - _snapshotOf(positionId)) / Q128;
+        uint256 total2 = vault.totalUsdcOwed() + vault.totalFeesOwed();
+        uint256 held2 = mockUsdc.balanceOf(address(vault));
+        uint256 expectedPaid2 = held2 < total2 ? newOwed * held2 / total2 : newOwed;
+        assertLt(newOwed, owed, "precondition: the unpaid 60 percent is not owed again");
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit FeesCollected(positionId, lp, newOwed, expectedPaid2);
         vm.prank(lp);
         vault.collect(positionId);
 
-        assertEq(mockUsdc.balanceOf(lp), owed, "the later collect pays the remainder");
-        (,,,,,, uint256 after_) = vault.positions(positionId);
-        assertEq(after_, 0, "nothing left to pay");
+        assertEq(mockUsdc.balanceOf(lp), expectedPaid + expectedPaid2, "the later collect pays the new fees only");
     }
 
-    // SC-BMFF: case B — a balance below totalEscrowed pays zero and keeps everything
-    function test_whenBalanceIsBelowEscrowThenCollectPaysZeroAndKeepsAll() public {
+    // SC-COEZ: case B — a balance below totalEscrowed pays zero, emits (owed, 0), and settles
+    function test_whenBalanceIsBelowEscrowThenCollectPaysZeroAndSettles() public {
         address safeB = _safeOf(vm.addr(LP_B_PK));
         _fundSafe(mockUsdc, safeB, address(vault), 500);
         _escrow(vault, operatorAddr, LP_B_PK, safeB, int24(0), int24(100), 500, keccak256("escrow-b"), FAR_DEADLINE);
         _drainThroughExchange(mockUsdc.balanceOf(address(vault)) - 300);
         assertLt(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "precondition: below escrow");
 
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit FeesCollected(positionId, lp, owed, 0);
         vm.recordLogs();
         vm.prank(lp);
         vault.collect(positionId);
 
         assertEq(mockUsdc.balanceOf(lp), 0, "nothing paid");
-        assertEq(vm.getRecordedLogs().length, 0, "no FeesCollected and no transfer");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].emitter != address(mockUsdc), "no USDC transfer");
+        }
         (,,,,, uint256 snapshot, uint256 remainder) = vault.positions(positionId);
-        assertEq(remainder, owed, "the whole amount waits in tokensOwed");
+        assertEq(remainder, 0, "the claim settled with nothing paid");
         assertEq(snapshot, vault.feeGrowthGlobalX128(), "the snapshot advanced");
+        assertEq(vault.totalFeesOwedX128(), 0, "the ledger settled the claim");
         assertEq(vault.totalEscrowed(), 500, "escrowed USDC never pays a fee");
+    }
+
+    function _snapshotOf(uint256 id) internal view returns (uint256 snapshot) {
+        (,,,,, snapshot,) = vault.positions(id);
     }
 
     /// @dev One cold collect, as R3 measured: every slot of the vault, the factory, the mock,

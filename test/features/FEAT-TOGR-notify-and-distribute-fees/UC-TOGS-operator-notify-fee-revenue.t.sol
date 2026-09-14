@@ -3,9 +3,9 @@ pragma solidity 0.8.20;
 
 // UC-TOGS: Operator Notify Fee Revenue
 // Integration tests for every scenario in this use case.
-// Covers: SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY, SC-ASNK
+// Covers: SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY, SC-ASNK, SC-COF0
 
-import {Test} from "forge-std/Test.sol";
+import {Test, stdError} from "forge-std/Test.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
@@ -466,35 +466,63 @@ contract NotifyFeesUnfundedTest is NotifyFeesTestBase {
 }
 
 // ──────────────────────────────────────────────
-// FR-TOH3: mulDiv overflow safety (fuzz)
-// What: For very large amount values where amount * 2^128 would overflow
-//       uint256, the inline mulDiv must still produce the correct result.
-// Why:  Without overflow-safe multiplication, realistic fee amounts
-//       (e.g., 1e24 USDC-units) would silently produce wrong Q128 deltas.
+// FR-TOH3, SC-COF0: mulDiv overflow safety and the fee-total bound
+// What: Every amount below 2^128 base units produces the exact Q128 delta and credits the
+//       solvency ledger's fee total by that delta times activeLiquidity; an amount above 2^128
+//       reverts with an arithmetic panic before any state changes, because the credit is
+//       amount x 2^128 less its remainder modulo activeLiquidity (FEAT-9BQZ FR-9BRA, NFR-COEV).
+// Why:  The bound is 3.4 x 10^32 USDC, which the user accepted on 2026-09-14; the fuzz test
+//       that once asserted larger amounts succeed asserts the exact credit instead.
 // ──────────────────────────────────────────────
 contract NotifyFeesMulDivOverflowTest is NotifyFeesTestBase {
-    // FR-TOH3: fuzz with amounts where the intermediate product (amount * Q128)
-    // overflows uint256 but the final result still fits.
-    // activeLiquidity = 10e18. Intermediate overflows when amount > 2^128.
-    // Result overflows when amount > activeLiquidity * 2^128 / Q128 = activeLiquidity.
-    // Wait — result = amount * Q128 / activeLiquidity. Result fits when
-    // amount <= type(uint256).max * activeLiquidity / Q128.
-    // For activeLiquidity = 10e18: max amount ≈ 10e18 * 2^128 ≈ 3.4e57.
-    // Lower bound = 2^128 + 1 to guarantee intermediate overflow.
+    // FR-TOH3: every amount inside the bound produces the exact accumulator delta and the exact
+    // fee-total credit. activeLiquidity = 10e18, so amount x Q128 fits in uint256 for every
+    // amount below 2^128 and the reference mulDiv is a plain product.
     function testFuzz_largeAmountDoesNotOverflow(uint256 amount) public {
         uint128 activeL = vault.activeLiquidity();
-        // Ensure the intermediate amount * Q128 overflows uint256 (amount > 2^128)
-        // but the result amount * Q128 / activeLiquidity still fits in uint256.
-        uint256 maxAmount = _refMulDiv(type(uint256).max, uint256(activeL), Q128);
-        amount = bound(amount, Q128 + 1, maxAmount);
+        amount = bound(amount, 1, Q128 - 1);
 
         uint256 expectedDelta = _refMulDiv(amount, Q128, uint256(activeL));
 
         // The helper mints the fuzzed amount to the Operator per call, so the mock's
-        // balance never overflows even near the mulDiv ceiling.
+        // balance never overflows near the bound.
         _notifyFees(vault, operatorAddr, amount);
 
         assertEq(vault.feeGrowthGlobalX128(), expectedDelta, "fuzz: feeGrowthGlobal should match reference mulDiv");
+        assertEq(vault.totalFeesOwedX128(), expectedDelta * uint256(activeL), "fuzz: the fee total credit");
+    }
+
+    // SC-COF0: a report above 2^128 reverts with an arithmetic panic and pulls no USDC. At
+    // exactly 2^128 the credit is 2^256 less its remainder modulo activeLiquidity, which fits
+    // unless activeLiquidity is a power of two, so the first amount that reverts for every
+    // activeLiquidity is 2^128 + 1.
+    function test_whenAmountExceeds2Pow128ThenReportRevertsBeforeAnyStateChange() public {
+        uint256 amount = Q128 + 1;
+        _fundSafe(mockUsdc, operatorAddr, address(vault), amount);
+        uint256 globalBefore = vault.feeGrowthGlobalX128();
+        uint256 feesBefore = vault.totalFeesOwedX128();
+        uint256 vaultBalBefore = mockUsdc.balanceOf(address(vault));
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(stdError.arithmeticError);
+        vault.notifyFees(amount);
+
+        assertEq(vault.feeGrowthGlobalX128(), globalBefore, "feeGrowthGlobalX128 must be unchanged");
+        assertEq(vault.totalFeesOwedX128(), feesBefore, "the fee total must be unchanged");
+        assertEq(mockUsdc.balanceOf(address(vault)), vaultBalBefore, "no USDC pulled");
+        assertEq(mockUsdc.balanceOf(operatorAddr), amount, "the Operator keeps its USDC");
+    }
+
+    // SC-COF0: one unit below the bound succeeds and credits the fee total
+    function test_whenAmountIsOneBelow2Pow128ThenReportSucceeds() public {
+        uint128 activeL = vault.activeLiquidity();
+        uint256 amount = Q128 - 1;
+
+        _notifyFees(vault, operatorAddr, amount);
+
+        uint256 growth = _refMulDiv(amount, Q128, uint256(activeL));
+        assertEq(vault.feeGrowthGlobalX128(), growth, "the accumulator delta");
+        assertEq(vault.totalFeesOwedX128(), growth * uint256(activeL), "the fee-total credit");
     }
 
     // FR-TOH3: mulDiv reverts when the result would not fit in uint256.

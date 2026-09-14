@@ -38,7 +38,7 @@ contract OperatorCollectTestBase is LPVaultFixture {
 
     uint256 positionId;
 
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
+    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
 
     function setUp() public virtual {
         safe = _safeOf(vm.addr(LP_PK));
@@ -90,7 +90,7 @@ contract OperatorCollectPaysLpTest is OperatorCollectTestBase {
         vm.warp(block.timestamp + 1 days);
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, safe, owed);
+        emit FeesCollected(positionId, safe, owed, owed);
         _relay(1, _sig(1));
 
         assertEq(mockUsdc.balanceOf(safe), owed, "the Safe receives the fees");
@@ -144,7 +144,7 @@ contract OperatorCollectSecondNonceTest is OperatorCollectTestBase {
         assertGt(second, 0, "precondition: new fees accrued");
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, safe, second);
+        emit FeesCollected(positionId, safe, second, second);
         _relay(2, _sig(2));
 
         assertEq(mockUsdc.balanceOf(safe), first + second, "the second collect pays only the new fees");

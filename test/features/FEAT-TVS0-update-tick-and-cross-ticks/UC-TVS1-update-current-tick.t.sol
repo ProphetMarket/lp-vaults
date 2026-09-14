@@ -103,13 +103,13 @@ contract UpdateTickLeftToRightTest is UpdateTickTestBase {
     // SC-TVS2: feeGrowthOutsideX128 at tick 100 flipped
     function test_feeGrowthOutsideFlipped() public {
         uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
-        (,, uint256 feeGrowthOutsideBefore) = vault.ticks(int24(100));
+        (,, uint256 feeGrowthOutsideBefore,) = vault.ticks(int24(100));
         assertEq(feeGrowthOutsideBefore, 0, "precondition: tick 100 feeGrowthOutside should be 0");
 
         vm.prank(operatorAddr);
         vault.updateTick(int24(150));
 
-        (,, uint256 feeGrowthOutsideAfter) = vault.ticks(int24(100));
+        (,, uint256 feeGrowthOutsideAfter,) = vault.ticks(int24(100));
         assertEq(
             feeGrowthOutsideAfter, feeGrowthGlobal, "tick 100 feeGrowthOutside should equal feeGrowthGlobal after flip"
         );
@@ -172,13 +172,13 @@ contract UpdateTickRightToLeftTest is UpdateTickTestBase {
     // SC-TVS3: feeGrowthOutsideX128 at tick 100 flips back to 0
     function test_feeGrowthOutsideFlippedBack() public {
         uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
-        (,, uint256 feeGrowthOutsideBefore) = vault.ticks(int24(100));
+        (,, uint256 feeGrowthOutsideBefore,) = vault.ticks(int24(100));
         assertEq(feeGrowthOutsideBefore, feeGrowthGlobal, "precondition: tick 100 fGO should be feeGrowthGlobal");
 
         vm.prank(operatorAddr);
         vault.updateTick(int24(50));
 
-        (,, uint256 feeGrowthOutsideAfter) = vault.ticks(int24(100));
+        (,, uint256 feeGrowthOutsideAfter,) = vault.ticks(int24(100));
         assertEq(feeGrowthOutsideAfter, 0, "tick 100 feeGrowthOutside should flip back to 0");
     }
 
@@ -190,7 +190,7 @@ contract UpdateTickRightToLeftTest is UpdateTickTestBase {
     // would set fGO to G2, which this test catches.
     function test_feeGrowthOutsideFlipUsesOldValue() public {
         uint256 g1 = vault.feeGrowthGlobalX128();
-        (,, uint256 fGOBefore) = vault.ticks(int24(100));
+        (,, uint256 fGOBefore,) = vault.ticks(int24(100));
         assertEq(fGOBefore, g1, "precondition: tick 100 fGO equals G1");
 
         // Second fee batch — activeLiquidity is now 20e18 (after L-to-R cross)
@@ -203,7 +203,7 @@ contract UpdateTickRightToLeftTest is UpdateTickTestBase {
         vm.prank(operatorAddr);
         vault.updateTick(int24(50));
 
-        (,, uint256 fGOAfter) = vault.ticks(int24(100));
+        (,, uint256 fGOAfter,) = vault.ticks(int24(100));
         assertEq(fGOAfter, g2 - g1, "tick 100 fGO should be G2 - G1, not G2");
         assertGt(fGOAfter, 0, "fGO must be non-zero (guards against `new = global - global` mutation)");
         assertTrue(fGOAfter != g2, "fGO must differ from G2 (guards against `new = global` mutation)");
@@ -470,9 +470,9 @@ contract UpdateTickSameTickTest is UpdateTickTestBase {
     /// @dev One hash over the three initialized tick records (liquidityGross,
     ///      liquidityNet, feeGrowthOutsideX128 at ticks 0, 100, and 200).
     function _tickRecordsHash() internal view returns (bytes32) {
-        (uint128 g0, int128 n0, uint256 o0) = vault.ticks(int24(0));
-        (uint128 g100, int128 n100, uint256 o100) = vault.ticks(int24(100));
-        (uint128 g200, int128 n200, uint256 o200) = vault.ticks(int24(200));
+        (uint128 g0, int128 n0, uint256 o0,) = vault.ticks(int24(0));
+        (uint128 g100, int128 n100, uint256 o100,) = vault.ticks(int24(100));
+        (uint128 g200, int128 n200, uint256 o200,) = vault.ticks(int24(200));
         return keccak256(abi.encode(g0, n0, o0, g100, n100, o100, g200, n200, o200));
     }
 }
@@ -731,7 +731,9 @@ contract BoundedTickSearchTestBase is LPVaultFixture {
     }
 
     /// @dev Writes the start tick. Call it after every plant, and only with no position in range
-    ///      at the old tick or at the new one (see VaultStorage.setCurrentTick).
+    ///      at the old tick, at the new one, or between them (see VaultStorage.setCurrentTick):
+    ///      the write books nothing in the solvency ledger (FEAT-9BQZ), so a position the price
+    ///      skipped would be crossed back later with no shift to reverse.
     function _setCurrentTick(int24 tick) internal {
         VaultStorage.setCurrentTick(stdstore, address(vault), tick);
     }
@@ -789,14 +791,14 @@ contract BoundedTickSearchFarAboveTest is BoundedTickSearchTestBase {
 
     // SC-5IDH: activeLiquidity is unchanged and the planted ticks are untouched
     function test_whenTickIsPlantedFarAboveThenPlantedTicksAreUntouched() public {
-        (uint128 gLower, int128 nLower, uint256 oLower) = vault.ticks(int24(8388590));
-        (uint128 gUpper, int128 nUpper, uint256 oUpper) = vault.ticks(int24(8388600));
+        (uint128 gLower, int128 nLower, uint256 oLower,) = vault.ticks(int24(8388590));
+        (uint128 gUpper, int128 nUpper, uint256 oUpper,) = vault.ticks(int24(8388600));
 
         _move(int24(300));
 
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
-        (uint128 gLowerAfter, int128 nLowerAfter, uint256 oLowerAfter) = vault.ticks(int24(8388590));
-        (uint128 gUpperAfter, int128 nUpperAfter, uint256 oUpperAfter) = vault.ticks(int24(8388600));
+        (uint128 gLowerAfter, int128 nLowerAfter, uint256 oLowerAfter,) = vault.ticks(int24(8388590));
+        (uint128 gUpperAfter, int128 nUpperAfter, uint256 oUpperAfter,) = vault.ticks(int24(8388600));
         assertEq(gLowerAfter, gLower, "tick 8388590 liquidityGross must not move");
         assertEq(nLowerAfter, nLower, "tick 8388590 liquidityNet must not move");
         assertEq(oLowerAfter, oLower, "tick 8388590 feeGrowthOutside must not move");
@@ -841,14 +843,14 @@ contract BoundedTickSearchFarBelowTest is BoundedTickSearchTestBase {
 
     // SC-5IDI: activeLiquidity is unchanged and the planted ticks are untouched
     function test_whenTickIsPlantedFarBelowThenPlantedTicksAreUntouched() public {
-        (uint128 gLower, int128 nLower, uint256 oLower) = vault.ticks(int24(-8388600));
-        (uint128 gUpper, int128 nUpper, uint256 oUpper) = vault.ticks(int24(-8388590));
+        (uint128 gLower, int128 nLower, uint256 oLower,) = vault.ticks(int24(-8388600));
+        (uint128 gUpper, int128 nUpper, uint256 oUpper,) = vault.ticks(int24(-8388590));
 
         _move(int24(100));
 
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
-        (uint128 gLowerAfter, int128 nLowerAfter, uint256 oLowerAfter) = vault.ticks(int24(-8388600));
-        (uint128 gUpperAfter, int128 nUpperAfter, uint256 oUpperAfter) = vault.ticks(int24(-8388590));
+        (uint128 gLowerAfter, int128 nLowerAfter, uint256 oLowerAfter,) = vault.ticks(int24(-8388600));
+        (uint128 gUpperAfter, int128 nUpperAfter, uint256 oUpperAfter,) = vault.ticks(int24(-8388590));
         assertEq(gLowerAfter, gLower, "tick -8388600 liquidityGross must not move");
         assertEq(nLowerAfter, nLower, "tick -8388600 liquidityNet must not move");
         assertEq(oLowerAfter, oLower, "tick -8388600 feeGrowthOutside must not move");
@@ -901,12 +903,12 @@ contract BoundedTickSearchTargetWordTest is BoundedTickSearchTestBase {
         _notifyFees(vault, operatorAddr, 100);
         uint256 global = vault.feeGrowthGlobalX128();
         assertGt(global, 0, "precondition: feeGrowthGlobalX128 should be nonzero");
-        (,, uint256 outside600Before) = vault.ticks(int24(600));
+        (,, uint256 outside600Before,) = vault.ticks(int24(600));
 
         _move(int24(300));
 
-        (,, uint256 outside260) = vault.ticks(int24(260));
-        (,, uint256 outside600) = vault.ticks(int24(600));
+        (,, uint256 outside260,) = vault.ticks(int24(260));
+        (,, uint256 outside600,) = vault.ticks(int24(600));
         assertEq(outside260, global, "tick 260 feeGrowthOutside should flip to feeGrowthGlobal");
         assertEq(outside600, outside600Before, "tick 600 must not be crossed");
     }
@@ -1115,7 +1117,10 @@ contract BoundedTickSearchFuzzTest is BoundedTickSearchTestBase {
         int24 upper = lower + 10;
         _plant(lower, upper, 1000);
         int24 start = lower + 300;
-        _setCurrentTick(start);
+        // A real move, not the storage write: the price passes through the plant on its way up,
+        // and the solvency ledger (FEAT-9BQZ) must book that crossing before the move down
+        // crosses back, or its NO total would underflow on a band it never recorded.
+        _move(start);
 
         int24 wordFirstTick = (lower >> 8) << 8;
         int24 target = int24(bound(targetSeed, wordFirstTick, wordFirstTick + 255));

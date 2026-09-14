@@ -130,7 +130,7 @@ contract EscrowDepositSuccessTest is EscrowDepositTestBase {
         _depositBase();
 
         assertEq(vault.nextPositionId(), 0, "no position should be created");
-        (uint128 gross,,) = vault.ticks(tickLower);
+        (uint128 gross,,,) = vault.ticks(tickLower);
         assertEq(gross, 0, "no tick should be touched");
         assertFalse(vault.usedIntents(intentId), "the intent is funded, not consumed");
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity should not change");

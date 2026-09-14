@@ -38,7 +38,7 @@ contract StartWindDownTestBase is LPVaultFixture {
 
     // Events declared for expectEmit
     event VaultWindDownStarted(bytes32 indexed marketId);
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount);
+    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
 
     // Position minted in setUp for exit-path tests
     uint256 positionId;
@@ -282,7 +282,7 @@ contract ExitPathsSucceedInWindDownTest is StartWindDownTestBase {
         uint256 expectedOwed = uint256(liquidity) * feeGrowthDelta / Q128;
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, lp, expectedOwed);
+        emit FeesCollected(positionId, lp, expectedOwed, expectedOwed);
 
         vm.prank(lp);
         vault.collect(positionId);
@@ -321,8 +321,8 @@ contract ExitPathsSucceedInWindDownTest is StartWindDownTestBase {
         (address owner,,,, uint128 liqAfter,,) = vault.positions(positionId);
         assertEq(owner, address(0), "the position record is deleted");
         assertEq(liqAfter, 0, "the position record is deleted");
-        (uint128 gLower,,) = vault.ticks(int24(0));
-        (uint128 gUpper,,) = vault.ticks(int24(100));
+        (uint128 gLower,,,) = vault.ticks(int24(0));
+        (uint128 gUpper,,,) = vault.ticks(int24(100));
         assertEq(gLower, 0, "tick 0 lost the liquidity");
         assertEq(gUpper, 0, "tick 100 lost the liquidity");
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity fell by the position's liquidity");
