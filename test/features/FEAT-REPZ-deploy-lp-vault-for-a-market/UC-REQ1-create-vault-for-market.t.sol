@@ -584,6 +584,9 @@ contract CreateVaultGasLimitTest is OutcomeIdentityTestBase {
 
     // NFR-RER0: execution gas of createVault is below the limit for a fuzzed condition
     function testFuzz_createVaultGasBelowLimit(bytes32 questionId) public {
+        // setUp already prepared the condition for marketId, and the ConditionalTokens contract
+        // rejects a second preparation of the same question
+        vm.assume(questionId != marketId);
         (bytes32 fuzzedCondition, uint256 fuzzedYes, uint256 fuzzedNo) =
             _prepareBinaryCondition(questionId, address(mockUsdc));
 
