@@ -30,8 +30,8 @@ library VaultStorage {
     }
 
     /// @dev Overwrites phase. Used to reach the Cancelled phase where the tested function reads
-    ///      only `phase`, because the real emergencyCancelAll needs a position and a 7-day silence
-    ///      that the emergency-cancel tests already prove.
+    ///      only `phase`, because the real emergencyCancelAll needs a 7-day silence that the
+    ///      emergency-cancel tests already prove.
     function setPhase(StdStorage storage store, address vault, uint8 phase) internal {
         // `phase` shares a slot with `_initialized` and `paused`, so the packed-slot mode
         // finds the byte inside the word and writes only that byte.

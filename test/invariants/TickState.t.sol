@@ -5,6 +5,7 @@ pragma solidity 0.8.20;
 // FEAT-T7AF: Mint LP Position (the two liquidity invariants in its Data Model)
 // FEAT-K1M2: Merge Positions (FR-AFPU, the merge conservation invariant)
 // FEAT-7G40: Burn LP Position (FR-7G4O, FR-7G4P, the bitmap invariant)
+// FEAT-JXQO: Emergency Cancel All Positions (FR-JXQP, the freeze keeps activeLiquidity)
 // Invariants required by CLAUDE.md's Foundry conventions (an invariant on every
 // state-machine property), for the tick state machine under mints, tick moves,
 // merges, and burns, with the target-bounded bitmap search:
@@ -22,11 +23,18 @@ pragma solidity 0.8.20;
 //   7. every tick a mint ever referenced has its bitmap bit set exactly when its
 //      liquidityGross is above zero (FR-7G4P), which a burn that clears the bit keeps true
 //   8. a burn reverts only for a documented reason (never an arithmetic panic)
+//   9. the checks above hold after a freeze, which writes `phase` and nothing else
+//      (FEAT-JXQO FR-JXQP): the handler's freeze action warps past the vault's
+//      emergency-cancel timelock and calls emergencyCancelAll from a random address,
+//      after which the burns keep running and the mints and the Operator actions stop
 // A search that skipped a legitimate crossing would break invariant 1 without a
 // revert, and a search that scanned to the end of the scale would break 3 or 4,
 // so the proof of the bounded search lives here. Every expected value is read
 // from the vault's own position records, with no handler mirror, so the burn
 // actions change no earlier check: a burned record reads zero and adds nothing.
+// The freeze is gated to one pick in eight: with eight actions the fuzzer freezes
+// about six runs in ten, at the median around call 39 of 50, so most runs prove
+// phase 3 and the Active-phase coverage R6 and R9 measured stays.
 
 import {StdInvariant} from "forge-std/StdInvariant.sol";
 import {Vm} from "forge-std/Vm.sol";
@@ -93,6 +101,9 @@ contract TickStateHandler is LPVaultFixture {
     uint256 public completedBurns;
     bytes4 public undocumentedBurnRevert;
     uint256 internal burnDeadlineNonce;
+    /// @dev How many freezes completed. At most one per run; read for the report, never as a guard,
+    ///      because a guard would need a prologue freeze that freezes every run.
+    uint256 public completedFreezes;
 
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
@@ -112,6 +123,8 @@ contract TickStateHandler is LPVaultFixture {
     ///      1e6 * 1e18 / 10 = 1e23 per position, so liquidityGross on a shared tick stays far
     ///      below uint128 over any run.
     function mintPosition(uint256 placementSeed, uint256 widthSeed, uint256 usdcSeed, bool nearCurrentTick) public {
+        // A mint in a frozen vault reverts VaultNotActive, and the mint runs with no try/catch
+        if (vault.phase() == 3) return;
         int24 tickLower;
         int24 tickUpper;
         uint128 copiedLiquidity;
@@ -264,6 +277,9 @@ contract TickStateHandler is LPVaultFixture {
     ///      call must revert DuplicatePositionId every time (FR-AFPS): the handler records the
     ///      attempt and the first selector that is not that error, and invariant 6 reads both.
     function mergeDuplicate(uint256 seed) public {
+        // mergePositions checks the phase before the duplicate check, so a frozen vault would
+        // revert VaultCancelled and count as an undocumented duplicate-merge revert
+        if (vault.phase() == 3) return;
         uint256 count = positionIds.length;
         if (count == 0) return;
         uint256 a = positionIds[seed % count];
@@ -280,6 +296,20 @@ contract TickStateHandler is LPVaultFixture {
                 undocumentedDuplicateMergeRevert = selector;
             }
         }
+    }
+
+    /// @dev Freezes the vault, one pick in eight, from a random non-zero address after the vault's
+    ///      emergency-cancel timelock has elapsed (FEAT-JXQO FR-JXQP). No try/catch: a revert fails
+    ///      the run, because after the warp nothing documented can reject the call.
+    function freeze(uint256 seed) public {
+        if (vault.phase() == 3 || seed % 8 != 0) return;
+        vm.warp(block.timestamp + vault.emergencyCancelTimelock());
+        // casting to 'uint160' is safe because bound keeps the value inside [1, type(uint160).max]
+        // forge-lint: disable-next-line(unsafe-typecast)
+        address caller = address(uint160(bound(seed, 1, type(uint160).max)));
+        vm.prank(caller);
+        vault.emergencyCancelAll();
+        completedFreezes++;
     }
 
     /// @dev The ticksCrossed of the one TickUpdated log a successful move emits.
@@ -301,10 +331,10 @@ contract TickStateHandler is LPVaultFixture {
     }
 }
 
-/// @dev fail-on-revert makes any handler-level revert fail the run. The mint runs with no
-///      try/catch on purpose, so a mint rejection fails the run; the move, the merge, and the
-///      two burns absorb the vault's documented rejections in try/catch, so only an unexpected
-///      revert reaches here.
+/// @dev fail-on-revert makes any handler-level revert fail the run. The mint and the freeze run
+///      with no try/catch on purpose, so a mint rejection or a freeze rejection fails the run; the
+///      move, the merge, and the two burns absorb the vault's documented rejections in try/catch,
+///      so only an unexpected revert reaches here.
 /// forge-config: default.invariant.fail-on-revert = true
 contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
     LPVaultFactory factory;

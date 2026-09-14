@@ -147,6 +147,14 @@ contract DeployFactorySuccessTest is LPVaultFixture {
             "safeProxyBytecodeHash should match constructor arg"
         );
     }
+
+    // SC-REQ3, FR-REQI: the default emergency-cancel timelock starts at 7 days with no constructor argument
+    function test_defaultEmergencyCancelTimelockIsSevenDays() public view {
+        assertEq(
+            factory.defaultEmergencyCancelTimelock(), 7 days, "the default timelock should be 7 days at deployment"
+        );
+        assertEq(factory.MAX_EMERGENCY_CANCEL_TIMELOCK(), 30 days, "the cap should be 30 days");
+    }
 }
 
 // SC-9OY7: Zero Safe derivation input reverts

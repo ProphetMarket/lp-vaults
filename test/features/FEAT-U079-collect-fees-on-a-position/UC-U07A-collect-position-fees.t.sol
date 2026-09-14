@@ -644,32 +644,34 @@ contract FeeGrowthWraparoundFuzzTest is FeeGrowthWraparoundTestBase {
 }
 
 // ──────────────────────────────────────────────
-// SC-BMFD: Collect in the Cancelled phase does not revert
-// What: After a real emergencyCancelAll the position is zeroed. The Safe's collect
-//       succeeds, pays nothing, emits nothing, and the phase stays 3.
-// Why:  Decision C9: no exit reverts on the phase. At this step the cancel paid the
-//       position; after R10 the cancel is a freeze and the collect pays the fees.
+// SC-BMFD: Collect in the Cancelled phase pays the accrued fees
+// What: After a real emergencyCancelAll the position keeps its record. The Safe's
+//       collect pays the 499 USDC of fees, emits FeesCollected, and the phase stays 3.
+// Why:  Decision C9: no exit reverts on the phase, and the freeze keeps every record,
+//       so a collect after it pays what it pays in Active.
 // ──────────────────────────────────────────────
 contract CollectInCancelledPhaseTest is CollectFeesTestBase {
     function setUp() public override {
         super.setUp();
         _distributeFees(500);
-        vm.warp(block.timestamp + vault.EMERGENCY_CANCEL_TIMELOCK() + 1);
-        vm.prank(lp);
+        vm.warp(block.timestamp + vault.emergencyCancelTimelock() + 1);
+        vm.prank(makeAddr("anyone"));
         vault.emergencyCancelAll();
         assertEq(vault.phase(), 3, "precondition: Cancelled");
     }
 
-    // SC-BMFD: the collect does not revert and pays zero
-    function test_whenCancelledThenCollectSucceedsAndPaysZero() public {
+    // SC-BMFD: the collect pays the 499 USDC of fees the freeze left in the record
+    function test_whenCancelledThenCollectPaysFees() public {
         uint256 lpBefore = mockUsdc.balanceOf(lp);
+        uint256 expectedOwed = uint256(positionLiquidity) * vault.feeGrowthGlobalX128() / Q128;
+        assertEq(expectedOwed, 499, "precondition: 500 reported over the liquidity, rounded down");
 
-        vm.recordLogs();
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit FeesCollected(positionId, lp, 499);
         vm.prank(lp);
         vault.collect(positionId);
 
-        assertEq(mockUsdc.balanceOf(lp), lpBefore, "the cancel already paid the position");
-        assertEq(vm.getRecordedLogs().length, 0, "no FeesCollected and no merge");
+        assertEq(mockUsdc.balanceOf(lp) - lpBefore, 499, "the collect pays the accrued fees after the freeze");
         assertEq(vault.phase(), 3, "phase stays Cancelled");
     }
 }

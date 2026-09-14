@@ -360,7 +360,7 @@ contract ReclaimInEveryPhaseTest is ReclaimDepositTestBase {
         // The mint's funding goes through _escrowAndMint, so the escrowed 600 stays in the vault.
         uint256 holderPk = 0xB0B;
         _escrowAndMint(vault, operatorAddr, holderPk, int24(0), int24(100), 1000, keccak256("holder"));
-        vm.warp(block.timestamp + vault.EMERGENCY_CANCEL_TIMELOCK() + 1);
+        vm.warp(block.timestamp + vault.emergencyCancelTimelock() + 1);
         vm.prank(_safeOf(vm.addr(holderPk)));
         vault.emergencyCancelAll();
         assertEq(vault.phase(), 3, "precondition: Cancelled");

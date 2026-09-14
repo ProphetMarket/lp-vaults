@@ -330,7 +330,7 @@ contract MergeAfterEmergencyCancelTest is MergeCompleteSetsTestBase {
         super.setUp();
         safe = _safeOf(vm.addr(LP_PK));
         _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 1000, keccak256("holder"));
-        vm.warp(block.timestamp + vault.EMERGENCY_CANCEL_TIMELOCK() + 1);
+        vm.warp(block.timestamp + vault.emergencyCancelTimelock() + 1);
         vm.prank(safe);
         vault.emergencyCancelAll();
         assertEq(vault.phase(), 3, "precondition: Cancelled");

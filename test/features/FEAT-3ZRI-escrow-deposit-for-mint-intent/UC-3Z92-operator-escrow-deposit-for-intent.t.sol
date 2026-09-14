@@ -476,7 +476,7 @@ contract EscrowPhaseTest is EscrowDepositTestBase {
     function test_revertsInCancelled() public {
         // A minted position by another Safe gives someone the right to cancel
         _escrowAndMint(vault, operatorAddr, 0xB0B, int24(0), int24(100), 1000, keccak256("holder"));
-        vm.warp(block.timestamp + vault.EMERGENCY_CANCEL_TIMELOCK() + 1);
+        vm.warp(block.timestamp + vault.emergencyCancelTimelock() + 1);
         vm.prank(_safeOf(vm.addr(0xB0B)));
         vault.emergencyCancelAll();
         assertEq(vault.phase(), 3, "precondition: Cancelled");

@@ -4,7 +4,8 @@ pragma solidity 0.8.20;
 // UC-REQ1: Create Vault for Market
 // Integration tests for every scenario in this use case.
 // Covers: SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77,
-//         SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-6HBV, SC-6HBW, SC-6HBX, SC-6HBY, NFR-RER0
+//         SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-6HBV, SC-6HBW, SC-6HBX, SC-6HBY, SC-BZC2, SC-BZC3,
+//         SC-BZC4, NFR-RER0
 
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -123,6 +124,17 @@ contract CreateVaultSuccessTest is LPVaultFixture {
     function test_cloneMinimumFirstLiquidityMatches() public {
         address vault = _create();
         assertEq(LPVault(vault).minimumFirstLiquidity(), minimumFirstLiquidity, "minimumFirstLiquidity should match");
+    }
+
+    // SC-REQ6, FR-REQK: the clone copies the factory's default emergency-cancel timelock (7 days on a fresh factory)
+    function test_cloneEmergencyCancelTimelockMatchesFactoryDefault() public {
+        LPVault v = LPVault(_create());
+        assertEq(v.emergencyCancelTimelock(), 7 days, "the vault should copy the 7-day default");
+        assertEq(
+            v.emergencyCancelTimelock(),
+            factory.defaultEmergencyCancelTimelock(),
+            "the vault's timelock should equal the factory default at creation"
+        );
     }
 
     // SC-REQ6: clone's phase == Active (1)
@@ -723,6 +735,199 @@ contract SetMinFirstLiqZeroTest is LPVaultFixture {
         vm.prank(oracleAddr);
         vm.expectRevert(LPVault.ZeroFloor.selector);
         vault.setMinimumFirstLiquidity(uint128(0));
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-BZC2: Admin changes the default timelock, and only later vaults copy it
+// What: An Admin sets the factory default to 14 days. A vault created before the
+//       change keeps 7 days, a vault created after reads 14 days, and each vault's
+//       freeze obeys its own copy.
+// Why:  Decision C10 (ADR-BZC5): a default change must reach later vaults and never
+//       an existing one, because the vault reads its own storage and not the factory.
+// Example: V1 created at 7 days; Admin sets 14 days; V2 created -> V1 freezes after
+//          7 days of silence, V2 reverts at 7 days and freezes at 14.
+// ──────────────────────────────────────────────
+contract DefaultTimelockChangeTest is LPVaultFixture {
+    LPVaultFactory factory;
+    MockERC20 mockUsdc;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    uint256 constant LP_PK = 0xA11CE;
+    address safe;
+
+    event DefaultEmergencyCancelTimelockUpdated(uint32 oldTimelock, uint32 newTimelock);
+
+    LPVault vault1;
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        mockUsdc = new MockERC20();
+        _deployConditionalTokens();
+        factory = _deployFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
+        );
+        safe = _safeOf(vm.addr(LP_PK));
+        vault1 = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1)));
+    }
+
+    // SC-BZC2: the setter stores the new default and emits the old and new values
+    function test_adminUpdatesDefaultAndEmits() public {
+        vm.expectEmit(false, false, false, true, address(factory));
+        emit DefaultEmergencyCancelTimelockUpdated(7 days, 14 days);
+
+        vm.prank(admin);
+        factory.setDefaultEmergencyCancelTimelock(14 days);
+
+        assertEq(factory.defaultEmergencyCancelTimelock(), 14 days, "the default should be 14 days");
+    }
+
+    // SC-BZC2: a vault created before the change keeps its copy, a vault created after copies the new default
+    function test_onlyLaterVaultsCopyTheNewDefault() public {
+        vm.prank(admin);
+        factory.setDefaultEmergencyCancelTimelock(14 days);
+
+        LPVault vault2 = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(2)), int24(10), uint128(1)));
+
+        assertEq(vault1.emergencyCancelTimelock(), 7 days, "the earlier vault keeps 7 days");
+        assertEq(vault2.emergencyCancelTimelock(), 14 days, "the later vault copies 14 days");
+    }
+
+    // SC-BZC2: each vault's freeze obeys its own copy, not the factory's current default
+    function test_eachVaultFreezesOnItsOwnTimelock() public {
+        vm.prank(admin);
+        factory.setDefaultEmergencyCancelTimelock(14 days);
+        LPVault vault2 = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(2)), int24(10), uint128(1)));
+
+        // Both vaults hold one position of the same Safe, so the same address can freeze either
+        _escrowAndMint(vault1, operatorAddr, LP_PK, int24(0), int24(100), 1000, keccak256("v1"));
+        _escrowAndMint(vault2, operatorAddr, LP_PK, int24(0), int24(100), 1000, keccak256("v2"));
+
+        vm.warp(block.timestamp + 7 days + 1);
+
+        vm.prank(safe);
+        vault1.emergencyCancelAll();
+        assertEq(vault1.phase(), 3, "the 7-day vault freezes after 7 days of silence");
+
+        vm.prank(safe);
+        vm.expectRevert(LPVault.TimelockNotElapsed.selector);
+        vault2.emergencyCancelAll();
+
+        vm.warp(block.timestamp + 7 days);
+
+        vm.prank(safe);
+        vault2.emergencyCancelAll();
+        assertEq(vault2.phase(), 3, "the 14-day vault freezes after 14 days of silence");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-BZC3: The default timelock setter rejects zero and a value above 30 days
+// What: setDefaultEmergencyCancelTimelock(0) reverts ZeroTimelock, 30 days + 1 reverts
+//       TimelockTooLong, and 30 days itself is accepted.
+// Why:  FR-BZC1: a zero timelock lets any address freeze a vault one block after any
+//       Operator call, and a value above 30 days holds LPs to a silent Operator too long.
+// ──────────────────────────────────────────────
+contract DefaultTimelockBoundsTest is LPVaultFixture {
+    LPVaultFactory factory;
+
+    address admin = makeAddr("admin");
+
+    event DefaultEmergencyCancelTimelockUpdated(uint32 oldTimelock, uint32 newTimelock);
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        _deployConditionalTokens();
+        factory = _deployFactory(
+            address(impl),
+            address(mockUsdc),
+            makeAddr("exchange"),
+            address(ctf),
+            admin,
+            makeAddr("oracle"),
+            makeAddr("operator")
+        );
+    }
+
+    // SC-BZC3: zero reverts and the default is unchanged
+    function test_revertsOnZeroTimelock() public {
+        vm.prank(admin);
+        vm.expectRevert(LPVaultFactory.ZeroTimelock.selector);
+        factory.setDefaultEmergencyCancelTimelock(0);
+
+        assertEq(factory.defaultEmergencyCancelTimelock(), 7 days, "the default stays 7 days");
+    }
+
+    // SC-BZC3: one second above the cap reverts and the default is unchanged
+    function test_revertsAboveThirtyDays() public {
+        vm.prank(admin);
+        vm.expectRevert(LPVaultFactory.TimelockTooLong.selector);
+        factory.setDefaultEmergencyCancelTimelock(30 days + 1);
+
+        assertEq(factory.defaultEmergencyCancelTimelock(), 7 days, "the default stays 7 days");
+    }
+
+    // SC-BZC3: the cap itself is accepted
+    function test_acceptsExactlyThirtyDays() public {
+        vm.expectEmit(false, false, false, true, address(factory));
+        emit DefaultEmergencyCancelTimelockUpdated(7 days, 30 days);
+
+        vm.prank(admin);
+        factory.setDefaultEmergencyCancelTimelock(30 days);
+
+        assertEq(factory.defaultEmergencyCancelTimelock(), 30 days, "the default should be 30 days");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-BZC4: Non-Admin cannot change the default timelock
+// What: The Operator, the Oracle, an LP's Safe, and an arbitrary address each revert
+//       NotAdmin, and the default stays 7 days.
+// Why:  FR-REQZ: a protocol-wide default is factory configuration, the Admin's registry
+//       role. The Oracle case matters most: the Oracle owns the market lifecycle, not
+//       factory defaults.
+// ──────────────────────────────────────────────
+contract DefaultTimelockAccessControlTest is LPVaultFixture {
+    LPVaultFactory factory;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        _deployConditionalTokens();
+        factory = _deployFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
+        );
+    }
+
+    function _assertRejected(address caller) internal {
+        vm.prank(caller);
+        vm.expectRevert(LPVaultFactory.NotAdmin.selector);
+        factory.setDefaultEmergencyCancelTimelock(14 days);
+        assertEq(factory.defaultEmergencyCancelTimelock(), 7 days, "the default stays 7 days");
+    }
+
+    // SC-BZC4: the Operator is rejected
+    function test_revertsWhenOperatorSetsDefault() public {
+        _assertRejected(operatorAddr);
+    }
+
+    // SC-BZC4: the Oracle is rejected
+    function test_revertsWhenOracleSetsDefault() public {
+        _assertRejected(oracleAddr);
+    }
+
+    // SC-BZC4: an LP's Safe and an arbitrary address are rejected
+    function test_revertsWhenSafeOrNobodySetsDefault() public {
+        _assertRejected(_safeOf(vm.addr(0xA11CE)));
+        _assertRejected(makeAddr("nobody"));
     }
 }
 

@@ -7,13 +7,14 @@ pragma solidity 0.8.20;
 // bytecode: the claim model of decision C26, the merge-first rule, the pay-what-is-there rule
 // (decision O2), and the tick deinitialization that closes audit issue 6.15.
 // Covers: SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B,
-//         SC-BMF1, SC-BMF2, SC-BMF3
+//         SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6
 
 import {Vm} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
+import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for burn scenarios.
@@ -507,9 +508,9 @@ contract BurnNonOwnerTest is BurnPositionTestBase {
 // ──────────────────────────────────────────────
 // SC-7G49: Burn in WindDown and in Cancelled succeeds identically to Active
 // What: Case A: after startWindDown the burn pays the SC-7G43 amounts and the phase stays
-//       WindDown. Case B: after a real emergencyCancelAll the burn reverts PositionNotFound,
-//       because at this step the cancel zeroes every position.
-// Why:  Decisions C5 and C9: no phase gates the exit. R10 turns case B into a payout.
+//       WindDown. Case B: after a real emergencyCancelAll the burn pays the same amounts,
+//       because the freeze keeps every record.
+// Why:  Decisions C5 and C9: no phase gates the exit, and a frozen vault pays in full.
 // ──────────────────────────────────────────────
 contract BurnPhaseTest is BurnPositionTestBase {
     // SC-7G49: case A — the same amounts in WindDown
@@ -535,16 +536,22 @@ contract BurnPhaseTest is BurnPositionTestBase {
         assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the Safe receives 300 USDC while paused");
     }
 
-    // SC-7G49: case B — after the cancel the position is zeroed, so the burn reverts PositionNotFound
-    function test_whenCancelledThenBurnRevertsPositionNotFound() public {
-        vm.warp(block.timestamp + vault.EMERGENCY_CANCEL_TIMELOCK() + 1);
-        vm.prank(safe);
+    // SC-7G49: case B — after the freeze the burn pays the SC-7G43 amounts and deletes the record
+    function test_whenCancelledThenBurnPaysInFull() public {
+        vm.warp(block.timestamp + vault.emergencyCancelTimelock() + 1);
+        vm.prank(makeAddr("anyone"));
         vault.emergencyCancelAll();
         assertEq(vault.phase(), 3, "precondition: Cancelled");
 
-        vm.prank(safe);
-        vm.expectRevert(LPVault.PositionNotFound.selector);
-        vault.burnPosition(positionId);
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(positionId, safe, PRINCIPAL, 0, PRINCIPAL, 0, 0, 0);
+        _burn(positionId);
+
+        assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the Safe receives 300 USDC after the freeze");
+        assertEq(vault.activeLiquidity(), 0, "activeLiquidity falls as in Active");
+        (address owner,,,, uint128 liq,,) = vault.positions(positionId);
+        assertEq(owner, address(0), "the record is deleted");
+        assertEq(liq, 0, "the record is deleted");
         assertEq(vault.phase(), 3, "phase stays Cancelled");
     }
 }
@@ -950,5 +957,99 @@ contract BurnGasTest is BurnPositionTestBase {
         uint256 used = before - gasleft();
 
         assertLt(used, 250_000, "the burn must stay under the NFR-7G5C bound");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-BZC6: A burn on a wrapped fee snapshot pays the growth since mint
+// What: A position's feeGrowthInsideLastX128 is written to type(uint256).max - 1000,
+//       the wrapped (mod-2^256) shape _computeFeeGrowthInside legitimately produces
+//       for a late-initialized shared tick (ADR-8L1F, SC-8L1E). A 501 USDC report
+//       then lands on this position (liquidity 10e18) and an ordinary one (30e18),
+//       and the burn pays the wrapped position 1000 USDC plus 125 of fees, its
+//       125.25 share rounded down, instead of reverting on the subtraction.
+// Why:  Audit issue 6.5, decision C14: every payout site that consumes a wrapped
+//       delta keeps a test. This one moved here from the retired cancel loop,
+//       because _burnAmounts computes the same product and had no proof.
+// Note: the report is 501 and not 500 because the wrapped snapshot models 1,001
+//       growth units below zero; with 500 the true share sits within 1e-19 of an
+//       integer and that offset would push the floor over it.
+// ──────────────────────────────────────────────
+contract BurnWraparoundTest is LPVaultFixture {
+    LPVaultFactory factory;
+    LPVault vault;
+    MockERC20 mockUsdc;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    uint256 constant LP_PK = 0xA11CE;
+    address safe;
+
+    uint256 constant Q128 = 2 ** 128;
+    uint128 constant LIQ_WRAPPED = 10e18;
+    uint128 constant LIQ_ORDINARY = 30e18;
+
+    uint256 posWrapped;
+    uint256 posOrdinary;
+
+    event PositionBurned(
+        uint256 indexed positionId,
+        address indexed owner,
+        uint256 usdcOwed,
+        uint256 feesOwed,
+        uint256 usdcPaid,
+        uint256 tokenId,
+        uint256 tokenOwed,
+        uint256 tokenPaid
+    );
+
+    function setUp() public {
+        safe = _safeOf(vm.addr(LP_PK));
+
+        LPVault impl = new LPVault();
+        mockUsdc = new MockERC20();
+        _deployConditionalTokens();
+        factory = _deployFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
+        );
+        vault = LPVault(_createVault(factory, oracleAddr, bytes32(uint256(1)), int24(10), uint128(1)));
+
+        // Both positions are in range at tick 0: 1000 over [0, 100) and 9000 over [0, 300)
+        posWrapped = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 1000, keccak256("wrapped"));
+        posOrdinary = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(300), 9000, keccak256("ordinary"));
+        assertEq(vault.activeLiquidity(), LIQ_WRAPPED + LIQ_ORDINARY, "precondition: both in range");
+
+        // The wrapped snapshot: a small negative number mod 2^256, written through the fixture
+        VaultStorage.setFeeGrowthInsideLast(stdstore, address(vault), posWrapped, type(uint256).max - 1000);
+
+        _notifyFees(vault, operatorAddr, 501);
+    }
+
+    // SC-BZC6: the burn does not revert, and pays the growth since mint rounded down
+    function test_burnOnWrappedSnapshotPaysGrowthSinceMint() public {
+        uint256 expectedFees = uint256(LIQ_WRAPPED) * vault.feeGrowthGlobalX128() / Q128;
+        assertEq(expectedFees, 125, "precondition: the wrapped position's share of 501 is 125.25, rounded down");
+        uint256 before_ = mockUsdc.balanceOf(safe);
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(posWrapped, safe, 1000, 125, 1000 + 125, 0, 0, 0);
+        vm.prank(safe);
+        vault.burnPosition(posWrapped);
+
+        assertEq(mockUsdc.balanceOf(safe) - before_, 1125, "the Safe receives the principal plus 125 of fees");
+    }
+
+    // SC-BZC6: the ordinary position is untouched by the wrapped burn
+    function test_ordinaryPositionUntouched() public {
+        vm.prank(safe);
+        vault.burnPosition(posWrapped);
+
+        (address owner,,,, uint128 liq, uint256 snap,) = vault.positions(posOrdinary);
+        assertEq(owner, safe, "the ordinary position keeps its owner");
+        assertEq(liq, LIQ_ORDINARY, "the ordinary position keeps its liquidity");
+        assertEq(snap, 0, "the ordinary position keeps its snapshot");
+        assertEq(vault.activeLiquidity(), LIQ_ORDINARY, "activeLiquidity falls by the wrapped position only");
     }
 }
