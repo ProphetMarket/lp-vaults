@@ -330,6 +330,14 @@ contract LPVault {
 
     uint256 private constant SECP256K1N_HALF = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
+    /// @dev ERC-1271's success value: `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
+    ///      Also the interface's own ERC-165 id, since it declares exactly one function.
+    bytes4 private constant ERC1271_MAGIC_VALUE = 0x1626ba7e;
+
+    /// @dev The single value every refusal returns (NFR-C0E4). A distinct constant rather
+    ///      than bytes4(0), so a caller can tell a refusal from an empty return.
+    bytes4 private constant ERC1271_INVALID_SIGNATURE = 0xffffffff;
+
     // ──────────────────────────────────────────────
     // Constants
     // ──────────────────────────────────────────────
@@ -697,11 +705,86 @@ contract LPVault {
     }
 
     // SC-3WLO: ERC-165 reporting so callers that probe before transferring proceed
+    // SC-C0DT: EIP-1271 reporting so an integrator routes to the POLY_1271 signature type
     /// @notice Reports whether the vault implements a given interface.
     /// @param interfaceId The ERC-165 interface identifier to query.
-    /// @return True for IERC1155Receiver (0x4e2312e0) and ERC-165 itself (0x01ffc9a7).
+    /// @return True for IERC1155Receiver (0x4e2312e0), ERC-165 itself (0x01ffc9a7), and
+    ///         EIP-1271 (0x1626ba7e). False for everything else, including 0xffffffff.
     function supportsInterface(bytes4 interfaceId) external pure returns (bool) {
-        return interfaceId == 0x4e2312e0 || interfaceId == 0x01ffc9a7;
+        // The EIP-1271 id is its own magic value: the interface declares a single function,
+        // so its ERC-165 id is that function's selector (FR-C0DZ, FR-3WLK).
+        return interfaceId == 0x4e2312e0 || interfaceId == 0x01ffc9a7 || interfaceId == ERC1271_MAGIC_VALUE;
+    }
+
+    // ──────────────────────────────────────────────
+    // Order authorization (FEAT-C0DJ, UC-C0DK)
+    // ──────────────────────────────────────────────
+
+    // SC-C0DM through SC-C0DR, SC-CVPZ, SC-CVQ0, SC-CVQ1: the vault vouches to the exchange for an
+    // Operator-signed order, only while it trades
+    /// @notice Reports whether the vault stands behind `signature` over `hash` (EIP-1271).
+    /// @dev OPERATOR TRUST ASSUMPTION: any registered Operator can author orders that spend
+    ///      this vault's assets through the exchange. The vault checks WHO signed, never WHAT
+    ///      was signed: there is no cap on size, no price band, no side restriction, and no
+    ///      per-market policy, so the Operator's order sizes and prices are trusted. LPs are
+    ///      trusting Operators not to sign orders that trade against their interest. The
+    ///      per-market deposit cap in Part 6 of audits/audit-fixes-ranged.md is the economic
+    ///      bound on what a compromised Operator key can trade. This does not widen the blast
+    ///      radius: the exchange already holds the USDC and ERC-1155 approvals over this vault
+    ///      that initialize() granted (CLAUDE.md checklist item 11), and this function is what
+    ///      makes those approvals reachable (NFR-C0E5).
+    ///
+    ///      MEV analysis: a view that moves no value and records nothing, so there is no
+    ///      ordering advantage to extract from calling it. The recovered signer is the
+    ///      authority over whose order it is; the caller check below bounds where the vouch
+    ///      can be consumed.
+    ///
+    ///      Never reverts (FR-C0DW, ADR-C0E7). Every refusal returns ERC1271_INVALID_SIGNATURE,
+    ///      because the exchange distinguishes a revert from a wrong return value and callers
+    ///      probe this method speculatively. That is also why the caller and pause checks are
+    ///      inline rather than modifiers: a modifier reverts where this method must return
+    ///      (a recorded departure from the modifiers-only rule, CLAUDE.md checklist item 2).
+    ///
+    ///      Answers the exchange only (FR-CVPY, ADR-CVQ2): USDC's FiatTokenV2_2 routes a bytes
+    ///      signature in permit and transferWithAuthorization to the payer's isValidSignature
+    ///      (ERC-7598), so an open vouch would let an Operator key move vault USDC around the
+    ///      exchange. Answers only while the vault is Active and not paused (FR-CVPX, decision
+    ///      C22, ADR-BZBZ in FEAT-JXQO): a frozen, wound-down, or paused vault takes no new
+    ///      fill while its claims are paid at a fixed tick. A resting order posted before the
+    ///      transition fails its signature check at match time; the keeper cancels its orders
+    ///      when it sees EmergencyCancelExecuted, VaultWindDownStarted, or TradingPaused.
+    ///
+    ///      No nonce, no intentId, no order record (NFR-C0E1, ADR-C0E8). That breaks the
+    ///      replay-protection convention every LP-facing path in this vault follows, and the
+    ///      break is deliberate: order hashing, fill accounting, and cancellation live in the
+    ///      exchange's _performOrderChecks, and a second ledger here could only duplicate that
+    ///      or drift from it.
+    ///
+    ///      Not an Operator function: the exchange calls it during _validateOrder, so it carries
+    ///      neither onlyOperator nor touchesHeartbeat.
+    /// @param hash The digest the signature was produced over: the exchange's hashOrder(order)
+    /// @param signature 65-byte ECDSA signature from a registered Operator's key
+    /// @return ERC1271_MAGIC_VALUE if the vault vouches, ERC1271_INVALID_SIGNATURE otherwise
+    function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4) {
+        // Only a matched order on the exchange may consume the vouch (FR-CVPY).
+        if (msg.sender != exchange) return ERC1271_INVALID_SIGNATURE;
+
+        // Only a vault that trades vouches (FR-CVPX). Checked before the recovery, so a
+        // paused or non-Active vault pays no ecrecover.
+        if (phase != 1 || paused) return ERC1271_INVALID_SIGNATURE;
+
+        address signer = _recoverSigner(hash, signature);
+
+        // The zero address is _recoverSigner's failure sentinel, so it is excluded before
+        // the registry read rather than trusted to be absent from it (FR-C0DV).
+        if (signer == address(0)) return ERC1271_INVALID_SIGNATURE;
+
+        // Read at call time, never captured at signing time (FR-C0DY). This is the whole
+        // of the revocation mechanism: one removeOperator invalidates every unfilled
+        // order that key ever signed, with no per-order revocation list to maintain.
+        if (ILPVaultFactory(factory).operators(signer) != 1) return ERC1271_INVALID_SIGNATURE;
+
+        return ERC1271_MAGIC_VALUE;
     }
 
     // ──────────────────────────────────────────────
@@ -779,7 +862,7 @@ contract LPVault {
     ///      same tick, so each LP exits in their own transaction and a USDC-blacklisted LP blocks
     ///      only their own exit (audit issue 6.17). The vault approves no new order after the
     ///      freeze, because the order maker accepts an order only while Active and not paused
-    ///      (decision C22, ADR-BZBZ, built in Part 6). The ±15s Polygon tolerance is negligible at
+    ///      (decision C22, ADR-BZBZ, built in R12 as FEAT-C0DJ). The ±15s Polygon tolerance is negligible at
     ///      the day scale of the timelock (CLAUDE.md checklist item 12).
     ///      The Cancelled phase (3) is terminal: every trading entry point reverts after it.
     function emergencyCancelAll() external {
@@ -2028,16 +2111,26 @@ contract LPVault {
         // Build the EIP-712 digest: \x19\x01 || domainSeparator || structHash
         bytes32 digest = keccak256(abi.encodePacked("\x19\x01", _domainSeparator(), structHash));
 
+        // _recoverSigner returns the zero address for every unusable signature, so the zero
+        // check is what makes this fail closed. It is NOT redundant with the comparison: a
+        // zero signer would otherwise derive a Safe address and be compared against `safe`.
         address signer = _recoverSigner(digest, signature);
-        if (_deriveSafe(signer) != safe) revert InvalidSignature();
+        if (signer == address(0) || _deriveSafe(signer) != safe) revert InvalidSignature();
     }
 
-    /// @dev Decodes a 65-byte signature and recovers the signer. Rejects malleable signatures
-    ///      (high-s) and invalid v values per CLAUDE.md security checklist item 5, and a zero
-    ///      recovery. One copy for every LP signature (FR-T7AZ, NFR-JAIX).
+    /// @dev Decodes a 65-byte signature and recovers the signer, or returns the zero address
+    ///      when the signature is unusable for any reason: a length other than 65 bytes, an
+    ///      `s` in the upper half of secp256k1's order, a `v` outside {27, 28}, or an
+    ///      ecrecover that fails. One copy of the malleability rules (CLAUDE.md security
+    ///      checklist item 5) for the LP signature path (FR-T7AZ, NFR-JAIX) and for the
+    ///      order maker (FR-C0DX). Returns instead of reverting because isValidSignature
+    ///      must never revert (FR-C0DW, ADR-C0E7), and a second copy of these rules is the
+    ///      one place where a copy that later diverges is a security bug (ADR-C0YQ). Every
+    ///      caller MUST reject address(0) explicitly.
     function _recoverSigner(bytes32 digest, bytes calldata signature) internal pure returns (address) {
-        // Decode the 65-byte signature into r, s, v
-        if (signature.length != 65) revert InvalidSignature();
+        // A length check before the decode is what keeps this total: reading r, s, and v
+        // out of a shorter buffer would read past the end of calldata.
+        if (signature.length != 65) return address(0);
         bytes32 r;
         bytes32 s;
         uint8 v;
@@ -2048,14 +2141,13 @@ contract LPVault {
         }
 
         // Reject malleable signatures: s must be in the lower half of secp256k1's order
-        if (uint256(s) > SECP256K1N_HALF) revert InvalidSignature();
+        if (uint256(s) > SECP256K1N_HALF) return address(0);
 
-        // v must be 27 or 28 — reject all other values
-        if (v != 27 && v != 28) revert InvalidSignature();
+        // v must be 27 or 28 — refused rather than normalized
+        if (v != 27 && v != 28) return address(0);
 
-        address signer = ecrecover(digest, v, r, s);
-        if (signer == address(0)) revert InvalidSignature();
-        return signer;
+        // ecrecover returns the zero address on failure, which is already the sentinel
+        return ecrecover(digest, v, r, s);
     }
 
     /// @dev The address the Poly Safe factory deploys for `owner`: the CREATE2 address with the
