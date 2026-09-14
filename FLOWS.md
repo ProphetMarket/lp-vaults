@@ -30,8 +30,8 @@ A vault lives through three phases: **Active** (minting and trading), **WindDown
 stateDiagram-v2
     [*] --> Active : createVault()
     Active --> WindDown : startWindDown() [Oracle]
-    Active --> Cancelled : emergencyCancelAll() [after 7-day silence]
-    WindDown --> Cancelled : emergencyCancelAll() [after 7-day silence]
+    Active --> Cancelled : emergencyCancelAll() [after the vault's silence timelock]
+    WindDown --> Cancelled : emergencyCancelAll() [after the vault's silence timelock]
 ```
 
 ### Full Lifecycle Example
@@ -160,7 +160,7 @@ sequenceDiagram
     Note right of Vault: feeGrowthGlobalX128 +=<br/>mulDiv(feeAmount, 2^128, activeLiquidity)
     Vault->>USDC: transferFrom(operator, vault, feeAmount)
     Note right of Vault: a rejected transfer reverts the call<br/>(TransferFailed), so no credit without USDC
-    Note right of Vault: lastOperatorActivityTimestamp = now<br/>(resets 7-day emergency silence timer)
+    Note right of Vault: lastOperatorActivityTimestamp = now<br/>(resets the emergency silence timer)
 ```
 
 **When to call:** After the Operator sweeps trading fees from the exchange into the Operator wallet. The vault takes the USDC itself inside the call, so the credit and the funds move in one transaction. Each Operator wallet needs a standing USDC approval to each vault it reports to (see `DEPLOYMENT.md`, "Operator USDC approval per vault"); a wallet with no approval reverts on its first report with `TransferFailed`. The vault performs no balance check beyond the pull, so the Operator can still under-report.
@@ -366,33 +366,43 @@ sequenceDiagram
 
 ### 3.1 Emergency Cancel All (`emergencyCancelAll`)
 
-Any position holder can force-close all positions and distribute funds after 7 days of Operator silence. This is the last resort when the Operator is unresponsive.
+Any address can freeze the vault after the Operator has been silent for the vault's emergency-cancel timelock (7 days by default, 30 days at most). The freeze sets the phase to Cancelled and changes nothing else: every position, every tick, every escrow, and every total stay as they are. Each LP then exits alone, in their own transaction, through the burn, the collect, or the reclaim, which pay in full at the frozen tick. This is the last resort when the Operator is unresponsive.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor LP as Any LP (position holder)
+    actor Anyone as Any address
     participant Vault as LPVault
 
-    Note over LP,Vault: No successful Operator call (including heartbeat()) for 7 days
+    Note over Anyone,Vault: No successful Operator call (including heartbeat()) for the vault's timelock
 
-    LP->>Vault: emergencyCancelAll()
-    Note right of Vault: Checks:<br/>• phase != Cancelled<br/>• block.timestamp - lastOperatorActivityTimestamp ≥ 7 days<br/>• caller owns at least one position with liquidity > 0
-
-    Note right of Vault: For each position with liquidity > 0:<br/>  fees = liquidity × (feeGrowthInside - feeGrowthInsideLast) ÷ 2^128<br/>  fees += tokensOwed<br/>  principal = liquidity × rangeWidth ÷ PRECISION<br/>  payout[i] = principal + fees
-    Note right of Vault: Zero all position state (CEI pattern)
-    Note right of Vault: phase = Cancelled (terminal)<br/>activeLiquidity = 0
-
-    loop for each position with payout > 0
-        Vault->>LP: transfer payout USDC to position owner
-    end
-
+    Anyone->>Vault: emergencyCancelAll()
+    Note right of Vault: Checks:<br/>• phase != Cancelled<br/>• block.timestamp - lastOperatorActivityTimestamp ≥ emergencyCancelTimelock
+    Note right of Vault: phase = Cancelled (terminal)<br/>activeLiquidity, ticks, positions, escrows, balances unchanged
     Note right of Vault: EmergencyCancelExecuted event emitted
 ```
 
-**When to call:** After 7 days without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`). The triggering LP does not need to be the admin — any active position holder can call it.
+**Exit after the freeze** (the flow the freeze exists for; the burn body is unchanged):
 
-**Why CEI (checks-effects-interactions):** All position state is zeroed and the phase flipped to Cancelled **before** the USDC transfer loop. This prevents reentrancy even if USDC were a malicious token.
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Safe as LP Safe
+    participant Vault as LPVault (Cancelled)
+    participant CT as ConditionalTokens
+    participant USDC
+
+    Safe->>Vault: burnPosition(positionId)
+    Note right of Vault: claim valued at the frozen currentTick<br/>ticks updated, activeLiquidity -= liquidity, record deleted
+    Vault->>CT: mergePositions(pairs)
+    Vault->>USDC: transfer(safe, usdcPaid)
+    Vault->>CT: safeTransferFrom(vault, safe, tokenId, tokenPaid)
+    Note right of Vault: PositionBurned event emitted
+```
+
+**When to call:** After the vault's timelock without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `burnPositionFor`, `collectFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`). The caller needs no role and no position: the timelock is the whole condition, because the freeze moves no funds. Read the vault's timelock with `emergencyCancelTimelock()`.
+
+**Why no payout loop:** a loop that paid everyone in one call skipped pending escrows, ran out of gas on a large vault, and failed for everyone when one recipient was USDC-blacklisted (audit issues 6.7, 6.11, 6.17). The freeze costs the same gas for any number of positions, and a blacklisted LP blocks only their own exit. The vault approves no new order after the freeze, because the order maker accepts an order only while the vault is Active and not paused (decision C22).
 
 ---
 
@@ -431,7 +441,7 @@ sequenceDiagram
 
 **When to pause:** A bug is discovered, a market anomaly is detected, or an emergency audit is needed. Pause is immediate and does not affect the vault's phase state machine.
 
-**Pause vs. emergencyCancelAll:** Pause is reversible and keeps positions intact. Emergency cancel is irreversible and distributes all funds.
+**Pause vs. emergencyCancelAll:** Pause is reversible and keeps positions intact. Emergency cancel is irreversible and freezes trading; every exit stays open and pays in full.
 
 ---
 
@@ -535,9 +545,10 @@ sequenceDiagram
 | `mergeCompleteSets` | Any wallet | Every phase | Works while paused; never refreshes the heartbeat |
 | `reclaimDeposit` | LP's Safe | Every phase | Always open; works while paused; no timelock |
 | `reclaimDepositFor` | Operator | Every phase | Works while paused; owner-key ReclaimIntent with a deadline |
-| `emergencyCancelAll` | Any position holder | Active / WindDown | After 7-day silence |
+| `emergencyCancelAll` | Any address | Active / WindDown | After the vault's silence timelock; changes only the phase |
 | `pauseTrading` | Admin | Any | On vault |
 | `unpauseTrading` | Admin | Any | On vault |
+| `setDefaultEmergencyCancelTimelock` | Admin | — | On factory; reaches only later vaults |
 | `addOperator` / `removeOperator` | Admin | — | On factory |
 | `setOracle` | Admin | — | On factory |
 | `transferAdmin` / `acceptAdmin` | Admin / pending | — | On factory |

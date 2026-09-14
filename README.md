@@ -18,7 +18,7 @@ The contracts are the on-chain foundation only. The off-chain keeper, event list
 | Deploy LP Vault for a Market | implemented | Factory + role registry + per-market clone deploy |
 | Deploy Contracts | implemented | Foundry deploy script with env-var-driven configuration |
 | Vault Wind-Down Lifecycle | implemented | Oracle-driven Active → WindDown transition |
-| Emergency Cancel All Positions | implemented | Position-holder force-close after operator-silence timelock |
+| Emergency Cancel All Positions | implemented | Any-address freeze after the vault's operator-silence timelock; every exit stays open |
 | Pause Trading | implemented | Admin-callable circuit breaker on trading entry points |
 | Upgradeable Vault Implementation Pointer | implemented | Admin two-step 7-day timelocked upgrade of the factory's implementation pointer |
 | Escrow Deposit for Mint Intent | implemented | Operator escrows an LP's USDC from the LP's Safe against a signed mint intent |

@@ -31,7 +31,7 @@ constructor(
 
 **Actor:** Factory Owner (deployment-time only)
 
-Deploys the factory, stores all external contract addresses and the two Safe derivation inputs, initialises the role registry with one admin, one oracle, and one operator, and sets `implementationVersion = 1`.
+Deploys the factory, stores all external contract addresses and the two Safe derivation inputs, initialises the role registry with one admin, one oracle, and one operator, sets `implementationVersion = 1`, and sets `defaultEmergencyCancelTimelock = 7 days`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -52,7 +52,7 @@ sequenceDiagram
 
     Owner->>Factory: deploy(impl, usdc, exchange, ctf, admin, oracle, operator, safeFactory, hash)
     Note right of Factory: Checks: oracle_ != operator_<br/>safeFactory_ != 0, hash != 0
-    Note right of Factory: implementation = impl<br/>usdc / exchange / conditionalTokens stored<br/>safeFactory / safeProxyBytecodeHash stored (immutable)<br/>implementationVersion = 1
+    Note right of Factory: implementation = impl<br/>usdc / exchange / conditionalTokens stored<br/>safeFactory / safeProxyBytecodeHash stored (immutable)<br/>implementationVersion = 1<br/>defaultEmergencyCancelTimelock = 7 days
     Note right of Factory: admins[admin_] = 1, adminCount = 1<br/>oracle = oracle_<br/>operators[operator_] = 1
     Factory-->>Owner: factory address
 ```
@@ -122,6 +122,7 @@ sequenceDiagram
     Factory->>Vault: EIP-1167 deploy (clone of implementation)
     Factory->>Factory: vaultForMarket[marketId] = vault
     Factory->>Vault: initialize(marketId, usdc, exchange, ctf,<br/>tickSpacing, factory, minFirstLiq, implementationVersion,<br/>conditionId, yesTokenId, noTokenId)
+    Vault->>Factory: defaultEmergencyCancelTimelock()
     Vault-->>Factory: initialized
     Note right of Factory: VaultCreated event emitted
     Factory-->>Oracle: vault address
@@ -162,7 +163,7 @@ function initialize(
 
 **Actor:** Factory only (enforced by `onlyFactory` check inside the function)
 
-Called once by the factory immediately after cloning. Stores all per-vault configuration, including the outcome-token identity, sets the vault phase to Active, pre-approves the exchange for USDC and outcome tokens, and snapshots the EIP-712 domain separator. It makes no identity check of its own: only the factory can call it, and `createVault` verifies the identity before it deploys the clone.
+Called once by the factory immediately after cloning. Stores all per-vault configuration, including the outcome-token identity, reads the factory's `defaultEmergencyCancelTimelock()` once into `emergencyCancelTimelock`, sets the vault phase to Active, pre-approves the exchange for USDC and outcome tokens, and snapshots the EIP-712 domain separator. It makes no identity check of its own: only the factory can call it, and `createVault` verifies the identity before it deploys the clone.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -188,6 +189,8 @@ sequenceDiagram
     Factory->>Vault: initialize(...)
     Note right of Vault: Checks:<br/>not already initialized<br/>msg.sender == factory_
     Note right of Vault: Store: marketId, usdc, exchange, ctf,<br/>conditionId, yesTokenId, noTokenId,<br/>tickSpacing, factory, minimumFirstLiquidity,<br/>implementationVersion = version_
+    Vault->>Factory: defaultEmergencyCancelTimelock()
+    Note right of Vault: emergencyCancelTimelock = the factory's default, read once
     Note right of Vault: phase = 1 (Active)<br/>reentrancyGuard = 1<br/>lastOperatorActivityTimestamp = now
     Note right of Vault: Cache EIP-712 domain separator
     Vault->>USDC: approve(exchange, type(uint256).max)
@@ -241,7 +244,7 @@ function startWindDown() external onlyOracle
 
 **Actor:** Oracle
 
-Transitions the vault from Active (phase 1) to WindDown (phase 2). One-way — there is no mechanism to revert to Active. After this call, `depositForIntent` and `mintPositionFor` revert; `collect`, `reclaimDeposit`, `reclaimDepositFor`, and `emergencyCancelAll` remain open.
+Transitions the vault from Active (phase 1) to WindDown (phase 2). One-way — there is no mechanism to revert to Active. After this call, `depositForIntent` and `mintPositionFor` revert; `collect`, `collectFor`, `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, `mergeCompleteSets`, and `emergencyCancelAll` remain open.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -913,12 +916,12 @@ sequenceDiagram
 ### `LPVault.emergencyCancelAll`
 
 ```solidity
-function emergencyCancelAll() external nonReentrant
+function emergencyCancelAll() external
 ```
 
-**Actor:** Any position holder (after operator-silence timelock)
+**Actor:** Any address (after the vault's operator-silence timelock)
 
-Force-closes all open positions, computes each owner's payout (principal + fees), zeroes all position state, transitions the vault to terminal Cancelled phase, and transfers USDC to each owner. Callable after 7 days without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`).
+Freezes the vault: sets the phase to Cancelled and changes nothing else. Callable by any address, with or without a position, once the vault's `emergencyCancelTimelock()` (7 days by default) has passed without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `burnPositionFor`, `collectFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`). `activeLiquidity`, every tick, every position, every escrow, and every balance stay as they are, so each LP exits alone afterwards through `burnPosition`, `burnPositionFor`, `collect`, `collectFor`, `reclaimDeposit`, or `reclaimDepositFor`, which pay in full at the frozen tick, and `mergeCompleteSets` keeps working. The call costs the same gas for any number of positions and carries no reentrancy guard, because it makes no external call and moves no token.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -926,25 +929,12 @@ Force-closes all open positions, computes each owner's payout (principal + fees)
 
 ```mermaid
 sequenceDiagram
-    actor LP as Any LP (position holder)
+    actor Anyone as Any address
     participant Vault as LPVault
-    participant USDC
 
-    LP->>Vault: emergencyCancelAll()
-    Note right of Vault: Checks:<br/>phase != Cancelled<br/>now - lastOperatorActivityTimestamp >= 7 days<br/>caller owns at least one position with liquidity > 0
-
-    Note right of Vault: Build payout arrays (effects before interactions)
-    loop for each position with liquidity > 0
-        Note right of Vault: fees = liquidity x (feeGrowthInside - feeGrowthInsideLast) / 2^128<br/>fees += tokensOwed<br/>principal = liquidity x rangeWidth / PRECISION<br/>payout[i] = principal + fees
-        Note right of Vault: Zero position.liquidity, tokensOwed, feeGrowthInsideLastX128
-    end
-
-    Note right of Vault: activeLiquidity = 0<br/>phase = 3 (Cancelled)
-
-    loop for each position with payout > 0
-        Vault->>USDC: transfer(owner, payout[i])
-    end
-
+    Anyone->>Vault: emergencyCancelAll()
+    Note right of Vault: Checks:<br/>phase != Cancelled<br/>now - lastOperatorActivityTimestamp >= emergencyCancelTimelock
+    Note right of Vault: phase = 3 (Cancelled)<br/>nothing else written
     Note right of Vault: EmergencyCancelExecuted event emitted
 ```
 
@@ -952,8 +942,7 @@ sequenceDiagram
 
 **Reverts:**
 - `VaultCancelled()` — vault is already in Cancelled phase
-- `TimelockNotElapsed()` — fewer than 7 days since last operator activity
-- `NoPositionHeld()` — caller does not own any position with `liquidity > 0`
+- `TimelockNotElapsed()` — fewer than `emergencyCancelTimelock` seconds since the last operator activity
 
 ---
 
@@ -965,7 +954,7 @@ function pauseTrading() external onlyAdmin
 
 **Actor:** Admin
 
-Sets `paused = true`, immediately blocking `depositForIntent`, `mintPositionFor`, `notifyFees`, `updateTick`, and `mergePositions`. LP exit paths (`collect`, `reclaimDeposit`, `reclaimDepositFor`, `emergencyCancelAll`) are unaffected. Does not change the vault's phase.
+Sets `paused = true`, immediately blocking `depositForIntent`, `mintPositionFor`, `notifyFees`, `updateTick`, and `mergePositions`. LP exit paths (`collect`, `collectFor`, `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, `mergeCompleteSets`, `emergencyCancelAll`) are unaffected. Does not change the vault's phase.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -1287,6 +1276,40 @@ sequenceDiagram
 **Reverts:**
 - `NotAdmin()` — caller is not a registered admin
 - `CannotRemoveLastAdmin()` — caller is the only remaining admin
+
+---
+
+### `LPVaultFactory.setDefaultEmergencyCancelTimelock`
+
+```solidity
+function setDefaultEmergencyCancelTimelock(uint32 newTimelock) external onlyAdmin
+```
+
+**Actor:** Admin
+
+Sets the operator-silence duration that vaults created from now on copy at `createVault`. The default is 7 days at deployment. A change reaches only later vaults: an existing vault keeps the value it copied, readable as `emergencyCancelTimelock()`, and nothing can change it. The bound is `MAX_EMERGENCY_CANCEL_TIMELOCK` (30 days).
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `newTimelock` | `uint32` | Silence duration in seconds; above 0 and at most 2,592,000 (30 days) |
+
+```mermaid
+sequenceDiagram
+    actor Admin
+    participant Factory as LPVaultFactory
+
+    Admin->>Factory: setDefaultEmergencyCancelTimelock(newTimelock)
+    Note right of Factory: Checks:<br/>admins[msg.sender] == 1<br/>newTimelock != 0<br/>newTimelock <= 30 days
+    Note right of Factory: defaultEmergencyCancelTimelock = newTimelock
+    Note right of Factory: DefaultEmergencyCancelTimelockUpdated event emitted
+```
+
+**Events:** `DefaultEmergencyCancelTimelockUpdated(uint32 oldTimelock, uint32 newTimelock)`
+
+**Reverts:**
+- `NotAdmin()` — caller is not a registered admin
+- `ZeroTimelock()` — `newTimelock` is 0
+- `TimelockTooLong()` — `newTimelock` is above 30 days
 
 ---
 

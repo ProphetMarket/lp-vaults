@@ -375,6 +375,7 @@ The **Admin** should immediately:
 2. Review the `adminCount` — it should be `1`.
 3. Transfer admin if needed via the two-step `transferAdmin` / `acceptAdmin` flow.
 4. After a transfer, call `removeAdmin(<old admin address>)` from the new admin. `acceptAdmin` adds the new admin but does not remove the old one, so the old key keeps full admin rights on the factory and on every vault until it is removed.
+5. Review `defaultEmergencyCancelTimelock()` on the factory (7 days at deployment). To change it for vaults created from now on, run `cast send <FACTORY_ADDRESS> "setDefaultEmergencyCancelTimelock(uint32)" <seconds> --rpc-url https://polygon-rpc.com --account <admin-account-name>`, with a value above 0 and at most 2,592,000 (30 days). An existing vault keeps the value it copied at creation, readable as `emergencyCancelTimelock()` on the vault, and nothing can change it.
 
 ### Operator USDC approval per vault
 
