@@ -82,23 +82,26 @@ sequenceDiagram
     Vault->>LP: transfer USDC fees
     Note right of Vault: feeGrowthInsideLastX128<br/>snapshot updated
 
-    Note over Oracle,Vault: ── STEP 6: Market resolves — Oracle triggers wind-down ──
+    Note over Oracle,Vault: ── STEP 6: Market resolves — Oracle winds down, then redeems ──
     Oracle->>Vault: startWindDown()
-    Note right of Vault: Phase = WindDown<br/>depositForIntent and mintPositionFor now revert
+    Note right of Vault: Phase = WindDown<br/>depositForIntent, mintPositionFor, and updateTick now revert
+    Oracle->>Vault: redeemOutcomeTokens()
+    Note right of Vault: reads the payout from the Conditional Tokens contract,<br/>stores it (the switch), redeems every token into USDC
 
     Note over LP,Vault: ── STEP 7: LP exits during wind-down ──────────────────────
     LP->>Vault: collect(positionId)
     Vault->>LP: transfer remaining fees
     Note right of Vault: LP can still collect<br/>even in WindDown
     LP->>Vault: burnPosition(positionId)
-    Note right of Vault: merges the vault's pairs, values the claim<br/>from the mint tick, deletes the position
-    Vault->>LP: transfer the claim's USDC and its one outcome token
+    Note right of Vault: values the claim from the mint tick, values its token leg<br/>at the stored payout, deletes the position
+    Vault->>LP: transfer the claim's USDC, its fees, and the token leg's USDC in one transfer
 ```
 
 **Key invariants during the lifecycle:**
 - `nextPositionId == 0` until the first mint. The `minFirstLiq` floor applies to that one mint and prevents inflation attacks on it. `activeLiquidity` can return to zero later without re-applying the floor.
 - `notifyFees` reverts if `activeLiquidity == 0` — fees cannot be distributed into the void.
-- After `startWindDown()`, only exit paths remain open: `collect`, `collectFor`, `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, `mergeCompleteSets`, and `emergencyCancelAll`.
+- After `startWindDown()`, only exit paths remain open: `collect`, `collectFor`, `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, `mergeCompleteSets`, `redeemOutcomeTokens`, and `emergencyCancelAll`.
+- The Oracle's first successful `redeemOutcomeTokens` is the switch: before it a burn pays the band's token in kind, after it every burn and collect pays USDC only, at one ratio that values the token totals at the stored payout.
 - One tick is one basis point, and every position range lies inside [0, 10000]. A burn values the claim from the tick where the position was minted (decision C26).
 - `Oracle` and `Operator` **must** be different wallets — the constructor enforces this.
 
@@ -300,7 +303,7 @@ sequenceDiagram
 
 ### 2.7 Burn a Position (`burnPosition`, `burnPositionFor`)
 
-An LP closes a position and receives what its claim holds under the claim model (decision C26). Every level of the range starts as USDC. A level below the mint tick bought YES when the price fell through it; a level at or above the mint tick bought NO when the price rose through it. So the claim is USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick, plus the USDC that buying that token at each level's price did not spend, plus the accrued fees. The vault merges any pairs it holds first, and pays its share from the solvency ledger: each asset's owed amount times the smaller of 1 and what the vault holds over what it owes on that asset, rounded down, without a revert, and debits the full owed amount, so every later claimant meets the same ratio. Two entry points: the Safe calls `burnPosition(positionId)` itself, in every phase and with no Operator, or the owner key signs a `BurnIntent` and the Operator relays it through `burnPositionFor`.
+An LP closes a position and receives what its claim holds under the claim model (decision C26). Every level of the range starts as USDC. A level below the mint tick bought YES when the price fell through it; a level at or above the mint tick bought NO when the price rose through it. So the claim is USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick, plus the USDC that buying that token at each level's price did not spend, plus the accrued fees. The vault settles its tokens first (the merge of its pairs before the switch, the redemption of every token after the Oracle's `redeemOutcomeTokens`), and pays its share from the solvency ledger. Before the switch: each asset's owed amount times the smaller of 1 and what the vault holds over what it owes on that asset, USDC in one transfer and the token in kind. After the switch: the token leg is worth `tokenOwed × numerator ÷ denominator` USDC at the stored payout, one ratio values every leg, and the burn pays the principal, the fees, and the token leg's USDC as one prorated sum in one USDC transfer, with no ERC-1155 transfer. Rounded down, without a revert, and the full owed amount is debited, so every later claimant meets the same ratio. Two entry points: the Safe calls `burnPosition(positionId)` itself, in every phase and with no Operator, or the owner key signs a `BurnIntent` and the Operator relays it through `burnPositionFor`.
 
 ```mermaid
 sequenceDiagram
@@ -322,16 +325,26 @@ sequenceDiagram
     end
     Note right of Vault: fees = liquidity × (feeGrowthInside − snapshot) ÷ 2^128 + tokensOwed
     Note right of Vault: claim from (liquidity, range, mintTick, currentTick):<br/>usdcOwed, tokenId (YES below the mint tick, NO above), tokenOwed
-    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
-    Note right of Vault: usdcPaid = (usdcOwed + fees) × min(1, (balance + pairs − totalEscrowed) ÷ (totalUsdcOwed + totalFeesOwed))<br/>tokenPaid = tokenOwed × min(1, (held − pairs) ÷ tokenTotal)
+    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
+    Note right of Vault: read the stored payout (the switch)
+    alt switch off
+        Note right of Vault: usdcPaid = (usdcOwed + fees) × min(1, (balance + pairs − totalEscrowed) ÷ (totalUsdcOwed + totalFeesOwed))<br/>tokenPaid = tokenOwed × min(1, (held − pairs) ÷ tokenTotal)
+    else switch on
+        Note right of Vault: tokenUsdc = tokenOwed × numerator ÷ denominator<br/>ratio = min(1, (balance + tokens at the payout − totalEscrowed) ÷ (totalUsdcOwed + totalFeesOwed + token totals at the payout))<br/>usdcPaid = (usdcOwed + fees) × ratio, tokenPaid = (usdcOwed + fees + tokenUsdc) × ratio − usdcPaid
+    end
     Note right of Vault: remove the NO sub-range, then the liquidity from both ticks (clear a bit at zero)<br/>activeLiquidity −= liquidity if in range, noSideLiquidity too on the NO side<br/>debit the four ledger totals by the scaled claim and fees<br/>delete positions[positionId]
-    Vault->>CTF: mergePositions(pairs) if pairs > 0
-    Vault->>Safe: transfer usdcPaid
-    Vault->>CTF: safeTransferFrom(vault, safe, tokenId, tokenPaid) — last call
+    alt switch off
+        Vault->>CTF: mergePositions(pairs) if pairs > 0
+        Vault->>Safe: transfer usdcPaid
+        Vault->>CTF: safeTransferFrom(vault, safe, tokenId, tokenPaid) — last call
+    else switch on
+        Vault->>CTF: redeemPositions(usdc, 0, conditionId, [1, 2]) if a token is held
+        Vault->>Safe: transfer usdcPaid + tokenPaid — last call
+    end
     Note right of Vault: PositionBurned(positionId, owner, usdcOwed, feesOwed,<br/>usdcPaid, tokenId, tokenOwed, tokenPaid)
 ```
 
-**Worked example.** 300 USDC over `[5500, 6500)` minted at tick 6000 gives `liquidity = 3e23`. With the vault at 5700 the YES band is `[5700, 6000)`: 90 YES, and `3e23 × (1000 × 10000 − 300 × (5700 + 6000 − 1) / 2) / (10000 × 1e18) = 247,354,500` USDC units. The vault spent 52.6455 USDC on the 90 YES, an average price of 0.585. At 6300 the NO band is `[6000, 6300)`: 90 NO and 265,345,500 units. At 6000 the claim is 300 USDC.
+**Worked example.** 300 USDC over `[5500, 6500)` minted at tick 6000 gives `liquidity = 3e23`. With the vault at 5700 the YES band is `[5700, 6000)`: 90 YES, and `3e23 × (1000 × 10000 − 300 × (5700 + 6000 − 1) / 2) / (10000 × 1e18) = 247,354,500` USDC units. The vault spent 52.6455 USDC on the 90 YES, an average price of 0.585. At 6300 the NO band is `[6000, 6300)`: 90 NO and 265,345,500 units. At 6000 the claim is 300 USDC. After the Oracle's redemption with YES winning (`[1, 0]`), the same burn pays 247,354,500 + 90,000,000 = 337,354,500 units in one USDC transfer; with NO winning, 247,354,500 and nothing for the band; with a cancelled market (`[1, 1]`), 292,354,500.
 
 **When to call:** Whenever the LP wants out. The self-service path needs no Operator, no signature, no timelock, and no declared emergency, and it works with every Operator removed. `burnPositionFor` refreshes the Operator heartbeat; `burnPosition` never does.
 
@@ -391,6 +404,44 @@ sequenceDiagram
 ```
 
 **When to call:** The exchange calls it, not the keeper. The keeper posts buy orders only (decision C26), sets `feeRateBps` per the house rule, and cancels its resting orders when it sees `EmergencyCancelExecuted`, `VaultWindDownStarted`, or `TradingPaused`, because a resting order fails its signature check at match time after any of those. The vault returns `0xffffffff` and never reverts on a refusal, and it answers no caller other than the exchange, so a token contract that consults the payer's `isValidSignature` (USDC, ERC-7598) cannot spend vault assets on an Operator's signature.
+
+---
+
+### 2.10 Redeem outcome tokens (`redeemOutcomeTokens`)
+
+After Prophet's `Resolution.finalizePayouts` forwards the result to the Conditional Tokens contract, each outcome token has a fixed USDC value. The Oracle winds the vault down, then redeems: the first successful call copies the payout numerators from the Conditional Tokens contract into the vault (the switch) and turns every token the vault holds into USDC. From then on every burn and collect values its token leg at that payout, redeems whatever tokens the vault holds first, and pays one USDC transfer at one ratio. The call reverts while the vault is Active, before the result exists, and for every caller but the Oracle; it works in WindDown and after a freeze, paused or not, and can run again for tokens that arrive later.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Resolution
+    participant CTF as ConditionalTokens
+    actor Oracle
+    participant Vault as LPVault
+    participant USDC
+
+    Resolution->>CTF: reportPayouts(questionId, payouts) after the cooldown
+    Oracle->>Vault: startWindDown()
+    Oracle->>Vault: redeemOutcomeTokens()
+    Note right of Vault: onlyOracle, nonReentrant; revert VaultStillActive if phase is 1
+    Vault->>CTF: payoutDenominator(conditionId)
+    alt denominator is 0
+        Vault-->>Oracle: revert MarketNotResolved
+    else result reported
+        opt the stored payout is zero
+            Vault->>CTF: payoutNumerators(conditionId, 0) and (conditionId, 1)
+            Note right of Vault: store both numerators (SafeCast to uint128): the switch
+        end
+        Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
+        opt either balance above 0
+            Vault->>CTF: redeemPositions(usdc, 0, conditionId, [1, 2])
+            CTF->>USDC: transfer(vault, payout)
+            Note right of Vault: OutcomeTokensRedeemed(oracle, yes, no, usdc)
+        end
+    end
+```
+
+**When to call:** Once `Resolution.finalizePayouts` ran, after `startWindDown`. Call again if tokens arrive later. Until the Oracle calls, an exit pays the winning token in kind, and the LP redeems it at the Conditional Tokens contract from the Safe for the same USDC, so no LP waits on the Oracle. The payout is read from the Conditional Tokens contract inside the call and never from an argument.
 
 ---
 
@@ -570,11 +621,12 @@ sequenceDiagram
 | `updateTick` | Operator | Active | Not paused; max 256 ticks |
 | `mergePositions` | Operator | Active / WindDown | Not paused |
 | `heartbeat` | Operator | Active / WindDown | Works while paused; refreshes the silence timer only |
-| `collect` | LP's Safe (owner) | Every phase | Always open; works while paused; merges pairs first; pays its share from the solvency ledger |
+| `collect` | LP's Safe (owner) | Every phase | Always open; works while paused; settles first (merge, or redemption after the switch); pays its share from the solvency ledger |
 | `collectFor` | Operator | Every phase | Works while paused; owner-key CollectIntent with a nonce and a deadline |
-| `burnPosition` | LP's Safe (owner) | Every phase | Always open; works while paused; no Operator, no timelock; the claim from the mint tick, paid at the ledger's ratio per asset |
+| `burnPosition` | LP's Safe (owner) | Every phase | Always open; works while paused; no Operator, no timelock; the claim from the mint tick, paid at the ledger's ratio per asset, or as one USDC sum after the switch |
 | `burnPositionFor` | Operator | Every phase | Works while paused; owner-key BurnIntent with a deadline |
 | `mergeCompleteSets` | Any wallet | Every phase | Works while paused; never refreshes the heartbeat |
+| `redeemOutcomeTokens` | Oracle | WindDown / Cancelled | The switch; reads the payout from the Conditional Tokens contract; works while paused; never refreshes the heartbeat |
 | `isValidSignature` | The exchange | Active | A view; not paused; the recovered signer must be a registered Operator; returns `0xffffffff` on any refusal, never reverts |
 | `reclaimDeposit` | LP's Safe | Every phase | Always open; works while paused; no timelock |
 | `reclaimDepositFor` | Operator | Every phase | Works while paused; owner-key ReclaimIntent with a deadline |

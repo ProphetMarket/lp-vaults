@@ -26,7 +26,7 @@ The contracts are the on-chain foundation only. The off-chain keeper, event list
 | Collect Fees on a Position | implemented | LP fee withdrawal via v3 feeGrowthInside snapshot, by the Safe or relayed, merging the vault's pairs first and paying its share at the ledger's USDC ratio |
 | Burn LP Position | implemented | LP exit by the Safe or relayed: the claim from the mint tick (decision C26), USDC plus one outcome token, each at the ledger's ratio per asset |
 | Vault Solvency Ledger | implemented | Running totals of what the vault owes per asset, moved on every booking and every tick segment, and the per-asset ratio every payout applies (decision O2) |
-| Complete-Set Merge and Resolution Redemption | implemented | Any wallet merges the vault's YES and NO pairs into USDC, in every phase; the redemption waits for Part 6 |
+| Complete-Set Merge and Resolution Redemption | implemented | Any wallet merges the vault's YES and NO pairs into USDC, in every phase, and the Oracle's redemption after resolution switches every later payout to USDC |
 | Merge Positions | implemented | Operator housekeeping to combine same-range same-owner positions |
 | Notify and Distribute Fees | implemented | Operator-driven Q128 accumulator update |
 | Update Tick and Cross Ticks | implemented | Operator tick sync with per-tick accumulator flip |
