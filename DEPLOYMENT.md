@@ -376,6 +376,7 @@ The **Admin** should immediately:
 3. Transfer admin if needed via the two-step `transferAdmin` / `acceptAdmin` flow.
 4. After a transfer, call `removeAdmin(<old admin address>)` from the new admin. `acceptAdmin` adds the new admin but does not remove the old one, so the old key keeps full admin rights on the factory and on every vault until it is removed.
 5. Review `defaultEmergencyCancelTimelock()` on the factory (7 days at deployment). To change it for vaults created from now on, run `cast send <FACTORY_ADDRESS> "setDefaultEmergencyCancelTimelock(uint32)" <seconds> --rpc-url https://polygon-rpc.com --account <admin-account-name>`, with a value above 0 and at most 2,592,000 (30 days). An existing vault keeps the value it copied at creation, readable as `emergencyCancelTimelock()` on the vault, and nothing can change it.
+6. Confirm the vault-order signing setup: the Operator wallet that signs vault orders (`signer = maker = vault`, `signatureType = POLY_1271`) must be a registered Operator on the factory (`operators(<address>)` returns `1`), and the exchange must hold the vault's two token IDs in its registry, which the Oracle service does at market creation through `registerToken`. The vault answers the exchange only, and only while it is Active and not paused, so no order fills before both hold.
 
 ### Operator USDC approval per vault
 

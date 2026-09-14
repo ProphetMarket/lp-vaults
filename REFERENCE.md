@@ -224,7 +224,7 @@ The two hooks let the vault receive its outcome tokens: the ERC-1155 standard ma
 | Parameter | Type | Description |
 |-----------|------|-------------|
 | `id` / `ids` | `uint256` / `uint256[]` | The token ID, or every token ID of the batch; each must be `yesTokenId` or `noTokenId` |
-| `interfaceId` | `bytes4` | `0x4e2312e0` (IERC1155Receiver) and `0x01ffc9a7` (ERC-165) return `true`; any other value returns `false` |
+| `interfaceId` | `bytes4` | `0x4e2312e0` (IERC1155Receiver), `0x01ffc9a7` (ERC-165), and `0x1626ba7e` (EIP-1271, the order maker) return `true`; any other value returns `false` |
 
 **Returns:** `0xf23a6e61` from `onERC1155Received`, `0xbc197c81` from `onERC1155BatchReceived`.
 
@@ -233,6 +233,46 @@ The two hooks let the vault receive its outcome tokens: the ERC-1155 standard ma
 **Reverts:**
 - `NotConditionalTokens()` — the caller is not the vault's configured ConditionalTokens contract
 - `UnknownTokenId()` — a token ID is neither `yesTokenId` nor `noTokenId`; in a batch, one such element rejects the whole batch
+
+---
+
+### `LPVault.isValidSignature`
+
+```solidity
+function isValidSignature(bytes32 hash, bytes calldata signature) external view returns (bytes4)
+```
+
+**Actor:** The vault's configured exchange, during `_validateOrder` of a fill whose order names the vault as `maker` and `signer` with `signatureType = POLY_1271`.
+
+The vault has no private key, so this is the one way an order can name it as maker: a registered Operator key signs the exchange's `hashOrder(order)`, and the vault vouches for that signature to the exchange (EIP-1271, decision C22). The method returns `0x1626ba7e` when every one of these holds, and `0xffffffff` otherwise: the caller is the vault's `exchange`; the vault is in the Active phase and not paused; the signature is 65 bytes with `s` in the lower half of the curve order and `v` in {27, 28}; `ecrecover` returns a non-zero address; and that address is a registered Operator on the factory at the moment of the call. The registry is read at call time, so one `removeOperator` invalidates every unfilled order that key signed. A paused, wound-down, or frozen vault takes no new fill: a resting order fails its signature check at match time, and the keeper cancels its orders when it sees `TradingPaused`, `VaultWindDownStarted`, or `EmergencyCancelExecuted`. The caller check exists because USDC `FiatTokenV2_2` routes a bytes signature in `permit` and `transferWithAuthorization` to the payer's `isValidSignature` (ERC-7598), so an open vouch would let an Operator key move vault USDC around the exchange.
+
+**OPERATOR TRUST ASSUMPTION:** any registered Operator can author orders that spend vault assets through the exchange. The vault checks who signed, never what was signed: the Operator's order sizes and prices are trusted, and the per-market deposit cap in Part 6 of the audit plan is the economic bound. The approvals `initialize` granted the exchange become reachable through this method; it adds no transfer path.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `hash` | `bytes32` | The digest the signature was produced over: the exchange's `hashOrder(order)` |
+| `signature` | `bytes` | 65-byte `r || s || v` ECDSA signature from a registered Operator key |
+
+```mermaid
+sequenceDiagram
+    participant Exchange as ProphetCTFExchange
+    participant Vault as LPVault
+    participant Factory as LPVaultFactory
+
+    Exchange->>Vault: staticcall isValidSignature(hashOrder(order), signature)
+    Note right of Vault: msg.sender == exchange?<br/>phase == Active and not paused?<br/>signature well formed, signer != 0?
+    Vault->>Factory: operators(signer)
+    Factory-->>Vault: 1
+    Vault-->>Exchange: 0x1626ba7e (or 0xffffffff on any failed check)
+```
+
+**Returns:** `0x1626ba7e` when the vault vouches, `0xffffffff` otherwise.
+
+**Events:** none
+
+**Reverts:** none by design. Every refusal is a returned value, because the exchange treats a revert and a wrong return value differently and any address can call this method with any bytes.
+
+**Gas:** 24,503 measured around the call from a cold vault and a cold factory (one external staticcall, three cold storage slots, one `ecrecover`).
 
 ---
 

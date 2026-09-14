@@ -364,6 +364,36 @@ sequenceDiagram
 
 ---
 
+### 2.9 Fill a vault order on the exchange (`isValidSignature`)
+
+The vault is the maker of its own orders. The keeper signs an order that names the vault as `maker` and `signer` with `signatureType = POLY_1271`, using the Operator key, and the exchange asks the vault whether it stands behind that signature during every fill. The vault answers from the registry at that moment, and only to the exchange, and only while it is Active and not paused (decision C22). The USDC leg moves under the allowance `initialize` granted, and the outcome tokens arrive through the receiver hook.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor Keeper as Keeper (Operator key)
+    participant Exchange as ProphetCTFExchange
+    participant Vault as LPVault
+    participant Factory as LPVaultFactory
+    participant CT as ConditionalTokens
+
+    Keeper->>Exchange: matchOrders(taker, [vault order], amounts)
+    Exchange->>Vault: staticcall isValidSignature(hashOrder(order), signature)
+    Note right of Vault: msg.sender == exchange<br/>phase == Active, not paused<br/>signature well formed
+    Vault->>Factory: operators(recovered signer)
+    Factory-->>Vault: 1
+    Vault-->>Exchange: 0x1626ba7e
+    Exchange->>Vault: transferFrom(vault, exchange, USDC) under the initialize allowance
+    Exchange->>CT: splitPosition (two buys) or nothing (taker sell)
+    Exchange->>CT: safeTransferFrom(exchange, vault, YES)
+    CT->>Vault: onERC1155Received(YES)
+    Vault-->>CT: 0xf23a6e61
+```
+
+**When to call:** The exchange calls it, not the keeper. The keeper posts buy orders only (decision C26), sets `feeRateBps` per the house rule, and cancels its resting orders when it sees `EmergencyCancelExecuted`, `VaultWindDownStarted`, or `TradingPaused`, because a resting order fails its signature check at match time after any of those. The vault returns `0xffffffff` and never reverts on a refusal, and it answers no caller other than the exchange, so a token contract that consults the payer's `isValidSignature` (USDC, ERC-7598) cannot spend vault assets on an Operator's signature.
+
+---
+
 ## 3. Emergency Procedures
 
 ### 3.1 Emergency Cancel All (`emergencyCancelAll`)
@@ -545,6 +575,7 @@ sequenceDiagram
 | `burnPosition` | LP's Safe (owner) | Every phase | Always open; works while paused; no Operator, no timelock; the claim from the mint tick, paid at the ledger's ratio per asset |
 | `burnPositionFor` | Operator | Every phase | Works while paused; owner-key BurnIntent with a deadline |
 | `mergeCompleteSets` | Any wallet | Every phase | Works while paused; never refreshes the heartbeat |
+| `isValidSignature` | The exchange | Active | A view; not paused; the recovered signer must be a registered Operator; returns `0xffffffff` on any refusal, never reverts |
 | `reclaimDeposit` | LP's Safe | Every phase | Always open; works while paused; no timelock |
 | `reclaimDepositFor` | Operator | Every phase | Works while paused; owner-key ReclaimIntent with a deadline |
 | `emergencyCancelAll` | Any address | Active / WindDown | After the vault's silence timelock; changes only the phase |
