@@ -8,10 +8,14 @@ libs = ["lib"]
 # unreached test line is already reported by the suite itself.
 no_match_coverage = "(script|test)/"
 
-# The tests deploy the real Gnosis ConditionalTokens bytecode through vm.getCode.
-# Foundry blocks file reads by default, so this grants read access to the one
-# vendored artifact folder and nothing else.
-fs_permissions = [{ access = "read", path = "./lib/ctf-exchange/artifacts" }]
+# The tests deploy the real Gnosis ConditionalTokens bytecode and the vendored
+# ProphetCTFExchange bytecode through vm.getCode. Foundry blocks file reads by
+# default, so this grants read access to the two vendored artifact folders and
+# nothing else.
+fs_permissions = [
+    { access = "read", path = "./lib/ctf-exchange/artifacts" },
+    { access = "read", path = "./test/artifacts" },
+]
 
 # The optimizer is on for contract size, not for gas. See the compiler optimizer
 # decision (ADR-9FOM) in
