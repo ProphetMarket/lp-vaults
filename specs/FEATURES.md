@@ -22,6 +22,7 @@
 | FEAT-KX5N | Upgradeable Vault Implementation Pointer | Admin-driven two-step timelocked upgrade of the factory's implementation pointer with per-clone version tracking | implemented |
 | FEAT-6HBN | Complete-Set Merge and Resolution Redemption | Any wallet merges the vault's matched YES and NO tokens into USDC held by the vault, in every phase, and every payout merges first; the Oracle's redemption after resolution is reserved for Part 6 of the audit plan | implemented |
 | FEAT-9BQZ | Vault Solvency Ledger | Running totals of what the vault owes per asset in the claim's pre-division unit, moved on every mint, burn, collect, fee report, merge, and tick segment, and a per-asset ratio that every burn and collect applies, so a shortfall is a cut every claimant takes alike (decision O2) | implemented |
+| FEAT-C0DJ | Vault Order Authorization | EIP-1271 vouching that lets a registered Operator author orders naming the vault as maker, answered to the exchange only and only while the vault is Active and not paused, so vault-held capital is filled without leaving the vault and a paused, wound-down, or frozen vault takes no new fill (decision C22) | implemented |
 
 ## @positions
 

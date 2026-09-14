@@ -49,6 +49,8 @@
 
 **CTF Exchange** -- The ProphetCTFExchange contract (a Polymarket fork). A CLOB where orders are matched off-chain by an operator and settled atomically on-chain. The exchange pulls maker capital from pre-approved contracts at fill time.
 
+**Order maker** -- The address whose assets an exchange order spends. The vault is the maker of its own orders: a registered Operator key signs, and the vault's `isValidSignature` vouches to the exchange (EIP-1271, decision C22 in `audits/audit-fixes-ranged.md`), only while the vault is Active and not paused and only when the exchange is the caller.
+
 **Intent (mint intent)** -- An EIP-712 message that the LP's owner key signs: put `usdcAmount` USDC from this Safe into the range from `tickLower` to `tickUpper`, under a unique `intentId`, before a `deadline`. The Operator escrows the USDC against it with `depositForIntent`, then mints with `mintPositionFor`. The LP never sends USDC to the vault address.
 
 **Safe wallet** -- The Gnosis Safe that Prophet deploys for each user through the Poly Safe factory. The factory derives the Safe's address from its owner key with CREATE2, so any contract can compute a user's Safe from the owner key alone.

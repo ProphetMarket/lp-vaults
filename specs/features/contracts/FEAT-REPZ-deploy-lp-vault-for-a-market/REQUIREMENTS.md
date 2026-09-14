@@ -4,7 +4,7 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 8
+version: 9
 refs: []
 ---
 
@@ -99,8 +99,8 @@ Linked to: UC-REQ1
 Fit Criterion: `onERC1155Received(...)` called by `conditionalTokens` with an ID outside `{yesTokenId, noTokenId}` reverts with `UnknownTokenId`, so the originating `safeTransferFrom` reverts and the token never reaches the vault. `onERC1155BatchReceived(...)` reverts when any element of `ids` is outside that set, including a batch whose other elements are valid. With FR-3WLJ, this turns the one-market assumption behind the unscoped `setApprovalForAll` into an on-chain check on both the token contract and the token ID.
 Linked to: UC-REQ1
 
-**FR-3WLK** `When supportsInterface is called on a vault with the IERC1155Receiver or ERC-165 interface identifier, the system shall return true, and false for any other identifier.`
-Fit Criterion: Given an initialized vault, `supportsInterface(0x4e2312e0)` (IERC1155Receiver) returns `true`, `supportsInterface(0x01ffc9a7)` (ERC-165) returns `true`, and `supportsInterface(0xffffffff)` returns `false`.
+**FR-3WLK** `When supportsInterface is called on a vault with the IERC1155Receiver, ERC-165, or EIP-1271 interface identifier, the system shall return true, and false for any other identifier.`
+Fit Criterion: Given an initialized vault, `supportsInterface(0x4e2312e0)` (IERC1155Receiver) returns `true`, `supportsInterface(0x01ffc9a7)` (ERC-165) returns `true`, `supportsInterface(0x1626ba7e)` (EIP-1271, the order maker's interface, FR-C0DZ in FEAT-C0DJ) returns `true`, and `supportsInterface(0xffffffff)` returns `false`.
 Linked to: UC-REQ1
 
 ### Factory-Delegated Authorization
