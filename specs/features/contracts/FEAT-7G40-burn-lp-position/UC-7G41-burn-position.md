@@ -3,7 +3,7 @@ id: UC-7G41
 name: Burn Position
 feature: FEAT-7G40
 status: implemented
-version: 3
+version: 4
 actor: LP
 ---
 
@@ -46,7 +46,10 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 **Side Effects:**
 - `PositionBurned(positionId, safe, 300000000, 0, 300000000, 0, 0, 0)` emitted
 - `positions[positionId]` storage: deleted
-- `ticks[5500]` and `ticks[6500]` storage: `liquidityGross` decreased by `3e23`; `liquidityNet` decreased by `3e23` at 5500 and increased by `3e23` at 6500
+- `ticks[5500]` and `ticks[6500]` storage: `liquidityGross` decreased by `3e23`; `liquidityNet` decreased by `3e23` at 5500 and increased by `3e23` at 6500; `noLiquidityNet` increased by `3e23` at 6500
+- `ticks[6000]` storage (the interior mint tick): `liquidityGross` and `noLiquidityNet` decreased by `3e23`, the record deleted and its bitmap bit cleared, because nothing else references it
+- `noSideLiquidity` storage: decreased by `3e23`, because the position sat on the NO side of its mint tick
+- The four totals of the solvency ledger (FEAT-9BQZ): `totalUsdcOwedScaled` decreased by `3e23 × 10,000,000`
 - USDC transferred from vault to the Safe
 - No ERC-1155 transfer
 - No call to the CTF Exchange
@@ -307,26 +310,29 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 
 ---
 
-### SC-BMF2: Burn pays what the vault holds when it is short
+### SC-BMF2: Burn pays its share when the vault is short
 
 **Given:**
 - Case A: the Safe owns the position of SC-7G44 (claim 247.3545 USDC plus 90 YES), and the vault holds only 200 USDC above `totalEscrowed` and 60 YES
 - Case B: the Safe owns a position whose claim is USDC only, and the vault's USDC balance is below `totalEscrowed`
 - Case C: the vault holds more USDC and more of the token than the claim
+- The position is the only live claim, so each asset's ratio is what is held over what this position is owed (FEAT-9BQZ FR-9BRM, FR-9BRN)
 
 **Steps:**
 1. The Safe calls `burnPosition` for the position
-2. System computes the amounts owed and the amounts available, per asset
-3. System pays the smaller of each pair and never reverts on the comparison
+2. System reads the totals and computes one ratio per asset, the smaller of 1 and held ÷ owed
+3. System pays each owed amount times its ratio, rounded down, debits the totals by the full scaled claim, and never reverts on the comparison
 
 **Outcomes:**
 - Case A: the Safe receives 200 USDC and 60 YES, and the position is deleted
 - Case B: the Safe receives zero USDC, the call does not revert, and the position is deleted
 - Case C: the Safe receives the claim exactly
+- In every case `totalUsdcOwed()` falls by the claim's USDC and the band's token total by its tokens, whatever was paid: 247,354,500 and 90,000,000 in case A
 
 **Side Effects:**
 - Case A: `PositionBurned(positionId, safe, 247354500, 0, 200000000, yesTokenId, 90000000, 60000000)` emitted, so an indexer sees `paid < owed`
 - Case B: `PositionBurned` emitted with `usdcPaid == 0`, and no USDC transfer
+- `totalUsdcOwedScaled` and the band's token total storage: debited by the full scaled claim in every case
 - `totalEscrowed` unchanged in every case: escrowed USDC never pays a burn
 - No revert on any solvency comparison
 

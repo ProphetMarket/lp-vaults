@@ -4,17 +4,17 @@ name: Burn LP Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 3
-refs: [FEAT-T7AF, FEAT-U079, FEAT-TVS0, FEAT-JGE7, FEAT-6HBN, FEAT-3ZRI]
+version: 4
+refs: [FEAT-T7AF, FEAT-U079, FEAT-TVS0, FEAT-JGE7, FEAT-6HBN, FEAT-3ZRI, FEAT-9BQZ]
 ---
 
 # Burn LP Position
 
-> LP-initiated closure of a position, in one call by the LP's Safe or one relayed call with the owner key's signature, that merges the vault's pairs into USDC, values the claim from its mint tick under decision C26, removes the position's liquidity from both ticks, and pays the Safe USDC plus one outcome token, the smaller of what is owed and what the vault holds per asset.
+> LP-initiated closure of a position, in one call by the LP's Safe or one relayed call with the owner key's signature, that merges the vault's pairs into USDC, values the claim from its mint tick under decision C26, removes the position's liquidity from both ticks, and pays the Safe USDC plus one outcome token, each asset's owed amount times its ratio, from the solvency ledger (FEAT-9BQZ).
 
 ## Non-Goals
 
-- Does not keep running totals of what the vault owes, and does not cut every claim by the same ratio when the vault is short -- decision O2 pays each claim what the vault holds at the moment of its exit (ADR-BMF6)
+- Does not keep the running totals or compute the ratios itself -- see FEAT-9BQZ, whose totals every burn reads and debits
 - Does not convert the outcome leg to USDC, place an order, or redeem a resolved token -- Part 6 of the audit plan adds the resolved branch at the single token-payment site
 - Does not withdraw fees without closing the position -- see FEAT-U079
 - Does not create positions or initialize ticks -- see FEAT-T7AF
@@ -47,8 +47,8 @@ Linked to: UC-7G41, UC-7G42
 Fit Criterion: Given a burn, no call reaches the CTF Exchange, and the only ConditionalTokens calls are `balanceOf`, `mergePositions` when the vault holds a pair, and `safeTransferFrom` for the token leg.
 Linked to: UC-7G41, UC-7G42
 
-**FR-7G4O** `When a position is burned, the system shall decrement liquidityGross on both tickLower and tickUpper by the position's liquidity, subtract the position's liquidity from liquidityNet on tickLower, and add it back to liquidityNet on tickUpper.`
-Fit Criterion: Given a burn of a position with liquidity L, `ticks[tickLower].liquidityGross` decreases by L, `ticks[tickLower].liquidityNet` decreases by L, `ticks[tickUpper].liquidityGross` decreases by L, and `ticks[tickUpper].liquidityNet` increases by L, the exact inverse of the mint deltas in FEAT-T7AF FR-T7AV.
+**FR-7G4O** `When a position is burned, the system shall decrement liquidityGross on both tickLower and tickUpper by the position's liquidity, subtract the position's liquidity from liquidityNet on tickLower, add it back to liquidityNet on tickUpper, remove the position's NO sub-range from noLiquidityNet at mintTick and at tickUpper, and, when mintTick lies strictly inside the range, decrement liquidityGross on mintTick by the position's liquidity.`
+Fit Criterion: Given a burn of a position with liquidity L, `ticks[tickLower].liquidityGross` decreases by L, `ticks[tickLower].liquidityNet` decreases by L, `ticks[tickUpper].liquidityGross` decreases by L, `ticks[tickUpper].liquidityNet` increases by L, `ticks[mintTick].noLiquidityNet` decreases by L and `ticks[tickUpper].noLiquidityNet` increases by L when `mintTick < tickUpper`, and `ticks[mintTick].liquidityGross` decreases by L when `tickLower < mintTick < tickUpper`, the exact inverse of the mint deltas in FEAT-T7AF FR-T7AV. The NO sub-range leaves before the boundary ticks, so a boundary tick that deinitializes already holds a zero `noLiquidityNet` (FEAT-9BQZ).
 Linked to: UC-7G41, UC-7G42
 
 **FR-7G4P** `When a boundary tick's liquidityGross reaches zero after a burn, the system shall delete that tick's state and clear its bit in the tick bitmap.`
@@ -83,14 +83,14 @@ Linked to: UC-7G41, UC-7G42
 Fit Criterion: Given a never-minted id, an already-burned id, or a position that `mergePositions` consumed, the call reverts `PositionNotFound` through either entry point, and no asset leaves the vault. A consumed position's liquidity already moved to a survivor; burning it would touch the ticks by zero and could clear a bit a survivor needs.
 Linked to: UC-7G41
 
-**FR-BMEZ** `When a burn pays, the system shall pay the smaller of the USDC owed (claim USDC plus fees) and the USDC available, where available = usdc.balanceOf(vault) + the pairs the merge produces − totalEscrowed, floored at zero; and the smaller of the tokens owed and the vault's balance of that token after the merge; and shall never revert on either comparison.`
-Fit Criterion: Given a claim of 247.3545 USDC plus 90 YES and a vault that holds 200 USDC above escrow and 60 YES, the burn pays 200 USDC and 60 YES, does not revert, emits `PositionBurned` with `usdcOwed = 247,354,500`, `usdcPaid = 200,000,000`, `tokenOwed = 90,000,000`, and `tokenPaid = 60,000,000`, and leaves the position deleted. Given a vault whose USDC balance is below `totalEscrowed`, the burn pays zero USDC and does not revert. Given a vault that holds more than the claim, the burn pays the claim exactly. Decisions C6, C7, and O2.
+**FR-COEX** `When a burn pays, the system shall pay each asset's owed amount times that asset's ratio (FEAT-9BQZ FR-9BRM to FR-9BRR), rounded down and never above what the vault holds, debit the four totals by the position's full scaled claim and scaled fees, and never revert on the comparison.`
+Fit Criterion: Given three positions owed 90 YES each and a vault that holds 150 YES, three burns in a row pay 50 YES each and their full USDC (SC-9BSD). Given one position with a claim of 247.3545 USDC plus 90 YES and a vault that holds 200 USDC above escrow and 60 YES, the burn pays 200 USDC and 60 YES, does not revert, emits `PositionBurned` with `usdcOwed = 247,354,500`, `usdcPaid = 200,000,000`, `tokenOwed = 90,000,000`, and `tokenPaid = 60,000,000`, leaves the position deleted, and takes `totalUsdcOwed()` and `totalYesOwed()` to zero. Given a vault whose USDC balance is below `totalEscrowed`, the burn pays zero USDC and does not revert. Given a vault that holds more than the claim, the burn pays the claim exactly. Decisions C6, C7, and O2 (ADR-COEY).
 Linked to: UC-7G41
 
 ### Self-Service Path
 
 **FR-7G4X** `When the position's owner calls burnPosition(positionId), the system shall execute the shared burn for that position.`
-Fit Criterion: Given `position.owner == msg.sender`, the call succeeds with no Operator involvement and produces the outcomes of FR-7G4L through FR-BMEZ.
+Fit Criterion: Given `position.owner == msg.sender`, the call succeeds with no Operator involvement and produces the outcomes of FR-7G4L through FR-7G4W and FR-COEX.
 Linked to: UC-7G41
 
 **FR-7G4Y** `If the caller of burnPosition is not the position's recorded owner, then the system shall revert.`
@@ -166,7 +166,7 @@ Fit Criterion: the block states that the Operator can censor, reorder, or delay 
 - `burnPosition` and `burnPositionFor` share one internal body; no payout or accounting arithmetic appears twice
 - The claim is verified at the mint tick, below it, and above it, through both entry points, and the fuzz test matches the per-level loop
 - Every burn merges the vault's pairs first, and no burn path calls the CTF Exchange
-- A burn pays the smaller of what is owed and what the vault holds, per asset, and never reverts on that comparison
+- A burn pays each asset's owed amount times its ratio, debits the full owed amount, and never reverts on the comparison
 - Burning the last position at a tick deletes the tick and clears its bitmap bit
 - `activeLiquidity` decreases only for positions that were in range
 - Accrued fees ride the USDC leg in the same call

@@ -1,0 +1,179 @@
+---
+id: FEAT-9BQZ
+name: Vault Solvency Ledger
+module: contracts
+domain: "@vault"
+status: implemented
+version: 2
+refs: [FEAT-REPZ, FEAT-T7AF, FEAT-7G40, FEAT-U079, FEAT-TOGR, FEAT-TVS0, FEAT-3ZRI, FEAT-JAIJ, FEAT-JXQO, FEAT-K1M2]
+---
+
+# Vault Solvency Ledger
+
+> Gives the vault running totals of what it owes to its live positions, per asset and in the pre-division fixed-point unit, moved on every mint, burn, collect, fee report, merge, and segment of a tick move under the claim model (decision C26), and a per-asset ratio that every burn and collect applies, so a shortfall is a cut that every claimant takes alike instead of a race won by whoever exits first.
+
+## Non-Goals
+
+- Does not assert solvency anywhere: no revert, no halt, no pause, and no warning when a ratio falls below 1 -- see ADR-9BSK
+- Does not price outcome tokens, read a price feed, or accept a price input other than `currentTick`, which the claim formula already reads
+- Does not define what a claim holds; FEAT-7G40 owns the claim formula (FR-7G4M), and the ledger sums the same formula in its pre-division unit
+- Does not reconstruct any total by iterating positions -- see FR-9BR3
+- Does not rank claimants or introduce seniority among positions: principal and fees share the USDC ratio -- see ADR-9BSI
+- Does not cut an escrow refund, because escrowed USDC is senior (decision C7): the reclaim pays the recorded amount (FEAT-JAIJ) and stays outside every ratio
+- Does not pay a remainder later, because a cut is final -- see ADR-COEN
+- Does not convert a token total into USDC after the market resolves -- step R13 of the audit plan owns the redemption
+- Does not convert, trade, swap, or route any asset, and places no order on the CTF Exchange
+- Does not perform off-chain monitoring or alerting; the ledger exposes state and off-chain systems watch it
+- Does not change any role's authority, add a role, or gate any existing function behind a new one
+
+## Actors
+
+| Actor | Role | Notes |
+|-------|------|-------|
+| LP | Receives a burn or a collect scaled by the ratio of each asset | Never calls the ledger directly. Observes it through `burnPosition`, `burnPositionFor`, `collect`, and `collectFor` paying a share when the vault is short, and through the public views |
+| Operator | Drives the call sites that move totals without an LP present: `mintPositionFor`, `notifyFees`, `updateTick`, and `mergePositions` | `updateTick` is the only path that moves principal between asset sides. The Operator cannot set, override, or repair any total directly; every total moves only as a consequence of the operation that caused it |
+
+## Functional Requirements
+
+### Ledger State
+
+**FR-9BR3** `The system shall maintain totalUsdcOwedScaled, totalYesOwedScaled, totalNoOwedScaled, and totalFeesOwedX128 as running totals, updating each incrementally in the same call as the operation that changes it, and shall never compute a total by looping over positions.`
+Fit Criterion: Given any sequence of mints, burns, collects, fee reports, merges, freezes, and tick moves, each total reads its correct value immediately after every call, and no code path loops over `positions` to compute one. Iteration would make the ledger's cost grow with the position count and put the exit paths at the mercy of a gas limit, the failure audit issue 6.11 named.
+Linked to: UC-9BR0, UC-9BR1
+
+**FR-9BR4** `The system shall hold every total in the pre-division fixed-point unit of the claim it sums, shall truncate only in the getters totalUsdcOwed, totalYesOwed, totalNoOwed, and totalFeesOwed, and shall accept no price input other than currentTick, which the claim formula already reads.`
+Fit Criterion: Given the units USDC principal in units × `PRICE_TICK_ONE` × `LIQUIDITY_PRECISION` (`USDC_CLAIM_SCALE = 1e22`), tokens in units × `LIQUIDITY_PRECISION` (1e18), and fees in Q128, a mint of 123,456,789 units over 1,000 ticks followed by two moves and a burn leaves `totalUsdcOwedScaled` exactly where it started, and `totalUsdcOwed()` returns `totalUsdcOwedScaled / 1e22`. Worked: the R9 example (300 USDC over `[5500, 6500)` minted at 6000, the vault at 5700) reads `totalUsdcOwedScaled == 3e23 × (10,000,000 − 1,754,850) = 2.4735e30` and `totalUsdcOwed() == 247,354,500`, the USDC of SC-7G44. A truncating total would drift by up to one unit per booking (Appendix D at prompts.md:2208); the scaled unit is what makes the conservation invariant exact (NFR-9BRX).
+Linked to: UC-9BR0
+
+**FR-9BR5** `The system shall track the YES and NO totals as separate non-negative quantities and shall never combine them into a single signed net.`
+Fit Criterion: Given one position whose band holds YES and another whose band holds NO, `totalYesOwed()` and `totalNoOwed()` each report their own obligation and neither is reduced by the other. Under a signed net the two would cancel, so a vault holding neither token would look covered while unable to pay either side.
+Linked to: UC-9BR0, UC-9BR2
+
+**FR-9BR6** `The system shall expose the four scaled totals and the four truncating getters as public views.`
+Fit Criterion: Given any vault state, an off-chain caller reads `totalUsdcOwedScaled`, `totalYesOwedScaled`, `totalNoOwedScaled`, `totalFeesOwedX128`, `totalUsdcOwed()`, `totalYesOwed()`, `totalNoOwed()`, and `totalFeesOwed()` without a transaction. This is the monitoring surface: no on-chain path reverts on a shortfall (FR-9BRS), so the views are the only way a shortfall becomes visible.
+Linked to: UC-9BR0, UC-9BR2
+
+**FR-9BR7** `The system shall leave totalUsdcOwedScaled, totalYesOwedScaled, and totalNoOwedScaled unchanged when a position collects fees without closing.`
+Fit Criterion: Given a collect, the three principal totals read identically before and after. A collect changes neither the position's liquidity nor its range nor its mint tick, so its principal claim is unchanged.
+Linked to: UC-9BR0
+
+### Maintaining the Totals
+
+**FR-9BR8** `When a position is minted, the system shall increment totalUsdcOwedScaled by liquidity × (tickUpper − tickLower) × PRICE_TICK_ONE.`
+Fit Criterion: Given a mint of 300 USDC over `[5500, 6500)`, `totalUsdcOwedScaled` rises by `3e23 × 1000 × 10000` and `totalUsdcOwed()` by 300,000,000, and the token totals are unchanged. The clamped mint tick (FEAT-T7AF ADR-AFPP) leaves the band empty at mint, so a mint's claim is USDC only.
+Linked to: UC-9BR0
+
+**FR-9BR9** `When a position is burned, the system shall decrement totalUsdcOwedScaled and the band's token total by the position's scaled claim at currentTick, computed once and before any effect.`
+Fit Criterion: Given the R9 example with the vault at 5700, the burn lowers `totalUsdcOwedScaled` by `3e23 × 8,245,150` and `totalYesOwedScaled` by `3e23 × 300`, so `totalUsdcOwed()` falls by 247,354,500 and `totalYesOwed()` by 90,000,000, the amounts `PositionBurned` reports as owed, whatever the burn paid. The scaled claim comes from the same `_claim` the payout truncates.
+Linked to: UC-9BR0
+
+**FR-9BRA** `When fees are notified, the system shall increment totalFeesOwedX128 by growth × activeLiquidity, where growth is the increment applied to feeGrowthGlobalX128.`
+Fit Criterion: Given `activeLiquidity == 10e18` and a report of 10 USDC, `growth = mulDiv(10e6, 2^128, 10e18)` and `totalFeesOwedX128` rises by `growth × 10e18`, so `totalFeesOwed()` rises by 10,000,000 less the mulDiv dust, which stays in the vault outside every total. The in-range positions' fee claims grow by exactly `growth × activeLiquidity`, so the credit is exact.
+Linked to: UC-9BR0
+
+**FR-9BRB** `When a position collects, the system shall decrement totalFeesOwedX128 by the position's full scaled fee claim, liquidity × (feeGrowthInside − feeGrowthInsideLast) + tokensOwed × 2^128, whatever the ratio paid.`
+Fit Criterion: Given a position owed 10 USDC of fees and a USDC ratio of 0.4, the collect pays 4 and `totalFeesOwedX128` falls by the whole scaled claim, so `totalFeesOwed()` falls by 10 and a later collect owes only the fees that grew since. A debit by the amount paid would leave a phantom claim after every short collect and lower every later ratio.
+Linked to: UC-9BR0, UC-9BR2
+
+**FR-9BRC** `When a position is burned, the system shall decrement totalFeesOwedX128 by the same scaled fee claim in the same call as the principal decrement.`
+Fit Criterion: Given a burn of a position with accrued fees F, the principal totals (FR-9BR9) and `totalFeesOwedX128` fall in that one call, and no separate collect is needed to retire the fee obligation.
+Linked to: UC-9BR0
+
+**FR-9BRH** `When positions are merged, the system shall leave the three principal totals unchanged and shall decrement totalFeesOwedX128 by the dust the merge's per-position floors drop, Σ (liquidity × delta) mod 2^128 over the survivor and the consumed positions.`
+Fit Criterion: Given two positions with the same range and mint tick and accrued fees whose products do not divide by 2^128, after the merge `totalUsdcOwedScaled`, `totalYesOwedScaled`, and `totalNoOwedScaled` read as before, the survivor's `tokensOwed` is the sum of the two floors, and `totalFeesOwedX128` falls by the two remainders, so it still equals the survivor's scaled fee claim. The claim is linear in liquidity and every merged position shares the range and the mint tick, so the principal is conserved without a write.
+Linked to: UC-9BR0
+
+### Price Movement
+
+**FR-9BRI** `When updateTick crosses an initialized tick, the system shall accrue the shift for the segment that ends at that tick (moving up) or starts at it (moving down) before it applies the tick's liquidityNet and noLiquidityNet, using activeLiquidity and noSideLiquidity as they stood during that segment.`
+Fit Criterion: Given a crossing at tick T, the segment from the previous segment edge to T is accrued against the pre-crossing `activeLiquidity` and `noSideLiquidity`, and only then are the two nets applied. Reversing the two attributes the segment to liquidity that was not in range across it; the error is silent, and the invariant of NFR-9BRX fails on it (checked by mutation on 2026-09-14).
+Linked to: UC-9BR1
+
+**FR-9BRJ** `When the crossing loop exits, the system shall accrue one more segment from the last crossed tick to newTick, and when nothing was crossed that segment is the whole move.`
+Fit Criterion: Given a move that crosses one or more ticks and then continues past the last of them, the remaining span is accrued once after the loop. Given a move that crosses none, the trailing segment spans from the old tick to the new tick and is the only accrual. Most moves do not land on an initialized tick, so an accrual inside the loop alone is wrong on the common case.
+Linked to: UC-9BR1
+
+**FR-9BRK** `When a move crosses no initialized tick, the system shall still move the totals by the shift of the whole span.`
+Fit Criterion: Given the R9 example and a move from 6000 to 5700 inside the range, `totalYesOwedScaled` rises by `3e23 × 300` and `totalUsdcOwedScaled` falls by `3e23 × 1,754,850`, so `totalUsdcOwed()` reads 247,354,500 and `totalYesOwed()` reads 90,000,000 with no tick crossed.
+Linked to: UC-9BR1
+
+**FR-9BRL** `When the system accrues a segment of levels [s, e) with k = e − s and Σt = k × (s + e − 1) / 2, it shall change the NO total by noSideLiquidity × k, the YES total by (activeLiquidity − noSideLiquidity) × k, and the USDC total by (activeLiquidity − noSideLiquidity) × Σt − noSideLiquidity × (k × PRICE_TICK_ONE − Σt), with the signs set by the direction, so that a move up and the same move down cancel exactly and a move in one call equals the same move in any number of chunks.`
+Fit Criterion: Given one position minted at 6000, a move from 6000 to 5700 is one segment with `noSideLiquidity = 0`, `k = 300`, and `Σt = 1,754,850`, so YES gains `3e23 × 300` and USDC loses `3e23 × 1,754,850`; the move back restores both, and the moves 6000 → 5900 → 5750 → 5700 land on the same totals as 6000 → 5700. A segment with `activeLiquidity == 0` is skipped, which also keeps `s` and `e` inside `[0, 10000]`, because a non-empty in-range set puts the segment inside a position's range. Every product stays under 2^155 (`L < 2^128`, `k × PRICE_TICK_ONE < 2^27`), so no product needs `mulDiv`.
+Linked to: UC-9BR1
+
+### Payout Ratios
+
+**FR-9BRM** `When a burn or a collect pays USDC, the system shall compute the USDC ratio as the smaller of 1 and (usdc.balanceOf(vault) + the pairs the merge produces − totalEscrowed, floored at zero) ÷ (totalUsdcOwed() + totalFeesOwed()), read before the debit.`
+Fit Criterion: Given three positions of the R9 example, the vault at 5700, and a USDC balance drained to half of the 742,063,500 owed, each burn pays `247,354,500 / 2 = 123,677,250` USDC. Escrowed USDC is not in the numerator, because it is senior (decision C7), and not in the denominator, because the reclaim applies no ratio.
+Linked to: UC-9BR2
+
+**FR-9BRN** `When a burn pays YES, the system shall compute the YES ratio as the smaller of 1 and (the vault's YES balance − the pairs the merge produces) ÷ totalYesOwed(), read before the debit.`
+Fit Criterion: Given 270 YES owed to three positions and 150 held, the ratio is `150 / 270 = 5/9`, and each burn pays `90 × 150 / 270 = 50` YES; after the first burn 100 are held against 180 owed, the same ratio.
+Linked to: UC-9BR2
+
+**FR-9BRO** `When a burn pays NO, the system shall compute the NO ratio as the smaller of 1 and (the vault's NO balance − the pairs the merge produces) ÷ totalNoOwed(), read before the debit.`
+Fit Criterion: Given 90 NO owed and 60 held, the burn pays `90 × 60 / 90 = 60` NO.
+Linked to: UC-9BR2
+
+**FR-9BRP** `While an asset's holding covers its total, the system shall cap that asset's ratio at 1.`
+Fit Criterion: Given a holding at or above the total, the ratio reads exactly 1 and the payout is the owed amount. A surplus is never distributed as a bonus: an LP receives what is owed and no more, so a donated or stranded balance cannot be drained by whoever exits first. Given a zero total for an asset, the ratio is 1 and no division by zero occurs.
+Linked to: UC-9BR2
+
+**FR-9BRQ** `The system shall compute the three ratios independently of one another.`
+Fit Criterion: Given a vault short of YES but holding enough USDC, the YES ratio is below 1 while the USDC ratio reads 1, and a burn is reduced only on its YES leg. A shortfall in one asset never cuts a payout in an asset the vault covers in full.
+Linked to: UC-9BR2
+
+**FR-9BRR** `When a burn pays, the system shall pay usdcOwed + feesOwed times the USDC ratio and tokenOwed times the band's token ratio, each rounded down and never above what is held; when a collect pays, the system shall pay the fees owed times the USDC ratio; and each shall debit the totals by the full scaled owed amount, so every later claimant meets the same ratio.`
+Fit Criterion: Given the three-burn cases of FR-9BRM and FR-9BRN, the three burns pay the same share each, and after the third the vault holds nothing of the short asset and its total reads zero. Given a collect owed 10 USDC at a ratio of 0.4, it pays 4, sets `tokensOwed` to zero, and debits the full scaled claim. The reclaim paths apply no ratio (decision C7).
+Linked to: UC-9BR2
+
+**FR-9BRS** `The system shall not revert, halt, pause, or emit an event when any ratio is below 1.`
+Fit Criterion: Given a vault short in USDC and in the band's token, a burn and a collect each succeed and pay their reduced amounts, with no event other than the ones a covered payout emits. A solvency assertion on a payout path would brick withdrawals during the shortfall the ratio exists to absorb (ADR-9BSK). Detection is off-chain, against the views of FR-9BR6.
+Linked to: UC-9BR2
+
+## Non-Functional Requirements
+
+**NFR-9BRT** Security: `A ledger debit in _burn or _collect shall saturate at zero and never revert; a ledger write in updateTick or mergePositions shall use checked arithmetic, so a ledger bug reverts the Operator's call and never a payout.`
+Fit Criterion: no burn or collect reverts on a ledger write under any interleaving of mints, burns, collects, fee reports, merges, freezes, and tick moves reachable by fuzzing, and the invariant harness records no undocumented revert of `updateTick`. An underflowing debit on an exit path would be a solvency assertion by accident (ADR-COEN).
+
+**NFR-9BRU** Security: `No ledger read or write shall introduce a revert into burnPosition, burnPositionFor, collect, or collectFor.`
+Rationale: these are the paths LP capital leaves by, and `burnPosition` is the unconditional escape hatch (FEAT-7G40 NFR-7G5B). `reclaimDeposit` and `reclaimDepositFor` read no total.
+
+**NFR-9BRV** Gas: `Ledger maintenance shall add constant-cost work per call site, and constant-cost work per segment in updateTick.`
+Fit Criterion: the added cost at each call site is independent of the number of live positions, and `updateTick`'s added cost grows only with the number of segments it traverses, bounded by the 256-crossing cap (FEAT-TVS0 ADR-TVUW) plus the trailing segment. Measured cold on the prototype on 2026-09-14: about 14,700 more gas on a zero-crossing move of 50 ticks, 16,000 more on a move with one boundary crossing, 50,900 more on the first crossing of a mint tick, 25,600 more on a mint, 31,700 more on a burn, 7,800 more on a collect, and 5,300 more on a fee report.
+
+**NFR-9BRW** Precision: `Ratio application shall round down.`
+Fit Criterion: a scaled payout never exceeds the exact proportional share, and the sum of every per-position floor never exceeds the floor of the sum, so the payouts never exceed what is held. The truncated dust stays in the vault, as the Q128 fee dust does.
+
+**NFR-9BRX** Testability: `The ledger's conservation property shall be an exact invariant: the four scaled totals equal the sum over every live position of its scaled claim at currentTick and its scaled fee claim, with no tolerance.`
+Fit Criterion: `invariant_ledgerEqualsSumOfClaims` in `test/invariants/SolvencyLedger.t.sol` holds over fuzzed mints with deposits that rarely divide by the width, moves that cross nothing, end between ticks, cross mint ticks, and leave the price scale, fee reports, collects, burns, merges, and a freeze, with the sum computed per level in the test; and `invariant_noSideLiquidity` holds beside it. The invariant fails with the trailing segment removed, with the pre-crossing segment removed, and with `liquidityNet` applied before the segment (checked by mutation on 2026-09-14).
+
+**NFR-9BRY** Security: `Ledger updates shall occur in the effects phase, before any token transfer.`
+Fit Criterion: every total reaches its post-operation value before the first external call, so a recipient re-entering through the ERC-1155 receive hook reads a ledger that already reflects the payout in flight and cannot compute a ratio against a stale, overstated obligation.
+
+**NFR-COEV** Bound: `notifyFees shall accept every amount below 2^128 base units and shall revert for every amount above 2^128.`
+Fit Criterion: Given an amount of `2^128 − 1`, the report succeeds and `totalFeesOwedX128` rises by `growth × activeLiquidity`; given `2^128 + 1`, the report reverts with an arithmetic panic before any state changes and pulls no USDC, because the credit is `amount × 2^128 − (amount × 2^128 mod activeLiquidity)`, which no longer fits in 256 bits. At exactly `2^128` the credit is `2^256 − (2^256 mod activeLiquidity)`, which fits unless `activeLiquidity` is a power of two. The bound is 3.4 × 10^32 USDC, and the user accepted it on 2026-09-14 (FEAT-TOGR FR-TOH3).
+
+## Acceptance
+
+> The feature is complete when all of the following are true:
+
+- All scenarios in UC-9BR0, UC-9BR1, and UC-9BR2 pass against the real ConditionalTokens bytecode
+- The four totals are maintained incrementally; no code path iterates positions to compute one
+- No ledger read or write consults a price other than `currentTick`
+- A mint and its burn cancel exactly with a deposit that does not divide by the width
+- `totalYesOwed()` and `totalNoOwed()` are independent: a test drives one YES band and one NO band and asserts neither total nets against the other
+- `updateTick` accrues every segment: multi-crossing, zero-crossing, a trailing segment to a `newTick` off an initialized tick, and a mint tick crossed like a boundary; three chunks equal one call and a reversal restores the mint totals
+- A test pins the ordering of FR-9BRI by asserting the accrued shift against the pre-crossing split
+- The freeze leaves every total and `noSideLiquidity` unchanged; a merge leaves the principal totals and debits exactly the fee dust
+- A covered vault pays every burn and collect in full
+- A short vault pays three burns in a row the same ratio, short of YES and short of USDC
+- A vault whose USDC balance is below `totalEscrowed` pays zero USDC and does not revert
+- A collect at a ratio pays its share, sets `tokensOwed` to zero, and emits `FeesCollected` with both amounts
+- No payout path reverts on a shortfall (FR-9BRS, NFR-9BRT)
+- A position devalued purely by price movement is paid in full
+- `invariant_ledgerEqualsSumOfClaims`, `invariant_noSideLiquidity`, and `invariant_payoutsNeverExceedHeld` hold in `test/invariants/SolvencyLedger.t.sol`
+- Forge fmt passes; no console.log in production code
+- `forge build --sizes --skip test --skip script` exits 0
+- Coverage gate met against `.molcajete/settings.json` `testing.thresholds`
+- FEATURES.md status is `implemented`

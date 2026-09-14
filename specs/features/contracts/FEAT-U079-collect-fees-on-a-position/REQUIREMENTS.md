@@ -4,13 +4,13 @@ name: Collect Fees on a Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 3
-refs: [FEAT-TVS0, FEAT-6HBN, FEAT-3ZRI, FEAT-JAIJ]
+version: 4
+refs: [FEAT-TVS0, FEAT-6HBN, FEAT-3ZRI, FEAT-JAIJ, FEAT-9BQZ]
 ---
 
 # Collect Fees on a Position
 
-> Enables an LP to withdraw accumulated trading fees from their position without removing it, in one call by the LP's Safe or one relayed call with the owner key's signature, using the v3 feeGrowthInside accumulator to compute what is owed, merging the vault's pairs first, paying what the vault holds above escrow, and keeping any unpaid remainder for a later collect.
+> Enables an LP to withdraw accumulated trading fees from their position without removing it, in one call by the LP's Safe or one relayed call with the owner key's signature, using the v3 feeGrowthInside accumulator to compute what is owed, merging the vault's pairs first and paying its share of what the vault holds above escrow under the solvency ledger (FEAT-9BQZ).
 
 ## Non-Goals
 
@@ -47,8 +47,8 @@ Linked to: UC-U07A
 
 ### Payout
 
-**FR-U07K** `When collect computes a nonzero owed amount, the system shall merge the vault's complete sets, transfer the smaller of the owed amount and the USDC available (usdc.balanceOf(vault) + the pairs merged − totalEscrowed, floored at zero) to the position's owner, keep the unpaid remainder in the position's tokensOwed, and emit FeesCollected with positionId, owner, and the amount paid.`
-Fit Criterion: Given owed > 0 and a vault that holds at least that much above escrow, the LP's USDC balance increases by exactly the owed amount, `tokensOwed` is zero, and `FeesCollected(positionId, owner, owed)` is emitted. Given owed = 10 USDC and 4 USDC above escrow, the call pays 4, does not revert, leaves `tokensOwed = 6`, and a later collect with 6 USDC available pays 6. Given a vault whose USDC balance is below `totalEscrowed`, the call pays zero, does not revert, and keeps the whole amount in `tokensOwed`. Decisions C6, C7, and O2 (ADR-BMF6 in FEAT-7G40).
+**FR-U07K** `When collect computes a nonzero owed amount, the system shall merge the vault's complete sets, transfer the owed amount times the USDC ratio of FEAT-9BQZ (rounded down, never above what is held) to the position's owner, set the position's tokensOwed to zero, debit totalFeesOwedX128 by the position's full scaled fee claim, and emit FeesCollected with positionId, owner, the amount owed, and the amount paid.`
+Fit Criterion: Given owed > 0 and a covered vault, the LP's USDC balance increases by exactly the owed amount, `tokensOwed` is zero, and `FeesCollected(positionId, owner, owed, owed)` is emitted. Given owed = 10 USDC and a USDC ratio of 0.4, the call pays 4, does not revert, leaves `tokensOwed = 0`, emits `FeesCollected(positionId, owner, 10e6, 4e6)`, and a later collect owes only the fees that grew since. Given a vault whose USDC balance is below `totalEscrowed`, the call pays zero, does not revert, and emits `FeesCollected(positionId, owner, owed, 0)`. Decisions C6, C7, and O2 (ADR-COEN in FEAT-9BQZ).
 Linked to: UC-U07A, UC-BMF8
 
 **FR-U07L** `When collect computes zero owed fees, the system shall succeed without performing a USDC transfer.`
@@ -74,7 +74,7 @@ Linked to: UC-U07A, UC-BMF8
 ### Operator-Relayed Path
 
 **FR-BMF9** `When the Operator calls collectFor(lp, positionId, nonce, deadline, signature) with the owner key's signature over CollectIntent(address lp,uint256 positionId,uint256 nonce,uint256 deadline), the system shall run the same collect as the self-service path and pay lp.`
-Fit Criterion: Given a valid `CollectIntent` signed by the owner key of `lp`, the LP's USDC balance increases by the amount `collect` would pay, `FeesCollected(positionId, lp, paid)` is emitted, and the Operator's balances are unchanged apart from gas. Decision C3.
+Fit Criterion: Given a valid `CollectIntent` signed by the owner key of `lp`, the LP's USDC balance increases by the amount `collect` would pay, `FeesCollected(positionId, lp, owed, paid)` is emitted, and the Operator's balances are unchanged apart from gas. Decision C3.
 Linked to: UC-BMF8
 
 **FR-BMFA** `The system shall verify the collect signature with _verifySafeOwnerSignature, revert IntentExpired when block.timestamp > deadline, revert IntentAlreadyUsed when usedCollectAuthorizations[structHash] is set, record the struct hash before any external call, and revert NotPositionOwner when position.owner != lp.`
@@ -92,7 +92,7 @@ Rationale: measured cold on the build of 2026-09-13 at 99,646 call gas with noth
 
 **NFR-U07Q** Security: `The system shall apply an inline nonReentrant modifier on collect to prevent reentrancy via the USDC transfer callback.`
 
-**NFR-U07R** Security: `The system shall follow checks-effects-interactions ordering in collect: validate ownership and read the balances first (both token balances, the USDC balance, and the amount to pay), update position state (the feeGrowthInsideLastX128 snapshot and the remainder in tokensOwed) second, then merge the complete sets and transfer USDC last.`
+**NFR-U07R** Security: `The system shall follow checks-effects-interactions ordering in collect: validate ownership and read the balances and the ledger totals first (both token balances, the USDC balance, totalUsdcOwed and totalFeesOwed, and the amount to pay), update position state and the ledger second (the feeGrowthInsideLastX128 snapshot, tokensOwed to zero, and the fee total's debit), then merge the complete sets and transfer USDC last.`
 Rationale: the merge pays exactly `min(yes, no)` USDC, so the amount to pay is known from view reads before any effect, and CLAUDE.md checklist item 1 holds without exception.
 
 **NFR-BMFC** Security: `collectFor shall carry an OPERATOR TRUST ASSUMPTION NatSpec block with an MEV analysis section.`
@@ -108,7 +108,7 @@ Fit Criterion: the block states that the Operator can delay a collect and choose
 - Non-owner callers cannot collect (FR-U07M verified in SC-U07D)
 - Sequential collects with no fee growth produce zero payout (no double-counting, SC-U07G)
 - Collect works in Active, WindDown, and Cancelled phases (SC-U07F, SC-BMFD)
-- Every paying collect merges the vault's pairs first, pays what the vault holds above escrow, and keeps its remainder (SC-BMFE, SC-BMFF)
+- Every paying collect merges the vault's pairs first, pays the owed amount times the USDC ratio, and settles the claim (SC-BMFE, SC-COEZ)
 - All scenarios in UC-BMF8 pass, and a `MintIntent`, `ReclaimIntent`, or `BurnIntent` signature is rejected by `collectFor`
 - `collectFor` refreshes `lastOperatorActivityTimestamp`; `collect` does not
 - OPERATOR TRUST ASSUMPTION NatSpec block with an MEV analysis present on `collectFor`

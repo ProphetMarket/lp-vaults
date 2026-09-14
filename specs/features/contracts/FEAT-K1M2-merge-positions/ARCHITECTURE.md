@@ -3,7 +3,7 @@ id: FEAT-K1M2
 name: Merge Positions
 use_cases: [UC-K1M8]
 scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC, SC-3XUP, SC-3XUQ, SC-AFPQ, SC-AFPR]
-last_update: 2026-09-13
+last_update: 2026-09-14
 ---
 
 # Architecture: Merge Positions
@@ -51,6 +51,7 @@ erDiagram
 - After merge: tick `liquidityGross` unchanged (same total liquidity on same range)
 - After merge: consumed positions have `liquidity == 0`
 - `feeGrowthInsideLastX128` on survivor is set to current value to prevent double-counting
+- After merge: the three principal totals of FEAT-9BQZ are unchanged and `totalFeesOwedX128` fell by exactly the fee dust the floors dropped, so the ledger equals the survivor's scaled fee claim (FR-9BRH)
 
 ## Component Inventory
 

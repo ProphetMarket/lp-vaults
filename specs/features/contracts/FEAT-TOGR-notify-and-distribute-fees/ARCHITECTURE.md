@@ -2,8 +2,8 @@
 id: FEAT-TOGR
 name: Notify and Distribute Fees
 use_cases: [UC-TOGS]
-scenarios: [SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY, SC-ASNK]
-last_update: 2026-09-13
+scenarios: [SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY, SC-ASNK, SC-COF0]
+last_update: 2026-09-14
 ---
 
 # Architecture: Notify and Distribute Fees
@@ -117,6 +117,7 @@ erDiagram
 | SC-TOGX | Revert for zero amount | `src/LPVault.sol:notifyFees()` |
 | SC-TOGY | Q128 truncation dust behavior | `src/LPVault.sol:notifyFees()`, `src/LPVault.sol:_mulDiv()` |
 | SC-ASNK | Revert when the Operator did not fund the report | `src/LPVault.sol:notifyFees()`, `src/LPVault.sol:_safeTransferFrom()` |
+| SC-COF0 | Revert when the amount is above 2^128 | `src/LPVault.sol:notifyFees()` (the checked fee-total credit) |
 
 ## Architecture Decisions
 

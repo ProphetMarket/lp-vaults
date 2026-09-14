@@ -4,7 +4,7 @@ name: Emergency Cancel All Positions
 module: contracts
 domain: "@vault"
 status: implemented
-version: 6
+version: 7
 refs: [FEAT-REPZ, FEAT-JGE7, FEAT-TVS0, FEAT-7G40, FEAT-U079, FEAT-JAIJ, FEAT-6HBN]
 ---
 
@@ -31,7 +31,7 @@ refs: [FEAT-REPZ, FEAT-JGE7, FEAT-TVS0, FEAT-7G40, FEAT-U079, FEAT-JAIJ, FEAT-6H
 ### Emergency Cancel
 
 **FR-JXQP** `When any address calls emergencyCancelAll() after the vault's emergency-cancel timelock has elapsed since the last Operator action, the system shall set the vault phase to Cancelled (3), change no other state, transfer no asset, and emit an EmergencyCancelExecuted event.`
-Fit Criterion: Given `block.timestamp - lastOperatorActivityTimestamp >= emergencyCancelTimelock`, for any caller, with or without a position: `phase == 3`, `EmergencyCancelExecuted(caller)` is emitted, and `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, `totalEscrowed`, every position record, every tick record, and every bitmap word are unchanged. The vault's USDC and outcome-token balances are unchanged. The call costs the same gas for any number of positions (NFR-BZBV). Decision C9.
+Fit Criterion: Given `block.timestamp - lastOperatorActivityTimestamp >= emergencyCancelTimelock`, for any caller, with or without a position: `phase == 3`, `EmergencyCancelExecuted(caller)` is emitted, and `activeLiquidity`, `noSideLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, `totalEscrowed`, the four ledger totals of FEAT-9BQZ, every position record, every tick record, and every bitmap word are unchanged. The vault's USDC and outcome-token balances are unchanged. The call costs the same gas for any number of positions (NFR-BZBV). Decision C9.
 Linked to: UC-JXQW
 
 **FR-JXQQ** `If emergencyCancelAll() is called before the vault's emergency-cancel timelock has elapsed since the last Operator action, then the system shall revert.`

@@ -3,7 +3,7 @@ id: UC-TOGS
 name: Operator Notify Fee Revenue
 feature: FEAT-TOGR
 status: implemented
-version: 3
+version: 4
 actor: Operator
 ---
 
@@ -177,6 +177,29 @@ Operator calls `notifyFees(amount)` on the vault.
 - `feeGrowthGlobalX128` is unchanged
 - The vault's and the Operator wallet's USDC balances are unchanged
 - `lastOperatorActivityTimestamp` is unchanged, because a reverted call is not proof of life
+
+**Side Effects:**
+- No storage updates
+- No events emitted
+- No USDC moves
+
+---
+
+### SC-COF0: Revert when the amount is above 2^128
+
+**Given:**
+- `activeLiquidity > 0`
+- The Operator wallet holds and has approved `2^128 + 1` USDC base units, an amount above 3.4 × 10^32 USDC
+
+**Steps:**
+1. Operator calls `notifyFees(2^128 + 1)`
+2. System computes the accumulator increment and multiplies it by `activeLiquidity` for the fee total of the solvency ledger (FEAT-9BQZ FR-9BRA), which does not fit in 256 bits
+3. System reverts with an arithmetic panic before the USDC pull
+
+**Outcomes:**
+- Call reverts
+- `feeGrowthGlobalX128`, `totalFeesOwedX128`, and both USDC balances are unchanged
+- A report of `2^128 − 1` succeeds and credits `growth × activeLiquidity` to the fee total (NFR-COEV)
 
 **Side Effects:**
 - No storage updates

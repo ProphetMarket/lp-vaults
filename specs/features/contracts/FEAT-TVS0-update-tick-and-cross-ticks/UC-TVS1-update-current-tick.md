@@ -3,7 +3,7 @@ id: UC-TVS1
 name: Update Current Tick
 feature: FEAT-TVS0
 status: implemented
-version: 5
+version: 6
 actor: Operator
 ---
 
@@ -22,6 +22,8 @@ actor: Operator
 Operator calls `updateTick(int24 newTick)` on the vault.
 
 The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the shared Operator-liveness mechanism owned by FEAT-JXQO (FR-JXQS): every successful Operator-gated call refreshes it, and a reverted call does not. A report with the current tick (SC-TVS7) succeeds and refreshes the timer, so the keeper's 60-second report is proof of life on a market whose price does not move. `updateTick` keeps its pause and phase checks, so while the vault is paused or wound down the keeper calls `heartbeat()` instead.
+
+Since R11 every move also shifts the four totals of the solvency ledger (FEAT-9BQZ) for each segment it traverses, and an interior mint tick is crossed like a boundary and counted in `ticksCrossed`. The scenarios below assert the tick state; the totals are asserted in UC-9BR1.
 
 ---
 

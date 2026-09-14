@@ -3,7 +3,7 @@ id: UC-BMF8
 name: Operator Collect Fees for LP
 feature: FEAT-U079
 status: implemented
-version: 1
+version: 2
 actor: Operator
 ---
 
@@ -41,7 +41,7 @@ The Operator calls `collectFor(lp, positionId, nonce, deadline, signature)` on t
 - `lastOperatorActivityTimestamp == block.timestamp`
 
 **Side Effects:**
-- `FeesCollected(positionId, safe, F)` emitted
+- `FeesCollected(positionId, safe, F, F)` emitted
 - `usedCollectAuthorizations[structHash]` storage: set to true
 - Position storage: `feeGrowthInsideLastX128` updated, `tokensOwed = 0`
 - USDC transferred from vault to the Safe
@@ -65,7 +65,7 @@ The Operator calls `collectFor(lp, positionId, nonce, deadline, signature)` on t
 - The Safe receives exactly F2, not F1 + F2
 
 **Side Effects:**
-- `FeesCollected(positionId, safe, F2)` emitted
+- `FeesCollected(positionId, safe, F2, F2)` emitted
 - `usedCollectAuthorizations` storage: both struct hashes set to true
 - Position storage: `feeGrowthInsideLastX128` updated
 

@@ -4,7 +4,7 @@ name: Notify and Distribute Fees
 module: contracts
 domain: "@fees"
 status: implemented
-version: 2
+version: 3
 refs: [FEAT-T7AF]
 ---
 
@@ -29,8 +29,8 @@ refs: [FEAT-T7AF]
 
 ### Fee Accumulator Update
 
-**FR-TOGZ** `When the Operator calls notifyFees(amount), the system shall increment feeGrowthGlobalX128 by mulDiv(amount, 2^128, activeLiquidity) and emit a FeesNotified event with amount and the new feeGrowthGlobalX128.`
-Fit Criterion: Given activeLiquidity > 0 and amount > 0, feeGrowthGlobalX128 increases by exactly mulDiv(amount, Q128, activeLiquidity), and a FeesNotified(amount, feeGrowthGlobalX128) event is emitted.
+**FR-TOGZ** `When the Operator calls notifyFees(amount), the system shall increment feeGrowthGlobalX128 by growth = mulDiv(amount, 2^128, activeLiquidity), increment totalFeesOwedX128 by growth × activeLiquidity (FEAT-9BQZ FR-9BRA), and emit a FeesNotified event with amount and the new feeGrowthGlobalX128.`
+Fit Criterion: Given activeLiquidity > 0 and amount > 0, feeGrowthGlobalX128 increases by exactly mulDiv(amount, Q128, activeLiquidity), totalFeesOwedX128 increases by that increment times activeLiquidity, and a FeesNotified(amount, feeGrowthGlobalX128) event is emitted.
 Linked to: UC-TOGS
 
 ### Fee Funding
@@ -60,7 +60,7 @@ Linked to: UC-TOGS
 ### Overflow Protection
 
 **FR-TOH3** `While computing the feeGrowthGlobalX128 increment, the system shall use an inline mulDiv to perform overflow-safe Q128 multiplication and division, truncating downward.`
-Fit Criterion: Given amount * 2^128 would overflow uint256 in a naive multiply, the mulDiv produces the correct truncated result without overflow. The Q128 arithmetic produces the same value as (amount * 2^128) / activeLiquidity computed with unbounded precision, truncated toward zero.
+Fit Criterion: Given amount * 2^128 would overflow uint256 in a naive multiply, the mulDiv produces the correct truncated result without overflow. The Q128 arithmetic produces the same value as (amount * 2^128) / activeLiquidity computed with unbounded precision, truncated toward zero. Given amount above 2^128 base units, the call reverts with an arithmetic panic before any state changes, because the fee total's credit, amount × 2^128 less its remainder modulo activeLiquidity, no longer fits in 256 bits (FEAT-9BQZ NFR-COEV, the bound the user accepted on 2026-09-14); an amount of 2^128 − 1 succeeds.
 Linked to: UC-TOGS
 
 ## Non-Functional Requirements

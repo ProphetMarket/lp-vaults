@@ -3,7 +3,7 @@ id: UC-U07A
 name: Collect Position Fees
 feature: FEAT-U079
 status: implemented
-version: 4
+version: 5
 actor: LP
 ---
 
@@ -43,7 +43,7 @@ The LP's Safe calls `collect(positionId)`.
 - Position remains active with updated fee snapshot
 
 **Side Effects:**
-- `FeesCollected(positionId, owner, amount)` event emitted
+- `FeesCollected(positionId, owner, amount, amount)` event emitted
 - Position storage: `feeGrowthInsideLastX128` updated to current `feeGrowthInsideX128`
 - USDC balance: vault decreases by `amount`, LP increases by `amount`
 - No position deletion or liquidity change
@@ -127,7 +127,7 @@ The LP's Safe calls `collect(positionId)`.
 - Position remains active with updated fee snapshot
 
 **Side Effects:**
-- `FeesCollected(positionId, owner, amount)` event emitted
+- `FeesCollected(positionId, owner, amount, amount)` event emitted
 - Position storage: `feeGrowthInsideLastX128` updated
 - USDC transferred from vault to LP
 - No vault phase change
@@ -151,7 +151,7 @@ The LP's Safe calls `collect(positionId)`.
 - The snapshot ensures any future collect starts from G2
 
 **Side Effects:**
-- `FeesCollected(positionId, owner, newFeesOnly)` event emitted
+- `FeesCollected(positionId, owner, newFeesOnly, newFeesOnly)` event emitted
 - Position storage: `feeGrowthInsideLastX128` updated from G1 to G2
 - USDC transfer reflects only the delta, proving no double-counting
 - No previous collect's fees are re-paid
@@ -200,7 +200,7 @@ The LP's Safe calls `collect(positionId)`.
 - LP receives exactly L3 * (G3 - G2) / Q128 USDC, the growth since the mint and nothing else
 
 **Side Effects:**
-- `FeesCollected(P3, owner, owed)` event emitted
+- `FeesCollected(P3, owner, owed, owed)` event emitted
 - Position storage: `feeGrowthInsideLastX128` updated
 - USDC balance: vault decreases by `owed`, LP increases by `owed`
 
@@ -223,7 +223,7 @@ The LP's Safe calls `collect(positionId)`.
 
 **Side Effects:**
 - USDC transferred to the Safe
-- `FeesCollected(positionId, safe, 499)` emitted
+- `FeesCollected(positionId, safe, 499, 499)` emitted
 - `tokensOwed == 0` and the snapshot advanced
 - No phase change
 
@@ -246,33 +246,34 @@ The LP's Safe calls `collect(positionId)`.
 - LP receives F in USDC
 
 **Side Effects:**
-- `CompleteSetsMerged(safe, 50)` emitted before `FeesCollected(positionId, safe, F)` in the log
+- `CompleteSetsMerged(safe, 50)` emitted before `FeesCollected(positionId, safe, F, F)` in the log
 - `PositionsMerge` emitted by ConditionalTokens
 - USDC balance: vault gains 50 from the merge and pays F
 
 ---
 
-### SC-BMFF: Collect keeps its unpaid remainder
+### SC-COEZ: Collect pays its share and settles
 
 **Given:**
 - The Safe's position is owed 10 USDC in fees
-- Case A: the vault holds 4 USDC above `totalEscrowed`
+- Case A: the USDC ratio is 0.4, because the vault holds above `totalEscrowed` 40 percent of `totalUsdcOwed() + totalFeesOwed()` (FEAT-9BQZ FR-9BRM)
 - Case B: the vault's USDC balance is below `totalEscrowed`
 
 **Steps:**
 1. The Safe calls collect(positionId)
-2. System computes owed = 10 and available = 4 (case A) or 0 (case B)
-3. System writes the snapshot and stores the remainder in tokensOwed
-4. System transfers the paid amount, when it is above zero
+2. System computes owed = 10 and the USDC ratio, 0.4 (case A) or 0 (case B)
+3. System writes the snapshot, sets `tokensOwed` to zero, and debits `totalFeesOwedX128` by the full scaled claim
+4. System transfers the paid amount, when it is above zero, and emits the event with both amounts
 
 **Outcomes:**
-- Case A: LP receives 4 USDC, `tokensOwed == 6`, and a later collect after the vault gains 6 USDC pays 6
-- Case B: LP receives nothing, the call does not revert, and `tokensOwed == 10`
-- The call never reverts on the comparison, and escrowed USDC is never paid (decision C7)
+- Case A: LP receives 4 USDC, `tokensOwed == 0`, and a later collect owes only the fees that grew since
+- Case B: LP receives nothing, the call does not revert, and `tokensOwed == 0`
+- The cut is final (ADR-COEN in FEAT-9BQZ): the call never reverts on the comparison, and escrowed USDC is never paid (decision C7)
 
 **Side Effects:**
-- Case A: `FeesCollected(positionId, safe, 4)` emitted; position storage: `tokensOwed = 6`, `feeGrowthInsideLastX128` updated
-- Case B: no `FeesCollected` event, no USDC transfer; position storage: `tokensOwed = 10`, `feeGrowthInsideLastX128` updated
+- Case A: `FeesCollected(positionId, safe, 10, 4)` emitted; position storage: `tokensOwed = 0`, `feeGrowthInsideLastX128` updated
+- Case B: `FeesCollected(positionId, safe, 10, 0)` emitted, no USDC transfer; position storage: `tokensOwed = 0`, `feeGrowthInsideLastX128` updated
+- `totalFeesOwedX128` storage: decreased by the full scaled fee claim in both cases
 - `totalEscrowed` unchanged
 
 ---

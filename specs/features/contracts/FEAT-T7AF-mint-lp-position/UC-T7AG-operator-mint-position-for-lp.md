@@ -3,7 +3,7 @@ id: UC-T7AG
 name: Operator Mint Position for LP
 feature: FEAT-T7AF
 status: implemented
-version: 6
+version: 7
 actor: Operator
 ---
 
@@ -56,7 +56,10 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 - `PositionMinted(positionId, Safe, 20, 80, 50, liquidity, 600, intentId)` event emitted
 - `positions[positionId]` storage: new record created
 - `ticks[20]` storage: initialized with feeGrowthOutsideX128 = feeGrowthGlobalX128, liquidityGross and liquidityNet updated
-- `ticks[80]` storage: initialized with feeGrowthOutsideX128 = 0, liquidityGross and liquidityNet updated
+- `ticks[80]` storage: initialized with feeGrowthOutsideX128 = 0, liquidityGross and liquidityNet updated, noLiquidityNet decreased by liquidity
+- `ticks[50]` storage (the interior mint tick): initialized with feeGrowthOutsideX128 = feeGrowthGlobalX128, liquidityGross increased by liquidity, noLiquidityNet increased by liquidity, and its bitmap bit set (FEAT-TVS0 ADR-COEW)
+- `noSideLiquidity` storage: increased by liquidity, because an in-range mint enters on the NO side of its mint tick
+- `totalUsdcOwedScaled` storage (FEAT-9BQZ): increased by liquidity × 60 × 10000
 - `usedIntents[intentId]` storage: set to true
 - `pendingDeposits[intentId]` storage: deleted
 - `totalEscrowed` storage: decreased by 600

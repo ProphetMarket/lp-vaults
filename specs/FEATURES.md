@@ -21,14 +21,15 @@
 | FEAT-K1MD | Pause Trading | Admin-callable circuit breaker that halts trading entry points while keeping LP exit paths live | implemented |
 | FEAT-KX5N | Upgradeable Vault Implementation Pointer | Admin-driven two-step timelocked upgrade of the factory's implementation pointer with per-clone version tracking | implemented |
 | FEAT-6HBN | Complete-Set Merge and Resolution Redemption | Any wallet merges the vault's matched YES and NO tokens into USDC held by the vault, in every phase, and every payout merges first; the Oracle's redemption after resolution is reserved for Part 6 of the audit plan | implemented |
+| FEAT-9BQZ | Vault Solvency Ledger | Running totals of what the vault owes per asset in the claim's pre-division unit, moved on every mint, burn, collect, fee report, merge, and tick segment, and a per-asset ratio that every burn and collect applies, so a shortfall is a cut every claimant takes alike (decision O2) | implemented |
 
 ## @positions
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
 | FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation that consumes a per-intent escrow, with v3-style tick initialization, fee-snapshot anchoring, and a clamped mint tick on every position | implemented |
-| FEAT-U079 | Collect Fees on a Position | LP withdraws accumulated trading fees from a position, by the Safe or relayed with the owner key's CollectIntent, using the v3 feeGrowthInside accumulator, merging the vault's pairs first, paying what the vault holds above escrow, and keeping any remainder | implemented |
-| FEAT-7G40 | Burn LP Position | LP-initiated closure of a position, by the Safe or relayed with the owner key's BurnIntent, that values the claim from its mint tick (decision C26), merges the vault's pairs, removes the liquidity from both ticks, and pays USDC plus one outcome token, the smaller of what is owed and what the vault holds per asset | implemented |
+| FEAT-U079 | Collect Fees on a Position | LP withdraws accumulated trading fees from a position, by the Safe or relayed with the owner key's CollectIntent, using the v3 feeGrowthInside accumulator, merging the vault's pairs first, and paying its share of what the vault holds above escrow at the ledger's USDC ratio | implemented |
+| FEAT-7G40 | Burn LP Position | LP-initiated closure of a position, by the Safe or relayed with the owner key's BurnIntent, that values the claim from its mint tick (decision C26), merges the vault's pairs, removes the liquidity from both ticks, and pays USDC plus one outcome token, each asset's owed amount times its ratio from the solvency ledger | implemented |
 | FEAT-JAIJ | LP Escape Hatch | LP-initiated recovery of the USDC escrowed against a mint intent that the Operator did not mint, in one call by the LP's Safe or one relayed call with the owner key's signature, in every vault phase | implemented |
 | FEAT-3ZRI | Escrow Deposit for Mint Intent | Operator-gated escrow of an LP's USDC from the LP's Safe against a signed mint intent, recorded per intentId with the Safe, the amount, and the intent hash, so the mint and the reclaim spend exactly what was recorded | implemented |
 | FEAT-K1M2 | Merge Positions | Operator-called housekeeping to combine distinct same-range same-owner same-mint-tick positions into a single record preserving liquidity and fees | implemented |

@@ -2,7 +2,7 @@
 id: FEAT-U079
 name: Collect Fees on a Position
 use_cases: [UC-U07A, UC-BMF8]
-scenarios: [SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-BMFF, SC-BMFG, SC-BMFH, SC-BMFI, SC-BMFJ, SC-BMFK, SC-BMFL, SC-BMFM, SC-BMG6]
+scenarios: [SC-U07B, SC-U07C, SC-U07D, SC-U07E, SC-U07F, SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-COEZ, SC-BMFG, SC-BMFH, SC-BMFI, SC-BMFJ, SC-BMFK, SC-BMFL, SC-BMFM, SC-BMG6]
 last_update: 2026-09-14
 ---
 
@@ -41,6 +41,7 @@ C4Container
     Container(vault, "LPVault (clone)", "Solidity", "collect and collectFor over one _collect body")
     Container(feeInside, "_computeFeeGrowthInside()", "Solidity internal", "Computes feeGrowthInsideX128 from global and per-tick accumulators")
     Container(avail, "_availableUsdc()", "Solidity internal", "balance + pairs - totalEscrowed, floored at zero (FEAT-7G40)")
+    Container(prorate, "_prorate()", "Solidity internal", "owed x min(1, available / (totalUsdcOwed + totalFeesOwed)), rounded down (FEAT-9BQZ)")
     Container(merge, "_mergeCompleteSets()", "Solidity internal", "Turns min(YES, NO) pairs into USDC (FEAT-6HBN)")
     Container(eip712, "EIP-712 (inlined)", "Solidity internal", "CollectIntent typehash, _verifySafeOwnerSignature")
     Container(safeTransfer, "_safeTransfer()", "Solidity internal", "Handles bool/non-bool ERC-20 returns")
@@ -57,7 +58,8 @@ C4Container
     Rel(feeInside, feeGlobal, "reads", "storage")
     Rel(feeInside, ticks, "reads feeGrowthOutsideX128", "storage")
     Rel(vault, avail, "read what USDC may be paid", "view")
-    Rel(vault, positions, "reads liquidity, snapshot, tokensOwed; writes snapshot and remainder", "storage")
+    Rel(vault, prorate, "the paid amount at the USDC ratio", "internal")
+    Rel(vault, positions, "reads liquidity, snapshot, tokensOwed; writes snapshot and zeroes tokensOwed", "storage")
     Rel(vault, merge, "merge pairs", "first interaction")
     Rel(merge, ctf, "mergePositions", "call")
     Rel(vault, safeTransfer, "transfer the paid USDC")
@@ -75,7 +77,7 @@ erDiagram
         int24 tickUpper "upper bound of price range"
         uint128 liquidity "position liquidity (read-only for collect)"
         uint256 feeGrowthInsideLastX128 "Q128 snapshot at last collect or mint"
-        uint256 tokensOwed "fees rolled up by a merge, plus the unpaid remainder of a short collect"
+        uint256 tokensOwed "fees rolled up by a merge; zero after every collect"
     }
     TICK {
         uint256 feeGrowthOutsideX128 "Q128 fees accrued outside this tick (read-only for collect)"
@@ -94,8 +96,8 @@ erDiagram
 - `feeGrowthInsideLastX128` is set to the current `feeGrowthInsideX128` after every collect -- no double-counting
 - Owed fees for a position can never exceed the total fee revenue distributed since the position was minted
 - `collect` does not modify `liquidity`, `tickLower`, `tickUpper`, or any tick state -- it is read-only on fee accumulators
-- The sum of every position's claimable fees (a remainder in `tokensOwed` included) plus every fee paid by `collect` never exceeds the sum of amounts passed to `notifyFees`, with no slack, because every rounding on the path rounds down
-- A collect pays at most `usdc.balanceOf(vault) + pairs − totalEscrowed`, never reverts on that comparison, and keeps the rest in `tokensOwed`
+- The sum of every position's claimable fees plus every fee paid by `collect` never exceeds the sum of amounts passed to `notifyFees`, with no slack, because every rounding on the path rounds down
+- A collect pays the owed amount times the USDC ratio of FEAT-9BQZ, never above `usdc.balanceOf(vault) + pairs − totalEscrowed`, never reverts on that comparison, and debits the full scaled claim
 - Both collect paths pay the same amount for the same position; `collectFor` refreshes `lastOperatorActivityTimestamp`, `collect` never does
 - A signature valid for one of `MintIntent`, `ReclaimIntent`, `BurnIntent`, or `CollectIntent` is rejected by the other three paths
 
@@ -117,12 +119,12 @@ erDiagram
 
 | Event | Publisher | Payload | Condition | Consumers |
 |-------|-----------|---------|-----------|-----------|
-| `FeesCollected(uint256 positionId, address owner, uint256 amount)` | LPVault | `positionId, owner, amountPaid` | On a successful collect or collectFor with a nonzero paid amount | Off-chain Event Listener |
+| `FeesCollected(uint256 positionId, address owner, uint256 amountOwed, uint256 amountPaid)` | LPVault | `positionId, owner, amountOwed, amountPaid` | On a successful collect or collectFor with a nonzero owed amount; `amountPaid < amountOwed` marks a ratio below 1 | Off-chain Event Listener |
 | `CompleteSetsMerged(address caller, uint256 amount)` | LPVault (FEAT-6HBN) | `caller, amount` | A paying collect found `min(YES, NO) > 0`; emitted before `FeesCollected` | Off-chain Event Listener |
 
 **Non-events (explicit):**
 - Zero-fee collect (SC-U07C, SC-BMFD): no FeesCollected event emitted, no balance read, no merge
-- A short collect that pays zero (SC-BMFF case B): no FeesCollected event, the remainder stays in `tokensOwed`
+- A short collect that pays zero (SC-COEZ case B) still emits `FeesCollected(positionId, owner, owed, 0)` and transfers nothing
 - Failed collect (any revert scenario): no events emitted, no state changes
 
 ## API Surface
@@ -161,7 +163,7 @@ erDiagram
 | SC-8L1E | Collect after the price re-enters the wrapped range pays growth since mint | `src/LPVault.sol:collect()`, `src/LPVault.sol:_computeFeeGrowthInside()`, `src/LPVault.sol:_safeTransfer()` |
 | SC-BMFD | Collect in the Cancelled phase pays the accrued fees | `src/LPVault.sol:collect()` (no phase gate) |
 | SC-BMFE | Collect merges the vault's pairs first | `src/LPVault.sol:_collect()`, `src/LPVault.sol:_mergeCompleteSets()` |
-| SC-BMFF | Collect keeps its unpaid remainder | `src/LPVault.sol:_collect()`, `src/LPVault.sol:_availableUsdc()` |
+| SC-COEZ | Collect pays its share and settles | `src/LPVault.sol:_collect()`, `src/LPVault.sol:_prorate()`, `src/LPVault.sol:_availableUsdc()` |
 | UC-BMF8 | Operator Collect Fees for LP | `src/LPVault.sol:collectFor()`, `src/LPVault.sol:_collect()` |
 | SC-BMFG | Operator collect pays the LP its fees, never the caller | `src/LPVault.sol:collectFor()`, `src/LPVault.sol:_collect()` |
 | SC-BMFH | A second collect with a new nonce pays only the new fees | `src/LPVault.sol:collectFor()`, `COLLECT_INTENT_TYPEHASH` |
@@ -174,7 +176,7 @@ erDiagram
 
 ## Architecture Decisions
 
-Collect follows the Uniswap v3 fee collection pattern (compute feeGrowthInside, delta with snapshot, payout, update snapshot). The `owed` delta in `_collect()` runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF, which owns `_computeFeeGrowthInside()`. The pay-what-is-there rule and the remainder come from decision O2 (ADR-BMF6 in FEAT-7G40); the merge before every payout from decision C26 (ADR-7G5F in FEAT-7G40 and ADR-6HCM in FEAT-6HBN); the separate replay record keyed by the struct hash, with a nonce because a collect repeats, from ADR-85DM in FEAT-7G40; and the phase rule from decision C9.
+Collect follows the Uniswap v3 fee collection pattern (compute feeGrowthInside, delta with snapshot, payout, update snapshot). The `owed` delta in `_collect()` runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF, which owns `_computeFeeGrowthInside()`. The ratio and the settled claim come from decision O2, reversed on 2026-09-14 (ADR-COEN in FEAT-9BQZ, ADR-COEY in FEAT-7G40); the merge before every payout from decision C26 (ADR-7G5F in FEAT-7G40 and ADR-6HCM in FEAT-6HBN); the separate replay record keyed by the struct hash, with a nonce because a collect repeats, from ADR-85DM in FEAT-7G40; and the phase rule from decision C9.
 
 ## Testing Decisions
 

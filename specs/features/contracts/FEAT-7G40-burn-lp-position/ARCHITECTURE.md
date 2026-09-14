@@ -37,8 +37,9 @@ C4Container
     Person(lp, "LP's Safe")
     Person(operator, "Operator")
     Container(vault, "LPVault", "Solidity", "Two entry points, one shared _burn body")
-    Container(claim, "_claim", "Solidity", "Values (usdcOwed, tokenId, tokenOwed) from liquidity, range, mintTick, and currentTick")
-    Container(amounts, "_burnAmounts", "Solidity", "Fees, claim, balances, and the two paid amounts, before any effect")
+    Container(claim, "_claim", "Solidity", "Values the scaled claim (usdcScaled, tokenId, tokenScaled) from liquidity, range, mintTick, and currentTick")
+    Container(amounts, "_burnAmounts", "Solidity", "Fees, the truncated claim, balances, the ledger totals, and the two paid amounts through _prorate, before any effect")
+    Container(ledger, "Solvency ledger (FEAT-9BQZ)", "Solidity", "Four scaled totals; read for the ratios, debited by the full scaled claim")
     Container(eip712, "EIP-712 (inlined)", "Solidity", "BurnIntent typehash, _verifySafeOwnerSignature, _recoverSigner, _deriveSafe")
     Container(merge, "_mergeCompleteSets (FEAT-6HBN)", "Solidity", "Turns min(YES, NO) pairs into USDC first")
     Container(bitmap, "TickBitmap (inlined)", "Solidity", "Clears a tick's bit when liquidityGross reaches zero")
@@ -56,6 +57,8 @@ C4Container
     Rel(amounts, claim, "value the claim", "internal")
     Rel(amounts, ctf, "balanceOf(vault, yes), balanceOf(vault, no)", "view")
     Rel(amounts, usdc, "balanceOf(vault)", "view")
+    Rel(amounts, ledger, "totalUsdcOwed() + totalFeesOwed(), the band's token total", "view")
+    Rel(vault, ledger, "debit the scaled claim and the scaled fees", "storage")
     Rel(vault, ticks_db, "decrements then may delete", "storage")
     Rel(vault, bitmap, "clears bit at liquidityGross == 0")
     Rel(vault, active, "decrements when in range", "storage")
@@ -109,6 +112,7 @@ erDiagram
 - Every asset a burn pays goes to `position.owner`, never to `msg.sender`
 - `usdcPaid <= usdcOwed + feesOwed` and `tokenPaid <= tokenOwed`, and a burn never reverts on either comparison
 - `usdcPaid <= usdc.balanceOf(vault) + pairs − totalEscrowed` at the moment of the burn, so escrowed USDC never pays a burn
+- `usdcPaid == floor((usdcOwed + feesOwed) × ratio)` and `tokenPaid == floor(tokenOwed × ratio)` for the ratios of FEAT-9BQZ, and the totals fall by the full scaled claim
 - `ticks[t].liquidityGross == Σ liquidity of live positions referencing t` holds across burns
 - A tick's bitmap bit is set if and only if `ticks[t].liquidityGross > 0` (`invariant_zeroLiquidityTickHasNoBit` in `test/invariants/TickState.t.sol`)
 - `activeLiquidity == Σ liquidity over live in-range positions` holds across burns
@@ -121,7 +125,7 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | vault contract | `burnPosition` (external, nonReentrant, owner-only), `burnPositionFor` (external, onlyOperator, nonReentrant, touchesHeartbeat), `_burn` (internal, shared body), `_burnAmounts` (internal view, fills `BurnAmounts`), `_claim` (internal view, the closed-form formula), `_removeLiquidityFromTick` (internal), `_clearTickBitmapBit` (internal, now called), `_availableUsdc` (internal view, shared with FEAT-U079), `_tokenBalances` and `_mergeCompleteSets` (internal, FEAT-6HBN), `PRICE_TICK_ONE` (constant, FEAT-T7AF), `BURN_INTENT_TYPEHASH` (constant), `usedBurnAuthorizations` (storage), `PositionBurned` (event), `BurnAmounts` (memory struct) |
+| `src/LPVault.sol` | vault contract | `burnPosition` (external, nonReentrant, owner-only), `burnPositionFor` (external, onlyOperator, nonReentrant, touchesHeartbeat), `_burn` (internal, shared body), `_burnAmounts` (internal view, fills `BurnAmounts` with the truncated claim and the two `_prorate` amounts), `_claim` (internal view, the closed-form formula in its scaled unit, shared with the ledger), `_removeLiquidityFromTick` (internal), `_removeNoSubRange` (internal, FEAT-9BQZ), `_clearTickBitmapBit` (internal, now called), `_availableUsdc` (internal view, shared with FEAT-U079), `_tokenBalances` and `_mergeCompleteSets` (internal, FEAT-6HBN), `PRICE_TICK_ONE` (constant, FEAT-T7AF), `BURN_INTENT_TYPEHASH` (constant), `usedBurnAuthorizations` (storage), `PositionBurned` (event), `BurnAmounts` (memory struct) |
 | `test/fixtures/LPVaultFixture.sol` | test fixture | `BURN_INTENT_TYPEHASH`, `_signBurnIntent(vault, pk, lp, positionId, deadline)` |
 | `test/fixtures/ConditionalTokensFixture.sol` | test fixture | `_giveOutcomeTokens(vault, conditionId, yesAmount, noAmount)` funds the token leg |
 | `test/features/FEAT-7G40-burn-lp-position/UC-7G41-burn-position.t.sol` | Integration tests for the self-service path, including the claim fuzz test and the shortfall tests | SC-7G43 through SC-7G4B, SC-BMF1, SC-BMF2, SC-BMF3 |
@@ -189,7 +193,7 @@ stateDiagram-v2
 | SC-7G4A | Burn succeeds with zero registered operators | `src/LPVault.sol:burnPosition()` |
 | SC-7G4B | Revert on a nonexistent, burned, or merged-away position | `src/LPVault.sol:burnPosition()` (liveness check) |
 | SC-BMF1 | Burn merges the vault's pairs first | `src/LPVault.sol:_burn()`, `src/LPVault.sol:_mergeCompleteSets()` |
-| SC-BMF2 | Burn pays what the vault holds when it is short | `src/LPVault.sol:_burnAmounts()`, `src/LPVault.sol:_availableUsdc()` |
+| SC-BMF2 | Burn pays its share when the vault is short | `src/LPVault.sol:_burnAmounts()`, `src/LPVault.sol:_prorate()`, `src/LPVault.sol:_availableUsdc()` |
 | SC-BMF3 | Burn of a clamped mint tick pays NO for the levels the price rose through | `src/LPVault.sol:_claim()` |
 | UC-7G42 | Operator Burn Position for LP | `src/LPVault.sol:burnPositionFor()` |
 | SC-7G4C | Operator burn at the mint tick pays the LP the whole principal in USDC | `src/LPVault.sol:burnPositionFor()`, `src/LPVault.sol:_claim()` |
@@ -234,6 +238,10 @@ In the context of FR-7G55 requiring a used-authorization record, facing the choi
 
 **ADR-BMF6:** A short vault pays what it holds, per asset, with no running totals (decision O2)
 In the context of a vault that can hold less of an asset than its claims say, after the merge, because of the accepted drift between the reported tick and the real fills (decision C8), facing the auditors' request for a pro-rata cut across every claim (issue 6.6), we decided that each payout pays the smaller of what is owed and what the vault holds, per asset, with USDC read as `balance + pairs − totalEscrowed` floored at zero, and never reverts on that comparison, to achieve an exit with no new state and one comparison per asset, accepting that an early exit is paid in full and a late exit bears the drift. Measured on the R8 tree with cold storage on 2026-09-13: pay what is there leaves `LPVault` at 20,890 bytes (3,686 of room) against 23,527 (1,049 of room) for pro-rata totals; `updateTick` with zero crossings costs 23,364 against 39,441; the first move through a mint tick 23,364 against 71,157; `mintPositionFor` 139,959 against 160,089; `burnPosition` 103,318 to 162,900 against 124,606 to 192,327; `collect` with a merge first 77,663 against 85,233. The reason for the auditors: under C26 the vault only buys, so its token balance grows only through fills and the spread leaves it long USDC; a shortfall can come only from the drift that off-chain monitoring watches, and against that rare case pro-rata costs about 16,000 gas on every moving report, 20,000 more per mint and burn, 2,637 bytes of the remaining room, and a running ledger with the ordering rules the audit found bugs in. `PositionBurned` carries the owed and the paid amount per asset, so an indexer sees any shortfall the moment it happens. The user chose this on 2026-09-13.
+Superseded on 2026-09-14 by ADR-COEY: the user reversed decision O2, because pay what is there pays an early exit in full and leaves the whole drift to a late exit, which rewards whoever leaves first, and the auditors asked for pro-rata in issue 6.6; R11 builds the ledger.
+
+**ADR-COEY:** A short vault cuts every claim by the same ratio per asset, from running totals (decision O2, reversed)
+In the context of ADR-BMF6, facing the fairness the auditors asked for in issue 6.6 and the measurements of 2026-09-14 (cold storage on the R10 tree: `LPVault` from 20,520 to 22,819 bytes, `updateTick` with zero crossings from 25,908 to 40,654 gas, the first move through a mint tick from 23,414 to 74,278, `mintPositionFor` from 140,106 to 165,698, `burnPosition` from 98,640 to 130,316, `collect` with a merge first from 108,137 to 115,901, `notifyFees` from 29,471 to 34,735), we decided that a burn pays each asset's owed amount times the smaller of 1 and held ÷ owed total, debits the totals by the full owed amount, and never reverts, with the totals and the ratios owned by the solvency ledger (FEAT-9BQZ), to achieve an exit whose cut does not depend on when the LP leaves, accepting about 16,000 gas on every moving report, 25,000 to 32,000 more on a mint and a burn, 2,299 bytes of the room, and a ledger with the ordering rules the audit found bugs in, which the exact conservation invariant guards. `PositionBurned` keeps its owed and paid fields, so an indexer sees the ratio. The user chose this on 2026-09-14.
 
 ## Testing Decisions
 

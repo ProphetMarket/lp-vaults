@@ -63,7 +63,7 @@ erDiagram
 - Once `phase == 3`, every trading entry point reverts, and every LP exit and the complete-set merge succeed and pay in full
 - `emergencyCancelTimelock` is written once, at `initialize`, and never again
 - `lastOperatorActivityTimestamp` increases monotonically (reset = set to current block.timestamp)
-- The freeze writes `phase` and nothing else, so `activeLiquidity` equals the in-range position liquidity in phase 3 as in every phase (`invariant_activeLiquidityEqualsInRangeLiquidity` in `test/invariants/TickState.t.sol`)
+- The freeze writes `phase` and nothing else, so `activeLiquidity` equals the in-range position liquidity in phase 3 as in every phase (`invariant_activeLiquidityEqualsInRangeLiquidity` in `test/invariants/TickState.t.sol`), and the four totals of the solvency ledger equal the sum of the live claims after it (FEAT-9BQZ SC-COEP, `invariant_ledgerEqualsSumOfClaims`)
 
 ## Component Inventory
 

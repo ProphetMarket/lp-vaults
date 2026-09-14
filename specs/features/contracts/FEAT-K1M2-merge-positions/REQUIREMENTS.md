@@ -4,7 +4,7 @@ name: Merge Positions
 module: contracts
 domain: "@positions"
 status: implemented
-version: 3
+version: 4
 refs: [FEAT-T7AF]
 ---
 
@@ -59,7 +59,7 @@ Linked to: UC-K1M8
 ### Fee Accounting
 
 **FR-K1M6** `When mergePositions completes, the surviving position's fee accounting shall reflect the sum of all consumed positions' uncollected fees with no loss or double-counting.`
-Fit Criterion: Given two positions with accrued fees, after merge the surviving position's `tokensOwed` includes both positions' uncollected fees and `feeGrowthInsideLastX128` is set to the current value.
+Fit Criterion: Given two positions with accrued fees, after merge the surviving position's `tokensOwed` includes both positions' uncollected fees and `feeGrowthInsideLastX128` is set to the current value. The fee total of FEAT-9BQZ falls by the remainders the two floors drop, Σ (liquidity × delta) mod 2^128, so it still equals the survivor's scaled fee claim; the three principal totals are unchanged (FR-9BRH).
 Linked to: UC-K1M8
 
 ### Operator Liveness

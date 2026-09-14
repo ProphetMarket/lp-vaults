@@ -3,7 +3,7 @@ id: UC-JXQW
 name: Emergency Cancel All
 feature: FEAT-JXQO
 status: implemented
-version: 6
+version: 7
 actor: Any Wallet
 ---
 
@@ -93,6 +93,7 @@ The silence timer this use case reads is refreshed by every successful Operator-
 - `EmergencyCancelExecuted(caller)` emitted with the caller's address
 - No transfer
 - No position or tick written
+- No total of the solvency ledger written, and no `noSideLiquidity` write (FEAT-9BQZ SC-COEP)
 
 ---
 

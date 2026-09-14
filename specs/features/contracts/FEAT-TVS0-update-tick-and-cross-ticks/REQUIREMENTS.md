@@ -4,8 +4,8 @@ name: Update Tick and Cross Ticks
 module: contracts
 domain: "@ticks"
 status: implemented
-version: 3
-refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR, FEAT-JXQO]
+version: 4
+refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR, FEAT-JXQO, FEAT-9BQZ]
 ---
 
 # Update Tick and Cross Ticks
@@ -17,7 +17,7 @@ refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR, FEAT-JXQO]
 - Does not handle fee collection by individual LPs — see feature 5
 - Does not initialize or deinitialize ticks — tick lifecycle managed by mint (FEAT-T7AF) and burn (feature 6)
 - Does not implement off-chain Keeper logic (price monitoring, chunking decisions) — only the on-chain `updateTick` entry point
-- Does not move USDC or outcome tokens — only updates accounting state (feeGrowthOutside, activeLiquidity, currentTick)
+- Does not move USDC or outcome tokens — only updates accounting state (feeGrowthOutside, activeLiquidity, noSideLiquidity, currentTick, and the four ledger totals of FEAT-9BQZ)
 
 ## Actors
 
@@ -79,8 +79,8 @@ Linked to: UC-TVS1
 Fit Criterion: Given currentTick = 8388000 with no initialized ticks at or above it, updateTick(8388600) succeeds with ticksCrossed = 0 instead of reverting with an arithmetic panic. Given currentTick = -8388400, inside the lowest bitmap word, with no initialized ticks at or below it, updateTick(-8388600) succeeds with ticksCrossed = 0.
 Linked to: UC-TVS1
 
-**FR-A2ZS** `The system shall keep activeLiquidity equal to the sum of the liquidity of every position whose range contains currentTick, and each tick's liquidityGross equal to the sum of the liquidity of every position that references that tick, after any sequence of mints, tick updates, and merges.`
-Fit Criterion: Given random sequences of mints near the current tick and against both extreme bitmap words, tick moves of at most 2,000 ticks, and merges of two distinct positions with the same range, the invariant test `test/invariants/TickState.t.sol` holds, and no `updateTick` in those sequences reverts for an undocumented reason.
+**FR-A2ZS** `The system shall keep activeLiquidity equal to the sum of the liquidity of every position whose range contains currentTick, noSideLiquidity equal to the sum over those positions whose mintTick is at or below currentTick, each tick's liquidityGross equal to the sum of the liquidity of every position that references that tick as tickLower, as tickUpper, or as an interior mint tick (tickLower < mintTick < tickUpper), and each tick's noLiquidityNet equal to the liquidity of the positions whose mintTick is that tick and below their tickUpper, less the liquidity of the positions whose tickUpper is that tick and whose mintTick is below it, after any sequence of mints, burns, tick updates, merges, and freezes.`
+Fit Criterion: Given random sequences of mints near the current tick and against both extreme bitmap words, burns through both entry points, tick moves of at most 2,000 ticks, merges of two distinct positions with the same range and mint tick, and a freeze, the invariant test `test/invariants/TickState.t.sol` holds, and no `updateTick` in those sequences reverts for an undocumented reason. The summed form reads `Σ liquidityGross over the distinct referenced ticks == Σ liquidity × (2 + [tickLower < mintTick < tickUpper])`.
 Linked to: UC-TVS1
 
 ## Non-Functional Requirements

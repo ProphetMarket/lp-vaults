@@ -4,7 +4,7 @@ name: Mint LP Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 5
+version: 6
 refs: [FEAT-REPZ, FEAT-3ZRI, FEAT-JAIJ]
 ---
 
@@ -64,8 +64,8 @@ Linked to: UC-T7AG
 Fit Criterion: Given a freshly initialized tick at or below currentTick, feeGrowthOutsideX128 == feeGrowthGlobalX128. Given a tick above currentTick, feeGrowthOutsideX128 == 0.
 Linked to: UC-T7AG
 
-**FR-T7AV** `When a position is minted, the system shall increment liquidityGross on both tickLower and tickUpper by the position's liquidity, add the position's liquidity to liquidityNet on tickLower, and subtract it from liquidityNet on tickUpper.`
-Fit Criterion: Given a mint with liquidity L, ticks[tickLower].liquidityGross increases by L, ticks[tickLower].liquidityNet increases by L, ticks[tickUpper].liquidityGross increases by L, ticks[tickUpper].liquidityNet decreases by L.
+**FR-T7AV** `When a position is minted, the system shall increment liquidityGross on both tickLower and tickUpper by the position's liquidity, add the position's liquidity to liquidityNet on tickLower, subtract it from liquidityNet on tickUpper, book the position's NO sub-range [mintTick, tickUpper) by adding its liquidity to noLiquidityNet on mintTick and subtracting it on tickUpper, and, when mintTick lies strictly inside the range, initialize mintTick and increment its liquidityGross by the position's liquidity.`
+Fit Criterion: Given a mint with liquidity L, ticks[tickLower].liquidityGross increases by L, ticks[tickLower].liquidityNet increases by L, ticks[tickUpper].liquidityGross increases by L, ticks[tickUpper].liquidityNet decreases by L; when mintTick < tickUpper, ticks[mintTick].noLiquidityNet increases by L and ticks[tickUpper].noLiquidityNet decreases by L; when tickLower < mintTick < tickUpper, ticks[mintTick].liquidityGross increases by L and its bitmap bit is set, so `updateTick` crosses it (FEAT-TVS0 ADR-COEW). A mint at its upper bound books no NO sub-range, because that side is empty.
 Linked to: UC-T7AG
 
 ### Active Liquidity

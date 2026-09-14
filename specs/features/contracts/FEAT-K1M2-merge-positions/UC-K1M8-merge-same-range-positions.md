@@ -3,7 +3,7 @@ id: UC-K1M8
 name: Merge Same-Range Positions
 feature: FEAT-K1M2
 status: implemented
-version: 3
+version: 4
 actor: Operator
 ---
 
@@ -153,6 +153,7 @@ Operator calls `mergePositions(uint256[] calldata positionIds)` on the vault.
 **Side Effects:**
 - No fees lost
 - No double-counting possible on next collect
+- `totalFeesOwedX128` storage (FEAT-9BQZ): decreased by the two remainders the floors dropped; the three principal totals unchanged (FR-K1M6, SC-9BS6)
 
 ---
 
