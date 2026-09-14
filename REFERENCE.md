@@ -434,7 +434,7 @@ function notifyFees(uint256 amount) external onlyOperator whenNotPaused nonReent
 
 **Actor:** Operator
 
-Increments the global Q128 fee accumulator by the per-unit share of `amount` distributed across `activeLiquidity`, then takes `amount` USDC from the caller with `transferFrom` in the same call, so no fee credit exists without the USDC behind it. The Operator wallet must hold the swept USDC and a standing USDC approval to the vault (see `DEPLOYMENT.md`, "Operator USDC approval per vault"). The vault performs no balance check beyond the pull: the Operator can still under-report.
+Increments the global Q128 fee accumulator by the per-unit share of `amount` distributed across `activeLiquidity`, credits the solvency ledger's fee total by that increment times `activeLiquidity` (which bounds a report at 2^128 base units, about 3.4 × 10^32 USDC), then takes `amount` USDC from the caller with `transferFrom` in the same call, so no fee credit exists without the USDC behind it. The Operator wallet must hold the swept USDC and a standing USDC approval to the vault (see `DEPLOYMENT.md`, "Operator USDC approval per vault"). The vault performs no balance check beyond the pull: the Operator can still under-report.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -448,7 +448,7 @@ sequenceDiagram
 
     Operator->>Vault: notifyFees(amount)
     Note right of Vault: Checks:<br/>not paused<br/>phase != Cancelled<br/>amount > 0<br/>activeLiquidity > 0
-    Note right of Vault: feeGrowthGlobalX128 +=<br/>mulDiv(amount, 2^128, activeLiquidity)
+    Note right of Vault: growth = mulDiv(amount, 2^128, activeLiquidity)<br/>feeGrowthGlobalX128 += growth<br/>totalFeesOwedX128 += growth x activeLiquidity
     Vault->>USDC: transferFrom(operator, vault, amount)
     Note right of Vault: a rejected transfer reverts<br/>the whole call (TransferFailed)
     Note right of Vault: lastOperatorActivityTimestamp = now
@@ -464,6 +464,7 @@ sequenceDiagram
 - `ZeroAmount()` — `amount` is 0
 - `NoActiveLiquidity()` — `activeLiquidity` is 0
 - `TransferFailed()` — the USDC `transferFrom` from the caller failed (no balance, or no approval); the accumulator increment rolls back
+- an arithmetic panic — `amount` above 2^128 base units, because the fee total's credit no longer fits in 256 bits
 
 ---
 
@@ -503,7 +504,7 @@ function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentr
 
 **Actor:** Operator
 
-Synchronises the vault's price tick with the off-chain CLOB mid-price. Crosses every initialised tick between `currentTick` and `newTick`, flipping per-tick fee accumulators and adjusting `activeLiquidity`. The search for the next initialised tick reads only the bitmap words between `currentTick` and `newTick`, so the cost of a call follows the reported move and not where any LP initialised a tick. A call with the current tick refreshes only `lastOperatorActivityTimestamp` and returns: no crossing, no bitmap read, no event. The keeper reports every 60 seconds and after fills, so this is the normal case.
+Synchronises the vault's price tick with the off-chain CLOB mid-price. Crosses every initialised tick between `currentTick` and `newTick`, flipping per-tick fee accumulators and adjusting `activeLiquidity` and `noSideLiquidity`. An interior mint tick is an initialised tick too: it counts its positions' liquidity and holds their NO sub-range's net, so a move crosses it and `ticksCrossed` counts it. For every segment the move traverses, the trailing one included, the vault shifts the four totals of the solvency ledger with the liquidity split as it stood in that segment: moving up, each NO-side level buys NO at `1 − t / 10000` and each YES-side level's YES returns to USDC; moving down, the mirror. The search for the next initialised tick reads only the bitmap words between `currentTick` and `newTick`, so the cost of a call follows the reported move and not where any LP initialised a tick. A call with the current tick refreshes only `lastOperatorActivityTimestamp` and returns: no crossing, no bitmap read, no event. The keeper reports every 60 seconds and after fills, so this is the normal case.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -521,10 +522,13 @@ sequenceDiagram
     alt newTick == currentTick
         Note right of Vault: return (no crossing, no event)
     else newTick != currentTick
-        loop for each initialised tick between currentTick and newTick
-            Note right of Vault: crossTick(tick):<br/>feeGrowthOutside = global - outside<br/>activeLiquidity += liquidityNet (or -net)
+        loop for each initialised tick between currentTick and newTick (a boundary or a mint tick)
+            Note right of Vault: accrueSegment(up to the tick) with the current split
+            Note right of Vault: crossTick(tick):<br/>feeGrowthOutside = global - outside<br/>activeLiquidity += liquidityNet (or -net)<br/>noSideLiquidity += noLiquidityNet (or -net)
             Note right of Vault: Stops and reverts if crossCount > 256
         end
+        Note right of Vault: accrueSegment(the trailing segment to newTick)
+        Note right of Vault: write the shift to the four ledger totals
 
         Note right of Vault: currentTick = newTick
         Note right of Vault: TickUpdated event emitted
@@ -549,7 +553,7 @@ function collect(uint256 positionId) external nonReentrant
 
 **Actor:** LP's Safe (position owner)
 
-Withdraws accrued trading fees from a position without removing it, in every phase and while paused. Computes the fees since the last collect from the per-tick `feeGrowthOutside` accumulators, adds `tokensOwed` (rolled in from `mergePositions`, or the remainder of an earlier short collect), merges the vault's YES and NO pairs into USDC, and pays the smaller of the amount owed and the USDC the vault holds above `totalEscrowed`. The unpaid remainder waits in `tokensOwed`. A zero-owed collect reads no balance and merges nothing.
+Withdraws accrued trading fees from a position without removing it, in every phase and while paused. Computes the fees since the last collect from the per-tick `feeGrowthOutside` accumulators, adds `tokensOwed` (rolled in from `mergePositions`), merges the vault's YES and NO pairs into USDC, and pays the amount owed times the USDC ratio of the solvency ledger: the smaller of 1 and the USDC the vault holds above `totalEscrowed` (the pairs counted) over `totalUsdcOwed() + totalFeesOwed()`, rounded down. The claim settles at that ratio, paid or not: `tokensOwed` reads zero afterwards and the ledger's fee total falls by the whole claim. A zero-owed collect reads no balance and merges nothing.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -568,14 +572,14 @@ sequenceDiagram
     Note right of Vault: owed = position.liquidity<br/>    x (feeGrowthInside - feeGrowthInsideLastX128)<br/>    / 2^128 + position.tokensOwed
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
     Vault->>USDC: balanceOf(vault)
-    Note right of Vault: paid = min(owed, balance + pairs - totalEscrowed)
-    Note right of Vault: position.feeGrowthInsideLastX128 = feeGrowthInside<br/>position.tokensOwed = owed - paid
+    Note right of Vault: paid = owed x min(1, (balance + pairs - totalEscrowed) / (totalUsdcOwed + totalFeesOwed))
+    Note right of Vault: position.feeGrowthInsideLastX128 = feeGrowthInside<br/>position.tokensOwed = 0<br/>totalFeesOwedX128 -= the scaled fee claim
     Vault->>CTF: mergePositions(pairs) if pairs > 0
-    Vault->>USDC: transfer(safe, paid)
-    Note right of Vault: CompleteSetsMerged (if pairs > 0), FeesCollected (if paid > 0)
+    Vault->>USDC: transfer(safe, paid) if paid > 0
+    Note right of Vault: CompleteSetsMerged (if pairs > 0), FeesCollected (if owed > 0)
 ```
 
-**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when pairs merged; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount)` with the amount paid
+**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when pairs merged; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid)` — `amountPaid < amountOwed` marks a ratio below 1
 
 **Reverts:**
 - `PositionNotFound()` — no position exists at `positionId`
@@ -618,11 +622,11 @@ sequenceDiagram
     Note right of Vault: Checks:<br/>block.timestamp <= deadline<br/>derived Safe of the signer == lp<br/>struct hash not used<br/>position exists, position.owner == lp
     Note right of Vault: usedCollectAuthorizations[structHash] = true
     Note right of Vault: the same body as collect
-    Vault->>USDC: transfer(lp, paid)
-    Note right of Vault: FeesCollected event emitted (if paid > 0)
+    Vault->>USDC: transfer(lp, paid) if paid > 0
+    Note right of Vault: FeesCollected event emitted (if owed > 0)
 ```
 
-**Events:** `CompleteSetsMerged` when pairs merged; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amount)`
+**Events:** `CompleteSetsMerged` when pairs merged; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid)`
 
 **Reverts:**
 - `NotOperator()` — caller is not an operator
@@ -643,7 +647,7 @@ function burnPosition(uint256 positionId) external nonReentrant
 
 **Actor:** LP's Safe (position owner)
 
-Closes a position the Safe owns and pays what its claim holds under the claim model (decision C26): USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick (YES below the mint tick, NO at or above it) plus the USDC that buying that token at each level's price did not spend, and the accrued fees. The vault merges its YES and NO pairs first, removes the position's liquidity from both ticks (deleting a tick and clearing its bitmap bit when its `liquidityGross` reaches zero), reduces `activeLiquidity` when the position is in range, deletes the record, and pays the smaller of what is owed and what it holds, per asset, without a revert. Works in every phase, while paused, and with every Operator removed. Never refreshes the Operator heartbeat.
+Closes a position the Safe owns and pays what its claim holds under the claim model (decision C26): USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick (YES below the mint tick, NO at or above it) plus the USDC that buying that token at each level's price did not spend, and the accrued fees. The vault merges its YES and NO pairs first, removes the position's liquidity from both ticks (deleting a tick and clearing its bitmap bit when its `liquidityGross` reaches zero), reduces `activeLiquidity` (and `noSideLiquidity` for a position on the NO side of its mint tick) when the position is in range, removes the position's NO sub-range and its interior mint tick's reference, debits the solvency ledger by the full scaled claim and fees, deletes the record, and pays each asset's owed amount times that asset's ratio (the smaller of 1 and held ÷ owed total), rounded down, without a revert. Works in every phase, while paused, and with every Operator removed. Never refreshes the Operator heartbeat.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -677,15 +681,15 @@ sequenceDiagram
     Note right of Vault: fees from feeGrowthInside; the claim from<br/>(liquidity, range, mintTick, currentTick)
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
     Vault->>USDC: balanceOf(vault)
-    Note right of Vault: usdcPaid = min(usdcOwed + fees, balance + pairs - totalEscrowed)<br/>tokenPaid = min(tokenOwed, held - pairs)
-    Note right of Vault: remove liquidity from both ticks (clear a bit at zero)<br/>activeLiquidity -= liquidity if in range<br/>delete positions[positionId]
+    Note right of Vault: usdcPaid = (usdcOwed + fees) x min(1, (balance + pairs - totalEscrowed) / (totalUsdcOwed + totalFeesOwed))<br/>tokenPaid = tokenOwed x min(1, (held - pairs) / tokenTotal)
+    Note right of Vault: remove the NO sub-range, then the liquidity from both ticks (clear a bit at zero)<br/>activeLiquidity -= liquidity if in range, noSideLiquidity too on the NO side<br/>debit the four ledger totals by the scaled claim and fees<br/>delete positions[positionId]
     Vault->>CTF: mergePositions(pairs) if pairs > 0
     Vault->>USDC: transfer(safe, usdcPaid)
     Vault->>CTF: safeTransferFrom(vault, safe, tokenId, tokenPaid) — last call
     Note right of Vault: PositionBurned event emitted
 ```
 
-**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when pairs merged; `PositionBurned(uint256 indexed positionId, address indexed owner, uint256 usdcOwed, uint256 feesOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid)` — `paid < owed` marks a shortfall
+**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when pairs merged; `PositionBurned(uint256 indexed positionId, address indexed owner, uint256 usdcOwed, uint256 feesOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid)` — `paid < owed` marks a ratio below 1 on that asset
 
 **Reverts:**
 - `PositionNotFound()` — never minted, already burned, or consumed by `mergePositions`
@@ -786,7 +790,7 @@ function mergePositions(uint256[] calldata positionIds)
 
 **Actor:** Operator
 
-Combines two or more distinct positions with the same owner, range, and mint tick into the first entry (`positionIds[0]`). Rolls up uncollected fees into the survivor's `tokensOwed`, sums liquidity, and zeroes consumed positions. Tick state is unchanged (net liquidity on the range is the same). This joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC, which audit-fix step R9 adds as `mergeCompleteSets()`.
+Combines two or more distinct positions with the same owner, range, and mint tick into the first entry (`positionIds[0]`). Rolls up uncollected fees into the survivor's `tokensOwed`, sums liquidity, and zeroes consumed positions. Tick state is unchanged (net liquidity on the range and on the NO sub-range is the same). The solvency ledger's fee total falls by the dust the per-position floors drop, `Σ (liquidity × delta) mod 2^128`, so it still equals the survivor's scaled fee claim; no principal total moves. This joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC, which audit-fix step R9 adds as `mergeCompleteSets()`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -908,6 +912,37 @@ sequenceDiagram
 - `DepositNotEscrowed()` — no escrow exists for `intentId`
 - `NotIntentOwner()` — the escrow's recorded Safe is not `lp`
 - `TransferFailed()` — USDC transfer failed
+
+---
+
+### Solvency ledger views
+
+```solidity
+function totalUsdcOwedScaled() external view returns (uint256)   // USDC units x 10000 x 1e18
+function totalYesOwedScaled()  external view returns (uint256)   // token units x 1e18
+function totalNoOwedScaled()   external view returns (uint256)   // token units x 1e18
+function totalFeesOwedX128()   external view returns (uint256)   // USDC units x 2^128
+function totalUsdcOwed() public view returns (uint256)           // the four truncated totals
+function totalYesOwed()  public view returns (uint256)
+function totalNoOwed()   public view returns (uint256)
+function totalFeesOwed() public view returns (uint256)
+function noSideLiquidity() external view returns (uint128)
+function ticks(int24) external view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutsideX128, int128 noLiquidityNet)
+```
+
+**Actor:** any reader
+
+The running totals of what the vault owes to its live positions, per asset, held in the claim's pre-division unit so that a mint and its burn cancel exactly, and truncated only in the four getters. Every mint, burn, collect, fee report, merge, and segment of a tick move writes them in the same call; the freeze writes none. They are the ratio denominators every burn and collect reads before its debit, and the monitoring surface for a shortfall, which no on-chain path reports otherwise. `noSideLiquidity` is the in-range liquidity whose mint tick is at or below `currentTick`, and `ticks()` returns a fourth value, the net of the NO sub-ranges `[mintTick, tickUpper)` at that tick.
+
+**The ratio.** Per asset, the smaller of 1 and what the vault holds over what it owes:
+
+```text
+usdcRatio = min(1, (usdc.balanceOf(vault) + pairs − totalEscrowed) / (totalUsdcOwed() + totalFeesOwed()))
+yesRatio  = min(1, (YES balance − pairs) / totalYesOwed())
+noRatio   = min(1, (NO balance − pairs) / totalNoOwed())
+```
+
+A burn pays `(usdcOwed + feesOwed) × usdcRatio` and `tokenOwed × tokenRatio`, a collect pays `owed × usdcRatio`, each rounded down and never above what is held, and each debits the totals by the full owed amount, so every later claimant meets the same ratio. A zero total is a ratio of 1. The reclaim paths apply no ratio: escrowed USDC is senior.
 
 ---
 

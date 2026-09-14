@@ -171,7 +171,7 @@ sequenceDiagram
 
 ### 2.3 Update Tick (`updateTick`)
 
-Synchronises the vault's price tick with the off-chain CLOB mid-price, crossing tick boundaries to adjust `activeLiquidity` and flip per-tick fee accumulators.
+Synchronises the vault's price tick with the off-chain CLOB mid-price, crossing tick boundaries and interior mint ticks to adjust `activeLiquidity` and `noSideLiquidity` and flip per-tick fee accumulators, and shifting the solvency ledger's four totals for every segment the price traversed, the trailing one included, with the liquidity split as it stood in that segment.
 
 ```mermaid
 sequenceDiagram
@@ -186,10 +186,12 @@ sequenceDiagram
     alt newTick == currentTick
         Note right of Vault: return (no crossing, no event)
     else newTick != currentTick
-        loop for each initialized tick between oldTick and newTick
-            Note right of Vault: crossTick(tick):<br/>  feeGrowthOutside = global - outside<br/>  activeLiquidity += liquidityNet (or -net)
+        loop for each initialized tick between oldTick and newTick (a boundary or a mint tick)
+            Note right of Vault: accrueSegment(up to the tick): the ledger shift<br/>  with activeLiquidity and noSideLiquidity as they stand
+            Note right of Vault: crossTick(tick):<br/>  feeGrowthOutside = global - outside<br/>  activeLiquidity += liquidityNet (or -net)<br/>  noSideLiquidity += noLiquidityNet (or -net)
             Note right of Vault: max 256 ticks per call<br/>(TooManyTicksCrossed if exceeded)
         end
+        Note right of Vault: accrueSegment(the trailing segment to newTick)<br/>write the shift to the four totals once
 
         Note right of Vault: currentTick = newTick<br/>TickUpdated event emitted
     end
@@ -197,13 +199,13 @@ sequenceDiagram
 
 **When to call:** The Keeper bot (holding an Operator key) reports the tick every 60 seconds and after fills. A report with the unchanged tick refreshes only the Operator heartbeat, so it costs about as little as `heartbeat()` and needs no second transaction. While the vault is paused or wound down, `updateTick` reverts and the Keeper calls `heartbeat()` instead.
 
-**Chunking:** If the price has moved more than 256 initialized ticks, the Operator must call `updateTick` multiple times, landing on intermediate ticks to process the full range. The search reads only the bitmap words between `currentTick` and `newTick`, so a tick that an LP initialized far away costs nothing until the price reaches it. A large jump across empty words still reads one word per 256 ticks, so the Operator also chunks a very large jump.
+**Chunking:** If the price has moved more than 256 initialized ticks (mint ticks included), the Operator must call `updateTick` multiple times, landing on intermediate ticks to process the full range; the ledger lands on the same totals in one call or in chunks. The search reads only the bitmap words between `currentTick` and `newTick`, so a tick that an LP initialized far away costs nothing until the price reaches it. A large jump across empty words still reads one word per 256 ticks, so the Operator also chunks a very large jump.
 
 ---
 
 ### 2.4 Collect Fees (`collect`, `collectFor`)
 
-An LP withdraws their accrued trading fees from a position without removing the position itself. Two entry points: the Safe calls `collect(positionId)` itself, or the owner key signs a `CollectIntent` (with a nonce, because a collect repeats) and the Operator relays it through `collectFor`. Before it pays, the vault merges any YES and NO pairs it holds into USDC, and it pays the smaller of the fees owed and the USDC it holds above escrow; any remainder waits in `tokensOwed` for a later collect.
+An LP withdraws their accrued trading fees from a position without removing the position itself. Two entry points: the Safe calls `collect(positionId)` itself, or the owner key signs a `CollectIntent` (with a nonce, because a collect repeats) and the Operator relays it through `collectFor`. Before it pays, the vault merges any YES and NO pairs it holds into USDC, and it pays the fees owed times the USDC ratio of the solvency ledger, the smaller of 1 and the USDC it holds above escrow over the principal and the fees it owes; the claim settles at that ratio, so nothing waits in `tokensOwed`.
 
 ```mermaid
 sequenceDiagram
@@ -226,14 +228,14 @@ sequenceDiagram
     Note right of Vault: feeGrowthInside = global - below(tL) - above(tU)
     Note right of Vault: owed = liquidity × (feeGrowthInside - feeGrowthInsideLast) ÷ 2^128<br/>+ position.tokensOwed
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
-    Note right of Vault: paid = min(owed, usdc.balanceOf(vault) + pairs − totalEscrowed)
-    Note right of Vault: feeGrowthInsideLastX128 = feeGrowthInside<br/>tokensOwed = owed − paid
+    Note right of Vault: paid = owed × min(1, (usdc.balanceOf(vault) + pairs − totalEscrowed) ÷ (totalUsdcOwed + totalFeesOwed))
+    Note right of Vault: feeGrowthInsideLastX128 = feeGrowthInside<br/>tokensOwed = 0<br/>totalFeesOwedX128 −= the scaled fee claim
     Vault->>CTF: mergePositions(pairs) if pairs > 0
-    Vault->>Safe: transfer paid USDC
-    Note right of Vault: CompleteSetsMerged (if pairs > 0), then<br/>FeesCollected(positionId, safe, paid) (if paid > 0)
+    Vault->>Safe: transfer paid USDC (if paid > 0)
+    Note right of Vault: CompleteSetsMerged (if pairs > 0), then<br/>FeesCollected(positionId, safe, owed, paid) (if owed > 0)
 ```
 
-**When to call:** Any time the LP wants to collect accrued fees. Works in every phase, including Cancelled, and while paused. `feeGrowthInsideLastX128` is updated each call so subsequent collects only pay fees that accrued since the last collection; a short vault leaves the unpaid part in `tokensOwed`.
+**When to call:** Any time the LP wants to collect accrued fees. Works in every phase, including Cancelled, and while paused. `feeGrowthInsideLastX128` is updated each call so subsequent collects only pay fees that accrued since the last collection; a short vault pays its share and the cut is final, so the LP who sees a shortfall can wait for a better ratio.
 
 ---
 
@@ -298,7 +300,7 @@ sequenceDiagram
 
 ### 2.7 Burn a Position (`burnPosition`, `burnPositionFor`)
 
-An LP closes a position and receives what its claim holds under the claim model (decision C26). Every level of the range starts as USDC. A level below the mint tick bought YES when the price fell through it; a level at or above the mint tick bought NO when the price rose through it. So the claim is USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick, plus the USDC that buying that token at each level's price did not spend, plus the accrued fees. The vault merges any pairs it holds first, and pays the smaller of what is owed and what it holds, per asset, without a revert. Two entry points: the Safe calls `burnPosition(positionId)` itself, in every phase and with no Operator, or the owner key signs a `BurnIntent` and the Operator relays it through `burnPositionFor`.
+An LP closes a position and receives what its claim holds under the claim model (decision C26). Every level of the range starts as USDC. A level below the mint tick bought YES when the price fell through it; a level at or above the mint tick bought NO when the price rose through it. So the claim is USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick, plus the USDC that buying that token at each level's price did not spend, plus the accrued fees. The vault merges any pairs it holds first, and pays its share from the solvency ledger: each asset's owed amount times the smaller of 1 and what the vault holds over what it owes on that asset, rounded down, without a revert, and debits the full owed amount, so every later claimant meets the same ratio. Two entry points: the Safe calls `burnPosition(positionId)` itself, in every phase and with no Operator, or the owner key signs a `BurnIntent` and the Operator relays it through `burnPositionFor`.
 
 ```mermaid
 sequenceDiagram
@@ -321,8 +323,8 @@ sequenceDiagram
     Note right of Vault: fees = liquidity × (feeGrowthInside − snapshot) ÷ 2^128 + tokensOwed
     Note right of Vault: claim from (liquidity, range, mintTick, currentTick):<br/>usdcOwed, tokenId (YES below the mint tick, NO above), tokenOwed
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
-    Note right of Vault: usdcPaid = min(usdcOwed + fees, balance + pairs − totalEscrowed)<br/>tokenPaid = min(tokenOwed, held − pairs)
-    Note right of Vault: remove liquidity from both ticks (clear a bit at zero)<br/>activeLiquidity −= liquidity if in range<br/>delete positions[positionId]
+    Note right of Vault: usdcPaid = (usdcOwed + fees) × min(1, (balance + pairs − totalEscrowed) ÷ (totalUsdcOwed + totalFeesOwed))<br/>tokenPaid = tokenOwed × min(1, (held − pairs) ÷ tokenTotal)
+    Note right of Vault: remove the NO sub-range, then the liquidity from both ticks (clear a bit at zero)<br/>activeLiquidity −= liquidity if in range, noSideLiquidity too on the NO side<br/>debit the four ledger totals by the scaled claim and fees<br/>delete positions[positionId]
     Vault->>CTF: mergePositions(pairs) if pairs > 0
     Vault->>Safe: transfer usdcPaid
     Vault->>CTF: safeTransferFrom(vault, safe, tokenId, tokenPaid) — last call
@@ -538,9 +540,9 @@ sequenceDiagram
 | `updateTick` | Operator | Active | Not paused; max 256 ticks |
 | `mergePositions` | Operator | Active / WindDown | Not paused |
 | `heartbeat` | Operator | Active / WindDown | Works while paused; refreshes the silence timer only |
-| `collect` | LP's Safe (owner) | Every phase | Always open; works while paused; merges pairs first; pays what the vault holds above escrow |
+| `collect` | LP's Safe (owner) | Every phase | Always open; works while paused; merges pairs first; pays its share from the solvency ledger |
 | `collectFor` | Operator | Every phase | Works while paused; owner-key CollectIntent with a nonce and a deadline |
-| `burnPosition` | LP's Safe (owner) | Every phase | Always open; works while paused; no Operator, no timelock; the claim from the mint tick |
+| `burnPosition` | LP's Safe (owner) | Every phase | Always open; works while paused; no Operator, no timelock; the claim from the mint tick, paid at the ledger's ratio per asset |
 | `burnPositionFor` | Operator | Every phase | Works while paused; owner-key BurnIntent with a deadline |
 | `mergeCompleteSets` | Any wallet | Every phase | Works while paused; never refreshes the heartbeat |
 | `reclaimDeposit` | LP's Safe | Every phase | Always open; works while paused; no timelock |
