@@ -263,12 +263,11 @@ contract ShiftChunksAndReversalTest is PrincipalShiftTestBase {
 contract MintTickCrossingTest is PrincipalShiftTestBase {
     // SC-COER: the mint tick's record
     function test_whenMintedThenTheInteriorMintTickIsInitialized() public view {
-        (uint128 gross, int128 net, uint256 outside, int128 noNet) = vault.ticks(MINT_TICK);
+        (uint128 gross, int128 net, int128 noNet) = vault.ticks(MINT_TICK);
         assertEq(gross, LIQUIDITY_A, "liquidityGross counts the position");
         assertEq(net, 0, "no liquidityNet: no position bounds the tick");
-        assertEq(outside, 0, "feeGrowthOutside starts at the global value, zero here");
         assertEq(noNet, int128(LIQUIDITY_A), "the NO sub-range starts here");
-        (,,, int128 noNetUpper) = vault.ticks(UPPER);
+        (,, int128 noNetUpper) = vault.ticks(UPPER);
         assertEq(noNetUpper, -int128(LIQUIDITY_A), "the NO sub-range ends at tickUpper");
     }
 
@@ -306,11 +305,11 @@ contract ClampedMintEntryTest is PrincipalShiftTestBase {
 
     // SC-COES: the NO sub-range sits at the bounds, with no interior reference
     function test_whenClampedBelowThenTheNoSubRangeIsTheWholeRange() public view {
-        (,,, int24 mintTick,,,) = vault.positions(positionC);
+        (,,, int24 mintTick,) = vault.positions(positionC);
         assertEq(mintTick, LOWER, "clamped to the lower bound");
-        (uint128 grossLower,,, int128 noNetLower) = vault.ticks(LOWER);
-        (,,, int128 noNetUpper) = vault.ticks(UPPER);
-        (uint128 grossInterior,,,) = vault.ticks(MINT_TICK);
+        (uint128 grossLower,, int128 noNetLower) = vault.ticks(LOWER);
+        (,, int128 noNetUpper) = vault.ticks(UPPER);
+        (uint128 grossInterior,,) = vault.ticks(MINT_TICK);
         assertEq(noNetLower, int128(LIQUIDITY_A), "the NO sub-range starts at tickLower");
         assertEq(noNetUpper, -int128(LIQUIDITY_A), "the NO sub-range ends at tickUpper");
         assertEq(grossLower, LIQUIDITY_A, "the bound holds the one reference");

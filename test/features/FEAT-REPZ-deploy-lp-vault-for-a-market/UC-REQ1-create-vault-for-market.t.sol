@@ -389,8 +389,8 @@ contract VaultOnlyFactoryInitializeTest is LPVaultFixture {
 //       ZeroFloor — the invariant minimumFirstLiquidity > 0 is enforced
 //       at vault creation time.
 // Why:  A zero floor would allow the first mint to add zero liquidity,
-//       creating a vault with no meaningful liquidity and breaking the
-//       fee accumulator division when fees arrive with activeLiquidity == 0.
+//       creating a vault with a dust first position and no meaningful
+//       liquidity.
 // Example: oracle calls createVault(marketId, tickSpacing, 0) → revert ZeroFloor.
 // ──────────────────────────────────────────────
 contract CreateVaultZeroFloorTest is LPVaultFixture {
@@ -1070,9 +1070,9 @@ contract VaultReceivesOutcomeTokensTest is LPVaultFixture {
         assertEq(ack, bytes4(0xbc197c81), "onERC1155BatchReceived must return 0xbc197c81");
     }
 
-    // SC-3WLL, SC-3WLM: receiving tokens is invisible to position/tick/fee accounting.
-    // Vault bookkeeping is driven by mint, burn, collect, and notifyFees — never by
-    // observing an inbound transfer — so an arriving token must move no accounting state.
+    // SC-3WLL, SC-3WLM: receiving tokens is invisible to position/tick accounting.
+    // Vault bookkeeping is driven by mint, burn, and updateTick — never by observing an
+    // inbound transfer — so an arriving token must move no accounting state.
     function test_receivingTokensLeavesVaultAccountingUntouched() public {
         uint256[] memory ids = new uint256[](2);
         ids[0] = yesTokenId;
@@ -1088,7 +1088,6 @@ contract VaultReceivesOutcomeTokensTest is LPVaultFixture {
 
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move on an inbound transfer");
         assertEq(vault.currentTick(), int24(0), "currentTick must not move on an inbound transfer");
-        assertEq(vault.feeGrowthGlobalX128(), 0, "feeGrowthGlobalX128 must not move on an inbound transfer");
         assertEq(vault.nextPositionId(), 0, "nextPositionId must not move on an inbound transfer");
     }
 }

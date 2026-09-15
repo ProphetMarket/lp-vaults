@@ -3,13 +3,14 @@ pragma solidity 0.8.20;
 
 // UC-T7AG: Operator Mint Position for LP
 // Integration tests for every scenario in this use case.
-// Covers: SC-T7AH, SC-T7AI, SC-T7AJ, SC-8L1C, SC-AFPN, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-AFPM, SC-T7AP, SC-3Z9J, SC-45IE, SC-3Z9K, SC-T7AR, SC-3XU5, SC-3XU6
+// Covers: SC-T7AH, SC-T7AI, SC-T7AJ, SC-AFPN, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-AFPM, SC-T7AP, SC-3Z9J, SC-45IE, SC-3Z9K, SC-T7AR, SC-3XU5, SC-3XU6
 
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
+import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract with shared setup for all mint scenarios.
@@ -76,12 +77,7 @@ contract MintPositionTestBase is LPVaultFixture {
 
     /// @dev Sets the vault's currentTick via storage manipulation (no updateTick yet).
     function _setCurrentTick(int24 tick) internal {
-        stdstore.target(address(vault)).sig("currentTick()").checked_write_int(int256(tick));
-    }
-
-    /// @dev Sets the vault's feeGrowthGlobalX128 via storage manipulation (no notifyFees yet).
-    function _setFeeGrowthGlobalX128(uint256 val) internal {
-        stdstore.target(address(vault)).sig("feeGrowthGlobalX128()").checked_write(val);
+        VaultStorage.setCurrentTick(stdstore, address(vault), tick);
     }
 }
 
@@ -89,15 +85,15 @@ contract MintPositionTestBase is LPVaultFixture {
 // SC-T7AH: Successful in-range mint with fresh ticks
 // What: When the Operator mints an escrowed intent for a range that spans the
 //       current tick (in-range), the vault consumes the escrow, creates the
-//       position owned by the Safe, initializes both bound ticks with correct
-//       feeGrowthOutside values, adds liquidity to activeLiquidity, moves no
-//       USDC, and emits PositionMinted. This is the primary happy path.
+//       position owned by the Safe, initializes both bound ticks with their
+//       liquidity, adds liquidity to activeLiquidity, moves no USDC, and
+//       emits PositionMinted. This is the primary happy path.
 // Why:  This scenario exercises the complete mint flow end-to-end: the escrow
-//       checks, tick initialization, fee snapshot, active liquidity update,
-//       and the escrow deletion. It's the most common case in production.
-// Example: vault at currentTick=50 with feeGrowthGlobal=1000, escrow of 600
-//          for [20, 80]. Tick 20 initializes with feeGrowthOutside=1000 (below
-//          current), tick 80 with 0 (above). liquidity = 600 * 1e18 / 60 = 10e18.
+//       checks, tick initialization, active liquidity update, and the escrow
+//       deletion. It's the most common case in production.
+// Example: vault at currentTick=50, escrow of 600 for [20, 80]. Tick 20 and
+//          tick 80 initialize with the position's liquidity.
+//          liquidity = 600 * 1e18 / 60 = 10e18.
 // ──────────────────────────────────────────────
 contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     int24 tickLower = int24(20);
@@ -108,7 +104,6 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function setUp() public override {
         super.setUp();
         _setCurrentTick(int24(50));
-        _setFeeGrowthGlobalX128(1000);
         _escrowIntent(tickLower, tickUpper, usdcAmount, intentId);
     }
 
@@ -116,43 +111,29 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function test_positionRecordIsCorrect() public {
         uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (address owner, int24 tl, int24 tu, int24 mintTick, uint128 liq,, uint256 owed) = vault.positions(posId);
+        (address owner, int24 tl, int24 tu, int24 mintTick, uint128 liq) = vault.positions(posId);
         assertEq(owner, lp, "position owner should be the LP's Safe");
         assertEq(tl, tickLower, "tickLower should match");
         assertEq(tu, tickUpper, "tickUpper should match");
         assertEq(mintTick, int24(50), "mintTick should be currentTick, which is inside the range");
         // liquidity = 600 * 1e18 / (80 - 20) = 10e18
         assertEq(liq, uint128(10e18), "liquidity should be usdcAmount * PRECISION / rangeWidth");
-        assertEq(owed, 0, "tokensOwed should be 0 at mint");
     }
 
-    // SC-T7AH: feeGrowthInsideLastX128 snapshot is correct
-    function test_feeGrowthInsideSnapshotPreventsRetroactiveClaims() public {
-        uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
-
-        // feeGrowthInside = global(1000) - below(1000) - above(0) = 0
-        // below: currentTick(50) >= tickLower(20) → ticks[20].feeGrowthOutside = 1000 (just initialized)
-        // above: currentTick(50) < tickUpper(80) → ticks[80].feeGrowthOutside = 0 (just initialized)
-        (,,,,, uint256 feeGrowthLast,) = vault.positions(posId);
-        assertEq(feeGrowthLast, 0, "feeGrowthInsideLast should be 0 (no retroactive fees)");
-    }
-
-    // SC-T7AH: tick 20 initialized with feeGrowthOutside = feeGrowthGlobal (below currentTick)
+    // SC-T7AH: tick 20 initialized: liquidityGross and liquidityNet updated
     function test_lowerTickInitializedCorrectly() public {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside,) = vault.ticks(tickLower);
-        assertEq(feeGrowthOutside, 1000, "tick 20 feeGrowthOutside should equal feeGrowthGlobal");
+        (uint128 liqGross, int128 liqNet,) = vault.ticks(tickLower);
         assertEq(liqGross, uint128(10e18), "tick 20 liquidityGross should equal position liquidity");
         assertEq(liqNet, int128(int256(uint256(10e18))), "tick 20 liquidityNet should be positive");
     }
 
-    // SC-T7AH: tick 80 initialized with feeGrowthOutside = 0 (above currentTick)
+    // SC-T7AH: tick 80 initialized: liquidityGross and liquidityNet updated
     function test_upperTickInitializedCorrectly() public {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside,) = vault.ticks(tickUpper);
-        assertEq(feeGrowthOutside, 0, "tick 80 feeGrowthOutside should be 0 (above currentTick)");
+        (uint128 liqGross, int128 liqNet,) = vault.ticks(tickUpper);
         assertEq(liqGross, uint128(10e18), "tick 80 liquidityGross should equal position liquidity");
         assertEq(liqNet, -int128(int256(uint256(10e18))), "tick 80 liquidityNet should be negative");
     }
@@ -171,12 +152,11 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function test_interiorMintTickIsInitializedAndTheNoSubRangeIsBooked() public {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (uint128 liqGross, int128 liqNet, uint256 feeGrowthOutside, int128 noNet) = vault.ticks(int24(50));
+        (uint128 liqGross, int128 liqNet, int128 noNet) = vault.ticks(int24(50));
         assertEq(liqGross, uint128(10e18), "tick 50 liquidityGross counts the position");
         assertEq(liqNet, 0, "tick 50 liquidityNet is zero: no position bounds it");
-        assertEq(feeGrowthOutside, 1000, "tick 50 feeGrowthOutside equals feeGrowthGlobal (at or below currentTick)");
         assertEq(noNet, int128(int256(uint256(10e18))), "tick 50 noLiquidityNet starts the NO sub-range");
-        (,,, int128 noNetUpper) = vault.ticks(tickUpper);
+        (,, int128 noNetUpper) = vault.ticks(tickUpper);
         assertEq(noNetUpper, -int128(int256(uint256(10e18))), "tick 80 noLiquidityNet ends the NO sub-range");
         assertEq((vault.tickBitmap(int16(0)) >> 50) & 1, 1, "tick 50's bitmap bit is set");
         assertEq(vault.noSideLiquidity(), uint128(10e18), "the mint enters on the NO side");
@@ -236,10 +216,10 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
 // SC-T7AI: Successful out-of-range mint (above current tick)
 // What: When the LP's range is entirely above the current tick, the position
 //       is created but activeLiquidity does NOT increase. Both ticks are
-//       initialized with feeGrowthOutside = 0 (above currentTick convention).
-// Why:  Out-of-range positions don't contribute to the fee denominator until
-//       the price moves into their range. Getting this wrong would inflate
-//       the fee split and dilute in-range LPs.
+//       initialized with the position's liquidity.
+// Why:  Out-of-range positions do not count in activeLiquidity until the
+//       price moves into their range. Getting this wrong would misclassify
+//       which positions are in range.
 // ──────────────────────────────────────────────
 contract MintPositionOutOfRangeTest is MintPositionTestBase {
     int24 tickLower = int24(60);
@@ -250,7 +230,6 @@ contract MintPositionOutOfRangeTest is MintPositionTestBase {
     function setUp() public override {
         super.setUp();
         _setCurrentTick(int24(50));
-        _setFeeGrowthGlobalX128(2000);
         _escrowIntent(tickLower, tickUpper, usdcAmount, intentId);
     }
 
@@ -262,22 +241,12 @@ contract MintPositionOutOfRangeTest is MintPositionTestBase {
         assertEq(vault.activeLiquidity(), before_, "activeLiquidity should NOT change for out-of-range");
     }
 
-    // SC-T7AI: both ticks initialized with feeGrowthOutside = 0 (both above currentTick)
-    function test_bothTicksInitializedWithZeroFeeGrowthOutside() public {
-        _mint(tickLower, tickUpper, usdcAmount, intentId);
-
-        (,, uint256 fgOutLower,) = vault.ticks(tickLower);
-        (,, uint256 fgOutUpper,) = vault.ticks(tickUpper);
-        assertEq(fgOutLower, 0, "tick 60 feeGrowthOutside should be 0 (above current)");
-        assertEq(fgOutUpper, 0, "tick 90 feeGrowthOutside should be 0 (above current)");
-    }
-
     // SC-T7AI: position created for the Safe and the escrow consumed, with no USDC moved
     function test_positionCreatedAndEscrowConsumed() public {
         uint256 vaultBefore = mockUsdc.balanceOf(address(vault));
         uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (address owner,,,, uint128 liq,,) = vault.positions(posId);
+        (address owner,,,, uint128 liq) = vault.positions(posId);
         assertEq(owner, lp, "position owner should be the LP's Safe");
         // liquidity = 300 * 1e18 / 30 = 10e18
         assertEq(liq, uint128(10e18), "liquidity should be correct");
@@ -289,12 +258,10 @@ contract MintPositionOutOfRangeTest is MintPositionTestBase {
 // ──────────────────────────────────────────────
 // SC-T7AJ: Second position on existing tick
 // What: When a new position references a tick that already has liquidity
-//       (from a prior mint), the tick's feeGrowthOutsideX128 must NOT be
-//       re-initialized — only liquidityGross/Net are accumulated.
-// Why:  Re-initializing feeGrowthOutside on an already-live tick would
-//       corrupt the fee accounting for every position that references it.
-//       The init convention (global if <= current, else 0) is only valid
-//       at the tick's very first use.
+//       (from a prior mint), the tick stays initialized and only
+//       liquidityGross/Net are accumulated.
+// Why:  A shared tick must count every position that references it, so a
+//       later burn of one position leaves the tick live for the other.
 // ──────────────────────────────────────────────
 contract MintPositionExistingTickTest is MintPositionTestBase {
     bytes32 intentId1 = keccak256("intent-first");
@@ -303,34 +270,20 @@ contract MintPositionExistingTickTest is MintPositionTestBase {
     function setUp() public override {
         super.setUp();
         _setCurrentTick(int24(50));
-        _setFeeGrowthGlobalX128(1000);
 
-        // First mint establishes tick 20 with feeGrowthOutside = 1000 and tick 60 = 0
+        // First mint establishes tick 20 and tick 60
         _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(60), 400, intentId1);
     }
 
     // SC-T7AJ: second position accumulates liquidityGross on shared tick
     function test_liquidityGrossAccumulatesOnExistingTick() public {
-        (uint128 liqGrossBefore,,,) = vault.ticks(int24(20));
+        (uint128 liqGrossBefore,,) = vault.ticks(int24(20));
 
         _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, intentId2);
 
         // Second position liquidity: 600 * 1e18 / 60 = 10e18
-        (uint128 liqGrossAfter,,,) = vault.ticks(int24(20));
+        (uint128 liqGrossAfter,,) = vault.ticks(int24(20));
         assertEq(liqGrossAfter, liqGrossBefore + uint128(10e18), "liquidityGross should accumulate");
-    }
-
-    // SC-T7AJ: feeGrowthOutside preserved on existing tick (NOT re-initialized)
-    function test_feeGrowthOutsidePreservedOnExistingTick() public {
-        (,, uint256 fgOutBefore,) = vault.ticks(int24(20));
-
-        // Simulate fee growth changing between mints
-        _setFeeGrowthGlobalX128(5000);
-
-        _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, intentId2);
-
-        (,, uint256 fgOutAfter,) = vault.ticks(int24(20));
-        assertEq(fgOutAfter, fgOutBefore, "feeGrowthOutside should be preserved, not re-initialized");
     }
 
     // SC-T7AJ: the second mint deletes its own escrow and leaves totalEscrowed at 0
@@ -340,97 +293,6 @@ contract MintPositionExistingTickTest is MintPositionTestBase {
         (address recorded,,) = vault.pendingDeposits(intentId2);
         assertEq(recorded, address(0), "second escrow should be deleted");
         assertEq(vault.totalEscrowed(), 0, "no escrow should remain");
-    }
-}
-
-// ──────────────────────────────────────────────
-// SC-8L1C: Mint over a stale shared tick succeeds
-// What: A new position [50, 100) shares tick 100 with an older position. Tick
-//       100 was crossed after fees arrived, so its feeGrowthOutsideX128 (G1)
-//       is stale against the fresh tick 50, which initializes to the current
-//       global (G2). _computeFeeGrowthInside(50, 100) = G2 - G2 - (G2 - G1)
-//       wraps mod 2^256, and the mint stores that wrapped value as the
-//       position's snapshot instead of reverting.
-// Why:  This is the exact trigger of audit NM-0986-Prophet issue 6.5. Before
-//       the unchecked fix every mint over a stale shared tick reverted with an
-//       arithmetic panic. The wrapped snapshot is what makes a later collect
-//       pay only growth since the mint (SC-8L1D, SC-8L1E in UC-U07A).
-// Example: P1 = [0, 300) and P2 = [100, 200) minted at tick 0. 1000 USDC of
-//          fees -> G1. updateTick(150) flips ticks[100] to G1. 500 more USDC
-//          -> G2. Mint [50, 100): snapshot = 2^256 - (G2 - G1).
-// ──────────────────────────────────────────────
-contract MintOverStaleSharedTickTest is MintPositionTestBase {
-    uint256 constant Q128 = 2 ** 128;
-
-    uint256 posP1;
-    uint256 posP2;
-    uint256 g1;
-    uint256 g2;
-
-    function setUp() public override {
-        super.setUp();
-        _buildStaleTickState();
-    }
-
-    function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId)
-        internal
-        returns (uint256)
-    {
-        return _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
-    }
-
-    /// @dev Builds the staleness condition described in the class comment.
-    ///      Every position gives exactly 10e18 liquidity, which meets the
-    ///      fixture's minimumFirstLiquidity.
-    function _buildStaleTickState() internal {
-        posP1 = _mintPosition(int24(0), int24(300), 3000, keccak256("wide"));
-        posP2 = _mintPosition(int24(100), int24(200), 1000, keccak256("pre-init"));
-
-        _notifyFees(vault, operatorAddr, 1000);
-        g1 = vault.feeGrowthGlobalX128();
-
-        vm.prank(operatorAddr);
-        vault.updateTick(int24(150));
-
-        _notifyFees(vault, operatorAddr, 500);
-        g2 = vault.feeGrowthGlobalX128();
-        assertGt(g2, g1, "precondition: the second notifyFees must advance the global");
-    }
-
-    // SC-8L1C: the mint does not revert, the position exists, and it is out of range
-    function test_mintSucceedsDespiteStaleSharedTick() public {
-        uint128 activeBefore = vault.activeLiquidity();
-
-        uint256 posId = _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
-
-        (address owner,,,, uint128 liquidity,,) = vault.positions(posId);
-        assertEq(owner, lp, "position should be minted to the LP's Safe");
-        assertGt(liquidity, 0, "minted position should have nonzero liquidity");
-        assertEq(vault.activeLiquidity(), activeBefore, "activeLiquidity unchanged: currentTick 150 >= tickUpper 100");
-    }
-
-    // SC-8L1C: the snapshot holds the wrapped value 2^256 - (G2 - G1), which
-    // proves the subtraction wrapped instead of merely not reverting
-    function test_snapshotStoresWrappedFeeGrowthInside() public {
-        uint256 posId = _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
-
-        (,,,,, uint256 feeGrowthInsideLast,) = vault.positions(posId);
-        uint256 expectedWrapped = type(uint256).max - (g2 - g1) + 1;
-        assertEq(feeGrowthInsideLast, expectedWrapped, "snapshot should be 2^256 - (G2 - G1)");
-    }
-
-    // SC-8L1C: tick 50 initializes to the current global, tick 100 keeps its
-    // stale G1 and only accumulates liquidityGross
-    function test_freshTickTakesGlobalAndSharedTickKeepsStaleOutside() public {
-        (uint128 gross100Before,,,) = vault.ticks(int24(100));
-
-        _mintPosition(int24(50), int24(100), 500, keccak256("wraparound-mint"));
-
-        (,, uint256 outside50,) = vault.ticks(int24(50));
-        (uint128 gross100After,, uint256 outside100,) = vault.ticks(int24(100));
-        assertEq(outside50, g2, "tick 50 feeGrowthOutside should equal the current global G2");
-        assertEq(outside100, g1, "tick 100 feeGrowthOutside should stay at the stale G1");
-        assertEq(gross100After, gross100Before + uint128(10e18), "tick 100 liquidityGross should accumulate");
     }
 }
 
@@ -453,7 +315,7 @@ contract MintTickClampTest is MintPositionTestBase {
     }
 
     function _mintTickOf(uint256 posId) internal view returns (int24 mintTick) {
-        (,,, mintTick,,,) = vault.positions(posId);
+        (,,, mintTick,) = vault.positions(posId);
     }
 
     // SC-AFPN: below the range, the mint tick clamps up to tickLower
@@ -475,7 +337,7 @@ contract MintTickClampTest is MintPositionTestBase {
         uint256 posId = _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, keccak256("inside"));
 
         assertEq(_mintTickOf(posId), int24(50), "mintTick should be currentTick");
-        (,,,, uint128 liquidity,,) = vault.positions(posId);
+        (,,,, uint128 liquidity) = vault.positions(posId);
         assertEq(vault.activeLiquidity(), liquidity, "only the in-range position counts toward activeLiquidity");
     }
 
@@ -668,7 +530,7 @@ contract MintPositionFirstMintFloorTest is MintPositionTestBase {
         _escrowIntent(int24(0), int24(10), 1, intentId);
         uint256 posId = _mint(int24(0), int24(10), 1, intentId);
 
-        (,,,, uint128 liquidity,,) = vault.positions(posId);
+        (,,,, uint128 liquidity) = vault.positions(posId);
         assertEq(liquidity, uint128(1e17), "the small position must exist with its computed liquidity");
         assertEq(vault.activeLiquidity(), 0, "the small position is out of range, so activeLiquidity stays 0");
     }
@@ -689,7 +551,7 @@ contract MintPositionFirstMintFloorTest is MintPositionTestBase {
 
         // The failed mint left the escrow in place, so the same intent mints now
         uint256 posId = _mint(int24(0), int24(10), usdcAmount, intentId);
-        (,,,, uint128 liquidity,,) = vault.positions(posId);
+        (,,,, uint128 liquidity) = vault.positions(posId);
         assertEq(
             liquidity, uint128(usdcAmount * LIQUIDITY_PRECISION / 10), "the small mint must succeed after the first"
         );
@@ -812,7 +674,7 @@ contract MintPositionEscrowChecksTest is MintPositionTestBase {
         vm.prank(operatorAddr);
         uint256 posId = vault.mintPositionFor(lp, int24(20), int24(80), 600, lateIntent, deadline);
 
-        (address owner,,,,,,) = vault.positions(posId);
+        (address owner,,,,) = vault.positions(posId);
         assertEq(owner, lp, "the mint should succeed after the deposit's deadline passed");
     }
 }

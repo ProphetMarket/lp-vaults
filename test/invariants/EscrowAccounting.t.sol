@@ -5,7 +5,7 @@ pragma solidity 0.8.20;
 // Invariant required by CLAUDE.md's Foundry conventions (an invariant on every
 // state-machine property): the escrow total is exact. totalEscrowed equals the
 // sum of every recorded escrow amount, the vault's USDC balance covers it, and
-// no recorded intent is marked used. R9 pays burns and collects from
+// no recorded intent is marked used. R9 pays burns from
 // balance - totalEscrowed (decision C7), so a drift in the total would over-
 // or under-pay every exit. Randomized sequences of deposit / mint / reclaim /
 // relayed reclaim, with random Safes, amounts, and intent IDs, some expired and

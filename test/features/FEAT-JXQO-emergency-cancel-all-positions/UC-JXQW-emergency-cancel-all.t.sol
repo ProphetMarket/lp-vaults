@@ -15,8 +15,7 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for emergency cancel scenarios.
-// Deploys factory + vault, mints a position for LP-A, distributes fees, so the
-// position holds 499 USDC of fees (500 reported over its liquidity, rounded down).
+// Deploys factory + vault and mints a position for LP-A.
 // ──────────────────────────────────────────────
 contract EmergencyCancelTestBase is LPVaultFixture {
     LPVaultFactory factory;
@@ -39,11 +38,9 @@ contract EmergencyCancelTestBase is LPVaultFixture {
     uint128 minFirstLiq = uint128(10e18);
 
     uint256 constant LIQUIDITY_PRECISION = 1e18;
-    uint256 constant Q128 = 2 ** 128;
 
     // Events declared for expectEmit
     event EmergencyCancelExecuted(address indexed caller);
-    event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
 
     // Position minted in setUp for LP-A
     uint256 positionIdA;
@@ -67,9 +64,6 @@ contract EmergencyCancelTestBase is LPVaultFixture {
         mockUsdc.approve(address(vault), type(uint256).max);
 
         positionIdA = _escrowAndMint(vault, operatorAddr, LP_A_PK, int24(0), int24(100), 1000, keccak256("mint-a-1"));
-
-        // Distribute fees so position has accrued fees
-        _notifyFees(vault, operatorAddr, 500);
     }
 
     /// @dev Warps block.timestamp past the emergency cancel timelock.
@@ -87,8 +81,8 @@ contract EmergencyCancelTestBase is LPVaultFixture {
 // Why:  Decision C9: the freeze pays no one, so it cannot skip a pending
 //       escrow (6.7), run out of gas (6.11), or fail on one blacklisted
 //       recipient (6.17). Each LP exits alone afterwards.
-// Example: LP-A holds 1000 USDC over [0, 100) with 499 of fees and LP-B has 600
-//          USDC in escrow; after the freeze both records read the same.
+// Example: LP-A holds 1000 USDC over [0, 100) and LP-B has 600 USDC in escrow;
+//          after the freeze both records read the same.
 // ──────────────────────────────────────────────
 contract FreezeChangesOnlyPhaseTest is EmergencyCancelTestBase {
     bytes32 constant ESCROW_INTENT = keccak256("pending-escrow");
@@ -113,7 +107,6 @@ contract FreezeChangesOnlyPhaseTest is EmergencyCancelTestBase {
     function test_totalsUnchanged() public {
         uint128 activeLiqBefore = vault.activeLiquidity();
         int24 tickBefore = vault.currentTick();
-        uint256 feeGrowthBefore = vault.feeGrowthGlobalX128();
         uint256 nextIdBefore = vault.nextPositionId();
         uint256 escrowedBefore = vault.totalEscrowed();
         assertTrue(activeLiqBefore > 0, "precondition: activeLiquidity > 0");
@@ -124,55 +117,42 @@ contract FreezeChangesOnlyPhaseTest is EmergencyCancelTestBase {
 
         assertEq(vault.activeLiquidity(), activeLiqBefore, "activeLiquidity must not move");
         assertEq(vault.currentTick(), tickBefore, "currentTick must not move");
-        assertEq(vault.feeGrowthGlobalX128(), feeGrowthBefore, "feeGrowthGlobalX128 must not move");
         assertEq(vault.nextPositionId(), nextIdBefore, "nextPositionId must not move");
         assertEq(vault.totalEscrowed(), escrowedBefore, "totalEscrowed must not move");
     }
 
     // SC-JXQX: the position record is untouched
     function test_positionRecordUnchanged() public {
-        (
-            address ownerBefore,
-            int24 lowerBefore,
-            int24 upperBefore,
-            int24 mintBefore,
-            uint128 liqBefore,
-            uint256 snapBefore,
-            uint256 owedBefore
-        ) = vault.positions(positionIdA);
+        (address ownerBefore, int24 lowerBefore, int24 upperBefore, int24 mintBefore, uint128 liqBefore) =
+            vault.positions(positionIdA);
 
         vm.prank(lpA);
         vault.emergencyCancelAll();
 
-        (address owner, int24 lower, int24 upper, int24 mintTick, uint128 liq, uint256 snap, uint256 owed) =
-            vault.positions(positionIdA);
+        (address owner, int24 lower, int24 upper, int24 mintTick, uint128 liq) = vault.positions(positionIdA);
         assertEq(owner, ownerBefore, "owner must not move");
         assertEq(lower, lowerBefore, "tickLower must not move");
         assertEq(upper, upperBefore, "tickUpper must not move");
         assertEq(mintTick, mintBefore, "mintTick must not move");
         assertEq(liq, liqBefore, "liquidity must not move");
-        assertEq(snap, snapBefore, "feeGrowthInsideLastX128 must not move");
-        assertEq(owed, owedBefore, "tokensOwed must not move");
     }
 
     // SC-JXQX: both boundary tick records and their bitmap bits are untouched
     function test_tickRecordsAndBitmapUnchanged() public {
-        (uint128 grossLowBefore, int128 netLowBefore, uint256 outsideLowBefore,) = vault.ticks(int24(0));
-        (uint128 grossUpBefore, int128 netUpBefore, uint256 outsideUpBefore,) = vault.ticks(int24(100));
+        (uint128 grossLowBefore, int128 netLowBefore,) = vault.ticks(int24(0));
+        (uint128 grossUpBefore, int128 netUpBefore,) = vault.ticks(int24(100));
         uint256 wordBefore = vault.tickBitmap(int16(0));
         assertTrue(grossLowBefore > 0 && grossUpBefore > 0, "precondition: both ticks initialized");
 
         vm.prank(lpA);
         vault.emergencyCancelAll();
 
-        (uint128 grossLow, int128 netLow, uint256 outsideLow,) = vault.ticks(int24(0));
-        (uint128 grossUp, int128 netUp, uint256 outsideUp,) = vault.ticks(int24(100));
+        (uint128 grossLow, int128 netLow,) = vault.ticks(int24(0));
+        (uint128 grossUp, int128 netUp,) = vault.ticks(int24(100));
         assertEq(grossLow, grossLowBefore, "ticks[0].liquidityGross must not move");
         assertEq(netLow, netLowBefore, "ticks[0].liquidityNet must not move");
-        assertEq(outsideLow, outsideLowBefore, "ticks[0].feeGrowthOutsideX128 must not move");
         assertEq(grossUp, grossUpBefore, "ticks[100].liquidityGross must not move");
         assertEq(netUp, netUpBefore, "ticks[100].liquidityNet must not move");
-        assertEq(outsideUp, outsideUpBefore, "ticks[100].feeGrowthOutsideX128 must not move");
         assertEq(vault.tickBitmap(int16(0)), wordBefore, "the bitmap word must not move");
     }
 
@@ -272,8 +252,8 @@ contract AnyAddressFreezesTest is EmergencyCancelTestBase {
 
     function _assertFrozenBy(address caller) internal {
         uint128 activeLiqBefore = vault.activeLiquidity();
-        (,,,, uint128 liqABefore,,) = vault.positions(positionIdA);
-        (,,,, uint128 liqBBefore,,) = vault.positions(positionIdB);
+        (,,,, uint128 liqABefore) = vault.positions(positionIdA);
+        (,,,, uint128 liqBBefore) = vault.positions(positionIdB);
 
         vm.expectEmit(true, false, false, false, address(vault));
         emit EmergencyCancelExecuted(caller);
@@ -282,8 +262,8 @@ contract AnyAddressFreezesTest is EmergencyCancelTestBase {
 
         assertEq(vault.phase(), 3, "phase should be Cancelled");
         assertEq(vault.activeLiquidity(), activeLiqBefore, "activeLiquidity must not move");
-        (,,,, uint128 liqA,,) = vault.positions(positionIdA);
-        (,,,, uint128 liqB,,) = vault.positions(positionIdB);
+        (,,,, uint128 liqA) = vault.positions(positionIdA);
+        (,,,, uint128 liqB) = vault.positions(positionIdB);
         assertEq(liqA, liqABefore, "LP-A's position must not move");
         assertEq(liqB, liqBBefore, "LP-B's position must not move");
     }
@@ -302,10 +282,10 @@ contract AnyAddressFreezesTest is EmergencyCancelTestBase {
 // ──────────────────────────────────────────────
 // SC-BZBX: An in-range burn after the freeze pays in full
 // What: With the vault frozen at tick 6000, Safe A burns its in-range position
-//       (300 USDC over [5500, 6500)) and receives 300 USDC plus its share of the
-//       500 USDC of fees; activeLiquidity falls to Safe B's liquidity. Safe B
-//       collects its fees, Safe A burns its out-of-range position (500 USDC over
-//       [7000, 8000), all USDC), and Safe B burns; activeLiquidity ends at zero
+//       (300 USDC over [5500, 6500)) and receives 300 USDC; activeLiquidity
+//       falls to Safe B's liquidity. Safe A burns its out-of-range position
+//       (500 USDC over [7000, 8000), all USDC), and Safe B burns for its 1,000
+//       USDC; PositionBurned fires three times, activeLiquidity ends at zero,
 //       and the phase stays 3.
 // Why:  Decision C9. The audited cancel zeroed activeLiquidity, and an in-range
 //       burn after it would have reverted on underflow; the freeze keeps every
@@ -325,7 +305,6 @@ contract BurnAfterFreezeTest is LPVaultFixture {
     address safeA;
     address safeB;
 
-    uint256 constant Q128 = 2 ** 128;
     // 300 USDC over 1,000 ticks and 1,000 USDC over 2,000 ticks: liquidity = usdc * 1e18 / width
     uint128 constant LIQ_A_IN = 3e23;
     uint128 constant LIQ_B = 5e23;
@@ -333,6 +312,16 @@ contract BurnAfterFreezeTest is LPVaultFixture {
     uint256 posAIn;
     uint256 posAOut;
     uint256 posB;
+
+    event PositionBurned(
+        uint256 indexed positionId,
+        address indexed owner,
+        uint256 usdcOwed,
+        uint256 usdcPaid,
+        uint256 tokenId,
+        uint256 tokenOwed,
+        uint256 tokenPaid
+    );
 
     function setUp() public {
         safeA = _safeOf(vm.addr(LP_A_PK));
@@ -356,32 +345,23 @@ contract BurnAfterFreezeTest is LPVaultFixture {
         posB = _escrowAndMint(vault, operatorAddr, LP_B_PK, int24(5000), int24(7000), 1_000_000_000, keccak256("b"));
         assertEq(vault.activeLiquidity(), LIQ_A_IN + LIQ_B, "precondition: the two in-range positions");
 
-        // 500 USDC of fees over the in-range liquidity, then the freeze by an arbitrary address
-        _notifyFees(vault, operatorAddr, 500_000_000);
+        // The freeze by an arbitrary address
         vm.warp(block.timestamp + vault.emergencyCancelTimelock() + 1);
         vm.prank(makeAddr("anyone"));
         vault.emergencyCancelAll();
         assertEq(vault.phase(), 3, "precondition: Cancelled");
     }
 
-    /// @dev The fees an in-range position minted before the one report is owed: its liquidity times
-    ///      the whole growth, because its snapshot is zero and the report was the first.
-    function _feesOf(uint128 liquidity) internal view returns (uint256) {
-        return uint256(liquidity) * vault.feeGrowthGlobalX128() / Q128;
-    }
-
-    // SC-BZBX: the in-range burn pays the principal and the fees, and activeLiquidity falls by its liquidity
+    // SC-BZBX: the in-range burn pays the principal, and activeLiquidity falls by its liquidity
     function test_inRangeBurnAfterFreezePaysInFull() public {
-        uint256 feesA = _feesOf(LIQ_A_IN);
-        assertTrue(feesA > 0, "precondition: Safe A's position accrued fees");
         uint256 before_ = mockUsdc.balanceOf(safeA);
 
         vm.prank(safeA);
         vault.burnPosition(posAIn);
 
-        assertEq(mockUsdc.balanceOf(safeA) - before_, 300_000_000 + feesA, "Safe A receives 300 USDC plus its fees");
+        assertEq(mockUsdc.balanceOf(safeA) - before_, 300_000_000, "Safe A receives 300 USDC");
         assertEq(vault.activeLiquidity(), LIQ_B, "activeLiquidity falls to Safe B's liquidity");
-        (address owner,,,, uint128 liq,,) = vault.positions(posAIn);
+        (address owner,,,, uint128 liq) = vault.positions(posAIn);
         assertEq(owner, address(0), "the record is deleted");
         assertEq(liq, 0, "the record is deleted");
         assertEq(vault.phase(), 3, "phase stays Cancelled");
@@ -389,32 +369,33 @@ contract BurnAfterFreezeTest is LPVaultFixture {
 
     // SC-BZBX: every exit works after the freeze, and activeLiquidity ends at zero
     function test_everyExitAfterFreezeEndsWithZeroActiveLiquidity() public {
-        uint256 feesB = _feesOf(LIQ_B);
         uint256 aBefore = mockUsdc.balanceOf(safeA);
         uint256 bBefore = mockUsdc.balanceOf(safeB);
+        vm.recordLogs();
 
         vm.prank(safeA);
         vault.burnPosition(posAIn);
-
-        vm.prank(safeB);
-        vault.collect(posB);
-        assertEq(mockUsdc.balanceOf(safeB) - bBefore, feesB, "Safe B collects its fees");
+        assertEq(mockUsdc.balanceOf(safeA) - aBefore, 300_000_000, "Safe A receives 300 USDC for the first burn");
 
         // The out-of-range position sits above the price, its mint tick clamped to 7000, so it is all USDC
         vm.prank(safeA);
         vault.burnPosition(posAOut);
-        assertEq(
-            mockUsdc.balanceOf(safeA) - aBefore,
-            300_000_000 + _feesOf(LIQ_A_IN) + 500_000_000,
-            "Safe A receives both principals and the in-range fees"
-        );
+        assertEq(mockUsdc.balanceOf(safeA) - aBefore, 300_000_000 + 500_000_000, "Safe A receives both principals");
         assertEq(vault.activeLiquidity(), LIQ_B, "the out-of-range burn leaves activeLiquidity alone");
 
         vm.prank(safeB);
         vault.burnPosition(posB);
-        assertEq(mockUsdc.balanceOf(safeB) - bBefore, feesB + 1_000_000_000, "Safe B receives its principal");
+        assertEq(mockUsdc.balanceOf(safeB) - bBefore, 1_000_000_000, "Safe B receives its 1,000 USDC principal");
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity is zero after every exit");
         assertEq(vault.phase(), 3, "phase stays Cancelled");
+
+        // The vault emits PositionBurned once per exit
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 burns = 0;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(vault) && logs[i].topics[0] == PositionBurned.selector) burns++;
+        }
+        assertEq(burns, 3, "PositionBurned three times");
     }
 }
 
@@ -422,10 +403,10 @@ contract BurnAfterFreezeTest is LPVaultFixture {
 // SC-JXR1: Terminal state gates off trading, and every exit stays open
 // What: After emergencyCancelAll(), every trading entry point reverts.
 //       mintPositionFor, depositForIntent, updateTick, startWindDown revert with
-//       VaultNotActive. notifyFees, mergePositions, heartbeat revert with
-//       VaultCancelled. emergencyCancelAll itself reverts (already cancelled).
-//       collect pays the 499 USDC of fees, mergeCompleteSets merges the pairs,
-//       and the pending escrow of 600 USDC is reclaimed (decision C9).
+//       VaultNotActive. mergePositions, heartbeat revert with VaultCancelled.
+//       emergencyCancelAll itself reverts (already cancelled). mergeCompleteSets
+//       merges the 10 pairs the vault holds, and the pending escrow of 600 USDC
+//       is reclaimed (decision C9).
 // Why:  The Cancelled state stops trading; it never locks an exit. The reclaim
 //       step is the exact sequence of audit issue 6.7.
 // ──────────────────────────────────────────────
@@ -433,7 +414,6 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
     bytes32 constant ESCROW_INTENT = keccak256("cancelled-escrow");
 
     event DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount);
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
 
     function setUp() public override {
         super.setUp();
@@ -492,20 +472,7 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
         assertEq(mockUsdc.balanceOf(lpB) - before_, 600, "the relayed reclaim pays after the freeze");
     }
 
-    // SC-JXR1, FR-JXQT: collect pays the 499 USDC of fees, because the freeze kept the record
-    function test_collectPaysFeesInCancelled() public {
-        uint256 before_ = mockUsdc.balanceOf(lpA);
-
-        vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionIdA, lpA, 499, 499);
-        vm.prank(lpA);
-        vault.collect(positionIdA);
-
-        assertEq(mockUsdc.balanceOf(lpA) - before_, 499, "the collect pays the accrued fees");
-        assertEq(vault.phase(), 3, "phase stays Cancelled");
-    }
-
-    // SC-JXR1, FR-JXQT: mergeCompleteSets succeeds in the Cancelled phase
+    // SC-JXR1, FR-JXQT: mergeCompleteSets merges the 10 pairs in the Cancelled phase
     function test_mergeCompleteSetsSucceeds() public {
         _giveOutcomeTokens(address(vault), vault.conditionId(), 10, 10);
         uint256 before_ = mockUsdc.balanceOf(address(vault));
@@ -515,13 +482,6 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
 
         assertEq(mockUsdc.balanceOf(address(vault)), before_ + 10, "the merge adds 10 USDC");
         assertEq(vault.phase(), 3, "phase stays Cancelled");
-    }
-
-    // SC-JXR1: notifyFees reverts with VaultCancelled
-    function test_notifyFeesReverts() public {
-        vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.VaultCancelled.selector);
-        vault.notifyFees(100);
     }
 
     // SC-JXR1: updateTick reverts with VaultNotActive
@@ -568,9 +528,10 @@ contract TerminalStateGatingTest is EmergencyCancelTestBase {
 
 // ──────────────────────────────────────────────
 // SC-JXR2: Operator activity resets timelock
-// What: When the Operator calls notifyFees, lastOperatorActivityTimestamp is
-//       reset to block.timestamp, preventing an immediate emergencyCancelAll
-//       even though the timelock would have elapsed before the operator action.
+// What: When the Operator calls updateTick with a changed tick, the tick
+//       moves and lastOperatorActivityTimestamp is reset to block.timestamp,
+//       preventing an immediate emergencyCancelAll even though the timelock
+//       would have elapsed before the operator action.
 // Why:  An active operator proves they haven't abandoned the vault. The
 //       timelock should only trigger when the operator truly goes silent.
 // ──────────────────────────────────────────────
@@ -580,42 +541,30 @@ contract OperatorActivityResetsTimelockTest is EmergencyCancelTestBase {
         _warpPastTimelock();
     }
 
-    // SC-JXR2: notifyFees resets lastOperatorActivityTimestamp
-    function test_notifyFeesResetsTimestamp() public {
-        // Fund the Operator and call notifyFees — this should reset the timer
-        _notifyFees(vault, operatorAddr, 100);
+    // SC-JXR2: a changed tick report moves the tick, resets the timer, and defers the cancel
+    function test_whenOperatorReportsChangedTickThenTimerResetsAndCancelReverts() public {
+        int24 newTick = int24(10);
+        assertTrue(vault.currentTick() != newTick, "precondition: the report changes the tick");
 
-        assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "timestamp should be reset");
-    }
+        vm.prank(operatorAddr);
+        vault.updateTick(newTick);
 
-    // SC-JXR2: emergencyCancelAll reverts after operator activity resets timer
-    function test_emergencyCancelRevertsAfterOperatorActivity() public {
-        // Operator acts — resets the timer
-        _notifyFees(vault, operatorAddr, 100);
+        assertEq(vault.currentTick(), newTick, "the report moved the tick");
+        assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "updateTick should reset timestamp");
 
         // Immediately try to cancel — should revert because timer was just reset
         vm.prank(lpA);
         vm.expectRevert(LPVault.TimelockNotElapsed.selector);
         vault.emergencyCancelAll();
     }
-
-    // SC-JXR2: updateTick also resets timer (already implemented, sanity check)
-    function test_updateTickResetsTimestamp() public {
-        // updateTick already updates lastOperatorActivityTimestamp
-        vm.prank(operatorAddr);
-        vault.updateTick(int24(10));
-
-        assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "updateTick should reset timestamp");
-    }
 }
 
 // ──────────────────────────────────────────────
 // SC-3XTZ: Heartbeat defers emergency cancel on a quiet market
-// What: On an Active market where the tick has not moved and no fee revenue
-//       arrived, two Operator calls refresh the silence timer and neither
-//       reverts: heartbeat(), and updateTick with the unchanged tick (the
-//       keeper's normal 60-second report, SC-TVS7). notifyFees(0) still
-//       reverts ZeroAmount.
+// What: On an Active market where the tick has not moved, two Operator calls
+//       refresh the silence timer and neither reverts: heartbeat(), and
+//       updateTick with the unchanged tick (the keeper's normal 60-second
+//       report, SC-TVS7).
 // Why:  A healthy Operator on a quiet market must be distinguishable from a
 //       silent one, and the keeper's normal report must count as proof of
 //       life without a second transaction.
@@ -629,16 +578,10 @@ contract HeartbeatOnQuietMarketTest is EmergencyCancelTestBase {
         _warpPastTimelock();
     }
 
-    // SC-3XTZ: on a quiet Active market both refresh paths succeed, and only
-    // the zero-income report still reverts
+    // SC-3XTZ: on a quiet Active market both refresh paths succeed
     function test_quietMarketHasTwoRefreshPaths() public {
         // Read the tick up front: an inline call here would consume the prank
         int24 unchangedTick = vault.currentTick();
-
-        // No fee revenue arrived, so notifyFees has nothing to distribute
-        vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.ZeroAmount.selector);
-        vault.notifyFees(0);
 
         // The tick has not moved, and the keeper's report refreshes the timer anyway
         vm.prank(operatorAddr);
@@ -673,7 +616,6 @@ contract HeartbeatOnQuietMarketTest is EmergencyCancelTestBase {
     function test_heartbeatChangesNoOtherVaultState() public {
         uint128 liquidityBefore = vault.activeLiquidity();
         int24 tickBefore = vault.currentTick();
-        uint256 feeGrowthBefore = vault.feeGrowthGlobalX128();
         uint256 nextIdBefore = vault.nextPositionId();
         uint8 phaseBefore = vault.phase();
 
@@ -682,7 +624,6 @@ contract HeartbeatOnQuietMarketTest is EmergencyCancelTestBase {
 
         assertEq(vault.activeLiquidity(), liquidityBefore, "activeLiquidity must not move");
         assertEq(vault.currentTick(), tickBefore, "currentTick must not move");
-        assertEq(vault.feeGrowthGlobalX128(), feeGrowthBefore, "feeGrowthGlobalX128 must not move");
         assertEq(vault.nextPositionId(), nextIdBefore, "nextPositionId must not move");
         assertEq(vault.phase(), phaseBefore, "phase must not move");
     }
@@ -799,10 +740,6 @@ contract HeartbeatAccessAndPhaseTest is EmergencyCancelTestBase {
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.TradingIsPaused.selector);
         vault.updateTick(int24(10));
-
-        vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.TradingIsPaused.selector);
-        vault.notifyFees(100);
 
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.TradingIsPaused.selector);

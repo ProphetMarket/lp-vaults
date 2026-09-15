@@ -5,12 +5,10 @@ pragma solidity 0.8.20;
 // FEAT-3ZRI: Escrow Deposit for Mint Intent
 // FEAT-T7AF: Mint LP Position
 // FEAT-JAIJ: LP Escape Hatch
-// FEAT-TOGR: Notify and Distribute Fees
 // FEAT-7G40: Burn LP Position
-// FEAT-U079: Collect Fees on a Position
 // Shared test fixture: the base of every vault test. Deploys the factory with the Safe derivation
-// constants, signs the four LP intent types with an owner key, derives the Safe the vault expects,
-// runs the escrow-then-mint flow that every position starts from, and funds the Operator's fee report.
+// constants, signs the three LP intent types with an owner key, derives the Safe the vault expects,
+// and runs the escrow-then-mint flow that every position starts from.
 // Test files import it. src/ never does.
 
 import {LPVault} from "../../src/LPVault.sol";
@@ -39,8 +37,6 @@ abstract contract LPVaultFixture is ConditionalTokensFixture {
         keccak256("ReclaimIntent(address lp,bytes32 intentId,uint256 deadline)");
     bytes32 internal constant BURN_INTENT_TYPEHASH =
         keccak256("BurnIntent(address lp,uint256 positionId,uint256 deadline)");
-    bytes32 internal constant COLLECT_INTENT_TYPEHASH =
-        keccak256("CollectIntent(address lp,uint256 positionId,uint256 nonce,uint256 deadline)");
     bytes32 internal constant DOMAIN_TYPEHASH =
         keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)");
 
@@ -143,18 +139,6 @@ abstract contract LPVaultFixture is ConditionalTokensFixture {
         return _signStruct(vault, pk, keccak256(abi.encode(BURN_INTENT_TYPEHASH, lp, positionId, deadline)));
     }
 
-    /// @dev Signs a CollectIntent with the owner key `pk`, naming `lp` (normally the key's Safe).
-    function _signCollectIntent(
-        address vault,
-        uint256 pk,
-        address lp,
-        uint256 positionId,
-        uint256 nonce,
-        uint256 deadline
-    ) internal view returns (bytes memory) {
-        return _signStruct(vault, pk, keccak256(abi.encode(COLLECT_INTENT_TYPEHASH, lp, positionId, nonce, deadline)));
-    }
-
     // ──────────────────────────────────────────────
     // Escrow and mint
     // ──────────────────────────────────────────────
@@ -204,19 +188,5 @@ abstract contract LPVaultFixture is ConditionalTokensFixture {
         _escrow(vault, operator, pk, safe, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE);
         vm.prank(operator);
         positionId = vault.mintPositionFor(safe, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE);
-    }
-
-    // ──────────────────────────────────────────────
-    // Fee report
-    // ──────────────────────────────────────────────
-
-    /// @dev The Operator reports `amount` of fee income, funded the way the keeper will: the wallet
-    ///      holds the swept USDC and has approved the vault, and notifyFees takes it (SC-TOGT,
-    ///      decision C19). Mints per call, never a large pre-mint, so a fuzzed amount near the
-    ///      mulDiv ceiling stays inside uint256 on the mock's balance.
-    function _notifyFees(LPVault vault, address operator, uint256 amount) internal {
-        _fundSafe(MockERC20(vault.usdc()), operator, address(vault), amount);
-        vm.prank(operator);
-        vault.notifyFees(amount);
     }
 }

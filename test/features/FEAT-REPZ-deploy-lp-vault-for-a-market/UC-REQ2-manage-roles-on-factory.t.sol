@@ -74,7 +74,7 @@ contract VaultPropagationBase is LPVaultFixture {
 // SC-REQB: Add operator successfully
 // What: Admin can register a new operator address via addOperator, and the
 //       registry reflects the change with the correct event emitted.
-// Why:  Operators execute transactional functions (mintPositionFor, notifyFees,
+// Why:  Operators execute transactional functions (mintPositionFor, heartbeat,
 //       updateTick). If addOperator doesn't work, no new operator wallets can
 //       be onboarded after factory deployment.
 // Example: addOperator(0xNEW) where 0xNEW != oracle
@@ -873,7 +873,7 @@ contract RenounceClearsPendingProposalTest is RoleManagementBase {
 //       needing per-vault transactions. This is the core security property
 //       that makes key rotation operationally viable.
 // Example: factory has the initial operator, vault V deployed → admin removes
-//          it, adds B → the initial operator calling notifyFees on V reverts,
+//          it, adds B → the initial operator calling heartbeat on V reverts,
 //          B succeeds.
 // ──────────────────────────────────────────────
 contract OperatorRotationPropagationTest is VaultPropagationBase {
@@ -888,7 +888,7 @@ contract OperatorRotationPropagationTest is VaultPropagationBase {
         // The initial operator calling an operator-gated function on vault should revert
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.NotOperator.selector);
-        vault.notifyFees(100);
+        vault.heartbeat();
     }
 
     // SC-FKD4: new operator B is accepted after addition to factory
@@ -897,13 +897,13 @@ contract OperatorRotationPropagationTest is VaultPropagationBase {
         vm.prank(admin);
         factory.addOperator(operatorB);
 
-        // Operator B calling an operator-gated function on vault should succeed.
-        // notifyFees requires activeLiquidity > 0 to succeed fully, but the
-        // access control check (onlyOperator) runs first. If we get past the
-        // operator check, we'll hit NoActiveLiquidity — which proves B was accepted.
+        // Operator B calling an operator-gated function on vault succeeds.
+        // heartbeat has no precondition beyond the operator check, so the
+        // refreshed timestamp proves B was accepted.
+        vm.warp(block.timestamp + 1);
         vm.prank(operatorB);
-        vm.expectRevert(LPVault.NoActiveLiquidity.selector);
-        vault.notifyFees(100);
+        vault.heartbeat();
+        assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "B refreshed the heartbeat");
     }
 
     // SC-FKD4: full rotation cycle — remove the initial operator, add B, verify both
@@ -917,12 +917,13 @@ contract OperatorRotationPropagationTest is VaultPropagationBase {
         // Initial operator: rejected
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.NotOperator.selector);
-        vault.notifyFees(100);
+        vault.heartbeat();
 
-        // New operator B: accepted (hits NoActiveLiquidity, which is past the auth check)
+        // New operator B: accepted
+        vm.warp(block.timestamp + 1);
         vm.prank(operatorB);
-        vm.expectRevert(LPVault.NoActiveLiquidity.selector);
-        vault.notifyFees(100);
+        vault.heartbeat();
+        assertEq(vault.lastOperatorActivityTimestamp(), block.timestamp, "B refreshed the heartbeat");
     }
 
     // SC-FKD4: events emitted by factory during rotation

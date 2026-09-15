@@ -49,7 +49,6 @@ contract OperatorBurnTestBase is LPVaultFixture {
         uint256 indexed positionId,
         address indexed owner,
         uint256 usdcOwed,
-        uint256 feesOwed,
         uint256 usdcPaid,
         uint256 tokenId,
         uint256 tokenOwed,
@@ -107,7 +106,7 @@ contract OperatorBurnTestBase is LPVaultFixture {
     }
 
     function _assertLive() internal view {
-        (address owner,,,, uint128 liq,,) = vault.positions(positionId);
+        (address owner,,,, uint128 liq) = vault.positions(positionId);
         assertEq(owner, safe, "the position keeps its owner");
         assertEq(liq, LIQUIDITY, "the position keeps its liquidity");
     }
@@ -125,7 +124,7 @@ contract OperatorBurnAtMintTickTest is OperatorBurnTestBase {
         uint256 operatorBefore = mockUsdc.balanceOf(operatorAddr);
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, 0, PRINCIPAL, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0);
         _relay(_sig());
 
         assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the Safe receives 300 USDC");
@@ -141,7 +140,7 @@ contract OperatorBurnAtMintTickTest is OperatorBurnTestBase {
         _relay(_sig());
 
         assertTrue(vault.usedBurnAuthorizations(structHash), "the struct hash is consumed");
-        (address owner,,,, uint128 liq,,) = vault.positions(positionId);
+        (address owner,,,, uint128 liq) = vault.positions(positionId);
         assertEq(owner, address(0), "the record is deleted");
         assertEq(liq, 0, "the record is deleted");
     }
@@ -155,7 +154,7 @@ contract OperatorBurnAtMintTickTest is OperatorBurnTestBase {
         vault.burnPosition(twin);
 
         assertEq(mockUsdc.balanceOf(safe), mockUsdc.balanceOf(safeB), "both paths pay the same USDC");
-        (uint128 gLower,,,) = vault.ticks(LOWER);
+        (uint128 gLower,,) = vault.ticks(LOWER);
         assertEq(gLower, 0, "both paths removed their liquidity from the shared tick");
     }
 }
@@ -173,7 +172,7 @@ contract OperatorBurnAfterPriceFellTest is OperatorBurnTestBase {
     // SC-7G4D: 247.3545 USDC plus 90 YES to the Safe, nothing to the Operator
     function test_whenRelayedAfterFallThenSafeReceivesUsdcPlusYes() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, 0, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
         _relay(_sig());
 
         assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "the USDC leg goes to the Safe");
@@ -196,7 +195,7 @@ contract OperatorBurnAfterPriceRoseTest is OperatorBurnTestBase {
     // SC-7G4E: 265.3455 USDC plus 90 NO to the Safe
     function test_whenRelayedAfterRiseThenSafeReceivesUsdcPlusNo() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, ROSE_USDC, 0, ROSE_USDC, vault.noTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, ROSE_USDC, ROSE_USDC, vault.noTokenId(), BAND_TOKENS, BAND_TOKENS);
         _relay(_sig());
 
         assertEq(mockUsdc.balanceOf(safe), ROSE_USDC, "the USDC leg goes to the Safe");
@@ -311,11 +310,11 @@ contract OperatorBurnReplayTest is OperatorBurnTestBase {
 }
 
 // ──────────────────────────────────────────────
-// SC-7G4I: Revert when a mint, reclaim, or collect authorization is reused as a burn
-// What: The owner key's MintIntent, ReclaimIntent, and CollectIntent signatures each
-//       recover to a key whose Safe is not lp under the BurnIntent typehash, so the relay
-//       reverts InvalidSignature. A BurnIntent is rejected by the other three paths.
-// Why:  Four disjoint namespaces (ADR-7G5H).
+// SC-7G4I: Revert when a mint or reclaim authorization is reused as a burn
+// What: The owner key's MintIntent and ReclaimIntent signatures each recover to a key
+//       whose Safe is not lp under the BurnIntent typehash, so the relay reverts
+//       InvalidSignature. A BurnIntent is rejected by the other two paths.
+// Why:  Three disjoint namespaces (ADR-7G5H).
 // ──────────────────────────────────────────────
 contract OperatorBurnCrossTypeTest is OperatorBurnTestBase {
     // SC-7G4I: a MintIntent signature is not a burn
@@ -333,14 +332,7 @@ contract OperatorBurnCrossTypeTest is OperatorBurnTestBase {
         _assertLive();
     }
 
-    // SC-7G4I: a CollectIntent signature is not a burn
-    function test_whenCollectIntentReusedThenReverts() public {
-        bytes memory sig = _signCollectIntent(address(vault), LP_PK, safe, positionId, 1, FAR_DEADLINE);
-        _expectRevertOnRelay(LPVault.InvalidSignature.selector, sig);
-        _assertLive();
-    }
-
-    // SC-7G4I: a BurnIntent signature is rejected by the deposit, the relayed reclaim, and the relayed collect
+    // SC-7G4I: a BurnIntent signature is rejected by the deposit and the relayed reclaim
     function test_whenBurnIntentReusedElsewhereThenEachPathReverts() public {
         bytes memory sig = _sig();
         bytes32 intentId = keccak256("example");
@@ -352,10 +344,6 @@ contract OperatorBurnCrossTypeTest is OperatorBurnTestBase {
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.InvalidSignature.selector);
         vault.reclaimDepositFor(safe, intentId, FAR_DEADLINE, sig);
-
-        vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.InvalidSignature.selector);
-        vault.collectFor(safe, positionId, 1, FAR_DEADLINE, sig);
     }
 }
 
@@ -409,7 +397,7 @@ contract OperatorBurnInWindDownTest is OperatorBurnTestBase {
     // SC-7G4K: the same amounts, and the phase stays WindDown
     function test_whenWindDownThenRelayedBurnPaysAsInActive() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, 0, PRINCIPAL, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0);
         _relay(_sig());
 
         assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the Safe receives 300 USDC in WindDown");

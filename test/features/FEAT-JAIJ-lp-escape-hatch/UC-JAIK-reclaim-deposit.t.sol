@@ -444,7 +444,7 @@ contract ReclaimReentrancyTest is LPVaultFixture {
 //       standing allowance spent 400 on a fill, and it holds 500 YES and 500 NO
 //       that no claim is owed. The Safe's reclaim merges the 500 free pairs,
 //       receives the full 600, and leaves 100 USDC and no token in the vault.
-// Why:  Escrow seniority (decision C7) binds burns and collects and not fills,
+// Why:  Escrow seniority (decision C7) binds burns and not fills,
 //       so a fill can spend escrowed USDC (finding CV-06). Before R15 this
 //       reclaim reverted TransferFailed until a keeper merged; the merge inside
 //       _refundEscrow (FR-DU2U, ADR-DU2V) removes the wait.

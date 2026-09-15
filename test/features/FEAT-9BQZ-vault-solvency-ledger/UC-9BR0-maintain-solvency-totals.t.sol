@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-9BR0: Maintain Solvency Totals
 // Integration tests for every scenario in this use case.
-// Covers: SC-9BRZ, SC-9BS0, SC-9BS1, SC-9BS2, SC-9BS6, SC-9BS7, SC-COEO, SC-COEP
+// Covers: SC-9BRZ, SC-9BS0, SC-9BS6, SC-9BS7, SC-COEO, SC-COEP
 
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
@@ -15,7 +15,7 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 // Deploys the factory and a vault on the real ConditionalTokens contract, reports tick 6000,
 // and mints the worked example of decision C26 on demand: 300 USDC over [5500, 6500), so
 // liquidity = 3e23 and mintTick = 6000. The scaled units: USDC in units x 1e22, tokens in
-// units x 1e18, fees in units x 2^128. USDC and every outcome token have six decimals.
+// units x 1e18. USDC and every outcome token have six decimals.
 // ──────────────────────────────────────────────
 contract SolvencyLedgerTestBase is LPVaultFixture {
     LPVaultFactory factory;
@@ -37,7 +37,6 @@ contract SolvencyLedgerTestBase is LPVaultFixture {
     uint128 constant LIQUIDITY = 3e23;
     uint256 constant USDC_SCALE = 1e22;
     uint256 constant TOKEN_SCALE = 1e18;
-    uint256 constant Q128 = 2 ** 128;
 
     // The claim at 5700: the YES band [5700, 6000), 90 YES, and the USDC the band did not spend
     uint256 constant FELL_USDC = 247_354_500;
@@ -51,13 +50,11 @@ contract SolvencyLedgerTestBase is LPVaultFixture {
         uint256 indexed positionId,
         address indexed owner,
         uint256 usdcOwed,
-        uint256 feesOwed,
         uint256 usdcPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
     );
-    event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
     event PositionsMerged(uint256[] positionIds, uint256 survivorId);
     event EmergencyCancelExecuted(address indexed caller);
 
@@ -90,43 +87,22 @@ contract SolvencyLedgerTestBase is LPVaultFixture {
         vault.burnPosition(id);
     }
 
-    function _collect(uint256 id) internal {
-        vm.prank(safe);
-        vault.collect(id);
-    }
-
     /// @dev Gives the vault outcome tokens, as the keeper's fills would.
     function _fundVault(uint256 yesAmount, uint256 noAmount) internal {
         _giveOutcomeTokens(address(vault), vault.conditionId(), yesAmount, noAmount);
     }
 
-    /// @dev The four scaled totals, read in one place.
-    function _scaledTotals() internal view returns (uint256 usdc, uint256 yes, uint256 no, uint256 fees) {
+    /// @dev The three scaled totals, read in one place.
+    function _scaledTotals() internal view returns (uint256 usdc, uint256 yes, uint256 no) {
         usdc = vault.totalUsdcOwedScaled();
         yes = vault.totalYesOwedScaled();
         no = vault.totalNoOwedScaled();
-        fees = vault.totalFeesOwedX128();
     }
 
     function _assertPrincipalTotalsZero() internal view {
         assertEq(vault.totalUsdcOwedScaled(), 0, "the USDC total must be zero");
         assertEq(vault.totalYesOwedScaled(), 0, "the YES total must be zero");
         assertEq(vault.totalNoOwedScaled(), 0, "the NO total must be zero");
-    }
-
-    /// @dev The position's scaled fee claim, computed the way the vault computes it.
-    function _scaledFeeClaim(uint256 id) internal view returns (uint256 x) {
-        (, int24 lo, int24 hi,, uint128 l, uint256 last, uint256 tokensOwed) = vault.positions(id);
-        uint256 global = vault.feeGrowthGlobalX128();
-        (,, uint256 outLo,) = vault.ticks(lo);
-        (,, uint256 outHi,) = vault.ticks(hi);
-        int24 c = vault.currentTick();
-        unchecked {
-            uint256 below = c >= lo ? outLo : global - outLo;
-            uint256 above = c < hi ? outHi : global - outHi;
-            uint256 inside = global - below - above;
-            x = uint256(l) * (inside - last) + tokensOwed * Q128;
-        }
     }
 }
 
@@ -146,13 +122,12 @@ contract LedgerMintCreditTest is SolvencyLedgerTestBase {
         assertEq(vault.totalUsdcOwed(), PRINCIPAL, "the truncated USDC total");
     }
 
-    // SC-9BRZ: no token total and no fee total move
-    function test_whenMintedThenTokenAndFeeTotalsStayZero() public {
+    // SC-9BRZ: no token total moves
+    function test_whenMintedThenTokenTotalsStayZero() public {
         _mintExample(keccak256("a"));
 
         assertEq(vault.totalYesOwed(), 0, "no YES at the mint");
         assertEq(vault.totalNoOwed(), 0, "no NO at the mint");
-        assertEq(vault.totalFeesOwed(), 0, "no fees at the mint");
     }
 
     // SC-9BRZ: an in-range mint enters on the NO side
@@ -168,7 +143,7 @@ contract LedgerMintCreditTest is SolvencyLedgerTestBase {
 // What: With the vault at 5700 the burn lowers the USDC total by the scaled 247.3545 USDC and
 //       the YES total by the scaled 90 YES, exactly what PositionBurned reports as owed.
 // Why:  The debit is the claim at burn time, computed once from the same _claim the payout
-//       truncates (FR-9BR9), and the fee claim leaves in the same call (FR-9BRC).
+//       truncates (FR-9BR9).
 // ──────────────────────────────────────────────
 contract LedgerBurnDebitTest is SolvencyLedgerTestBase {
     uint256 positionId;
@@ -185,16 +160,15 @@ contract LedgerBurnDebitTest is SolvencyLedgerTestBase {
     // SC-9BS0: the totals fall by the claim the event reports
     function test_whenBurnedThenTotalsFallByTheOwedAmounts() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, 0, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
         _burn(positionId);
 
         _assertPrincipalTotalsZero();
-        assertEq(vault.totalFeesOwedX128(), 0, "the fee claim leaves in the same call");
     }
 
     // SC-9BS0: the scaled debit is the scaled claim
     function test_whenBurnedThenScaledTotalsFallByTheScaledClaim() public {
-        (uint256 usdcBefore, uint256 yesBefore,,) = _scaledTotals();
+        (uint256 usdcBefore, uint256 yesBefore,) = _scaledTotals();
         assertEq(usdcBefore, FELL_USDC_SCALED, "precondition: the scaled USDC total");
         assertEq(yesBefore, FELL_YES_SCALED, "precondition: the scaled YES total");
 
@@ -213,84 +187,13 @@ contract LedgerBurnDebitTest is SolvencyLedgerTestBase {
 }
 
 // ──────────────────────────────────────────────
-// SC-9BS1: A collect leaves the principal totals unchanged and settles the fee total
-// SC-9BS2: A fee report credits the fee total by what the in-range positions can claim
-// What: A 10 USDC report over the one in-range position raises the fee total by growth x
-//       activeLiquidity, which truncates to 9,999,999 units; the collect debits the whole
-//       scaled fee claim and touches no principal total.
-// Why:  FR-9BRA credits exactly what the in-range claims grew by, and FR-9BR7 and FR-9BRB
-//       keep the principal totals out of a collect.
+// SC-9BS6: A merge leaves every total unchanged
+// What: Two positions of the same Safe over the same range and mint tick, 300 and 200 USDC;
+//       the merge sums the liquidity into the survivor and writes no total.
+// Why:  FR-9BRH: the claim is linear in liquidity and both positions share the range and the
+//       mint tick, so the principal is conserved without a write.
 // ──────────────────────────────────────────────
-contract LedgerFeeReportAndCollectTest is SolvencyLedgerTestBase {
-    uint256 positionId;
-    uint256 constant REPORT = 10e6;
-
-    function setUp() public override {
-        super.setUp();
-        positionId = _mintExample(keccak256("a"));
-    }
-
-    // SC-9BS2: the credit is growth x activeLiquidity, in Q128
-    function test_whenFeesAreReportedThenFeeTotalRisesByGrowthTimesActiveLiquidity() public {
-        uint256 globalBefore = vault.feeGrowthGlobalX128();
-        _fundSafe(mockUsdc, operatorAddr, address(vault), REPORT);
-
-        vm.expectEmit(false, false, false, true, address(vault));
-        emit FeesNotified(REPORT, globalBefore + REPORT * Q128 / uint256(LIQUIDITY));
-        vm.prank(operatorAddr);
-        vault.notifyFees(REPORT);
-
-        uint256 growth = vault.feeGrowthGlobalX128() - globalBefore;
-        assertEq(vault.totalFeesOwedX128(), growth * uint256(LIQUIDITY), "the scaled fee credit");
-        assertEq(vault.totalFeesOwed(), 9_999_999, "the truncated fee total: the report less the mulDiv dust");
-    }
-
-    // SC-9BS2: no principal total moves on a report
-    function test_whenFeesAreReportedThenPrincipalTotalsAreUnchanged() public {
-        (uint256 usdcBefore, uint256 yesBefore, uint256 noBefore,) = _scaledTotals();
-        _notifyFees(vault, operatorAddr, REPORT);
-        (uint256 usdcAfter, uint256 yesAfter, uint256 noAfter,) = _scaledTotals();
-        assertEq(usdcAfter, usdcBefore, "USDC total");
-        assertEq(yesAfter, yesBefore, "YES total");
-        assertEq(noAfter, noBefore, "NO total");
-    }
-
-    // SC-9BS1: the collect debits the whole scaled fee claim
-    function test_whenCollectedThenFeeTotalSettlesToZero() public {
-        _notifyFees(vault, operatorAddr, REPORT);
-        assertEq(vault.totalFeesOwedX128(), _scaledFeeClaim(positionId), "precondition: one in-range claim");
-
-        _collect(positionId);
-
-        assertEq(vault.totalFeesOwedX128(), 0, "the only claim settled");
-        assertEq(mockUsdc.balanceOf(safe), 9_999_999, "the covered vault paid the whole claim");
-    }
-
-    // SC-9BS1: the collect touches no principal total, no activeLiquidity, and no noSideLiquidity
-    function test_whenCollectedThenPrincipalTotalsAndCountersAreUnchanged() public {
-        _notifyFees(vault, operatorAddr, REPORT);
-        (uint256 usdcBefore, uint256 yesBefore, uint256 noBefore,) = _scaledTotals();
-
-        _collect(positionId);
-
-        (uint256 usdcAfter, uint256 yesAfter, uint256 noAfter,) = _scaledTotals();
-        assertEq(usdcAfter, usdcBefore, "USDC total");
-        assertEq(yesAfter, yesBefore, "YES total");
-        assertEq(noAfter, noBefore, "NO total");
-        assertEq(vault.activeLiquidity(), LIQUIDITY, "activeLiquidity");
-        assertEq(vault.noSideLiquidity(), LIQUIDITY, "noSideLiquidity");
-    }
-}
-
-// ──────────────────────────────────────────────
-// SC-9BS6: A merge leaves the principal totals unchanged and debits the fee dust
-// What: Two positions of the same Safe over the same range and mint tick, 300 and 200 USDC,
-//       accrue fees whose products do not divide by 2^128; the merge floors each into the
-//       survivor's tokensOwed and debits the fee total by the two remainders.
-// Why:  FR-9BRH: the fee total still equals the survivor's scaled fee claim afterwards, and
-//       the claim is linear in liquidity, so the principal totals need no write.
-// ──────────────────────────────────────────────
-contract LedgerMergeDustTest is SolvencyLedgerTestBase {
+contract LedgerMergeTest is SolvencyLedgerTestBase {
     uint256 survivor;
     uint256 consumed;
 
@@ -298,7 +201,6 @@ contract LedgerMergeDustTest is SolvencyLedgerTestBase {
         super.setUp();
         survivor = _mintExample(keccak256("a"));
         consumed = _escrowAndMint(vault, operatorAddr, LP_PK, LOWER, UPPER, 200e6, keccak256("b"));
-        _notifyFees(vault, operatorAddr, 7e6 + 1);
     }
 
     function _merge() internal returns (uint256[] memory ids) {
@@ -309,28 +211,13 @@ contract LedgerMergeDustTest is SolvencyLedgerTestBase {
         vault.mergePositions(ids);
     }
 
-    // SC-9BS6: the fee total falls by exactly the two remainders
-    function test_whenMergedThenFeeTotalFallsByTheDustTheFloorsDrop() public {
-        uint256 xSurvivor = _scaledFeeClaim(survivor);
-        uint256 xConsumed = _scaledFeeClaim(consumed);
-        assertTrue(xSurvivor % Q128 != 0 && xConsumed % Q128 != 0, "precondition: the products do not divide by 2^128");
-        uint256 feesBefore = vault.totalFeesOwedX128();
-
-        _merge();
-
-        assertEq(feesBefore - vault.totalFeesOwedX128(), xSurvivor % Q128 + xConsumed % Q128, "the dust debit");
-        (,,,,,, uint256 tokensOwed) = vault.positions(survivor);
-        assertEq(tokensOwed, xSurvivor / Q128 + xConsumed / Q128, "the survivor holds the two floors");
-        assertEq(vault.totalFeesOwedX128(), _scaledFeeClaim(survivor), "the ledger equals the survivor's scaled claim");
-    }
-
-    // SC-9BS6: the principal totals are unchanged
-    function test_whenMergedThenPrincipalTotalsAreUnchanged() public {
-        (uint256 usdcBefore, uint256 yesBefore, uint256 noBefore,) = _scaledTotals();
+    // SC-9BS6: the three totals read identically before and after
+    function test_whenMergedThenNoTotalIsWritten() public {
+        (uint256 usdcBefore, uint256 yesBefore, uint256 noBefore) = _scaledTotals();
 
         uint256[] memory ids = _merge();
 
-        (uint256 usdcAfter, uint256 yesAfter, uint256 noAfter,) = _scaledTotals();
+        (uint256 usdcAfter, uint256 yesAfter, uint256 noAfter) = _scaledTotals();
         assertEq(usdcAfter, usdcBefore, "USDC total");
         assertEq(yesAfter, yesBefore, "YES total");
         assertEq(noAfter, noBefore, "NO total");
@@ -387,7 +274,7 @@ contract LedgerExactCancelTest is SolvencyLedgerTestBase {
 
 // ──────────────────────────────────────────────
 // SC-COEP: The freeze leaves every total unchanged
-// What: After the Operator's silence, any address freezes the vault; the four scaled totals
+// What: After the Operator's silence, any address freezes the vault; the three scaled totals
 //       and noSideLiquidity read as before, and a burn afterwards debits them as in Active.
 // Why:  FEAT-JXQO FR-JXQP: the freeze writes phase and nothing else (decision C9).
 // ──────────────────────────────────────────────
@@ -401,7 +288,6 @@ contract LedgerFreezeTest is SolvencyLedgerTestBase {
         _escrowAndMint(vault, operatorAddr, LP_PK, LOWER, MINT_TICK, PRINCIPAL, keccak256("b"));
         _moveTick(MINT_TICK);
         positionA = _mintExample(keccak256("a"));
-        _notifyFees(vault, operatorAddr, 10e6);
     }
 
     function _freeze() internal {
@@ -414,18 +300,17 @@ contract LedgerFreezeTest is SolvencyLedgerTestBase {
 
     // SC-COEP: no total and no counter moves
     function test_whenFrozenThenTotalsAndNoSideLiquidityAreUnchanged() public {
-        (uint256 usdcBefore, uint256 yesBefore, uint256 noBefore, uint256 feesBefore) = _scaledTotals();
+        (uint256 usdcBefore, uint256 yesBefore, uint256 noBefore) = _scaledTotals();
         uint128 noSideBefore = vault.noSideLiquidity();
-        assertTrue(usdcBefore > 0 && noBefore > 0 && feesBefore > 0 && noSideBefore > 0, "precondition: nonzero state");
+        assertTrue(usdcBefore > 0 && noBefore > 0 && noSideBefore > 0, "precondition: nonzero state");
 
         _freeze();
 
-        (uint256 usdcAfter, uint256 yesAfter, uint256 noAfter, uint256 feesAfter) = _scaledTotals();
+        (uint256 usdcAfter, uint256 yesAfter, uint256 noAfter) = _scaledTotals();
         assertEq(vault.phase(), 3, "frozen");
         assertEq(usdcAfter, usdcBefore, "USDC total");
         assertEq(yesAfter, yesBefore, "YES total");
         assertEq(noAfter, noBefore, "NO total");
-        assertEq(feesAfter, feesBefore, "fee total");
         assertEq(vault.noSideLiquidity(), noSideBefore, "noSideLiquidity");
     }
 
@@ -433,13 +318,10 @@ contract LedgerFreezeTest is SolvencyLedgerTestBase {
     function test_whenFrozenThenBurnDebitsTheTotals() public {
         _freeze();
         uint256 usdcBefore = vault.totalUsdcOwedScaled();
-        uint256 feesBefore = vault.totalFeesOwedX128();
-        uint256 feeClaim = _scaledFeeClaim(positionA);
 
         _burn(positionA);
 
         assertEq(usdcBefore - vault.totalUsdcOwedScaled(), MINT_USDC_SCALED, "A's claim at its mint tick");
-        assertEq(feesBefore - vault.totalFeesOwedX128(), feeClaim, "A's scaled fee claim");
         assertEq(vault.noSideLiquidity(), 0, "A left the NO side");
     }
 }

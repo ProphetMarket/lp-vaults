@@ -13,8 +13,7 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for wind-down scenarios.
-// Deploys factory + vault clone, mints an in-range position for the LP,
-// and distributes fees so there is a position with claimable fees.
+// Deploys factory + vault clone and mints an in-range position for the LP.
 // ──────────────────────────────────────────────
 contract StartWindDownTestBase is LPVaultFixture {
     LPVaultFactory factory;
@@ -34,11 +33,18 @@ contract StartWindDownTestBase is LPVaultFixture {
     uint128 minFirstLiq = uint128(10e18);
 
     uint256 constant LIQUIDITY_PRECISION = 1e18;
-    uint256 constant Q128 = 2 ** 128;
 
     // Events declared for expectEmit
     event VaultWindDownStarted(bytes32 indexed marketId);
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
+    event PositionBurned(
+        uint256 indexed positionId,
+        address indexed owner,
+        uint256 usdcOwed,
+        uint256 usdcPaid,
+        uint256 tokenId,
+        uint256 tokenOwed,
+        uint256 tokenPaid
+    );
 
     // Position minted in setUp for exit-path tests
     uint256 positionId;
@@ -55,12 +61,9 @@ contract StartWindDownTestBase is LPVaultFixture {
 
         vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
 
-        // Mint a position: range [0, 100) with 1000 USDC so there's
-        // something to collect and an existing position for exit-path tests.
+        // Mint a position: range [0, 100) with 1000 USDC, so there is an
+        // existing position for exit-path tests.
         positionId = _escrowAndMint(vault, operatorAddr, LP_PK, int24(0), int24(100), 1000, keccak256("setup-mint"));
-
-        // Distribute fees so the position has something to collect
-        _notifyFees(vault, operatorAddr, 500);
     }
 
     /// @dev Transitions the vault to WindDown using the real startWindDown() function.
@@ -98,12 +101,10 @@ contract SuccessfulWindDownTest is StartWindDownTestBase {
         vault.startWindDown();
     }
 
-    // SC-JGEF: no other state is modified (positions, ticks, fees unchanged)
+    // SC-JGEF: no other state is modified (positions, ticks unchanged)
     function test_noSideEffectsOnPositionState() public {
         // Snapshot position state before wind-down
-        (address ownerBefore, int24 tlBefore, int24 tuBefore,, uint128 liqBefore, uint256 feeGrowthBefore,) =
-            vault.positions(positionId);
-        uint256 feeGrowthGlobalBefore = vault.feeGrowthGlobalX128();
+        (address ownerBefore, int24 tlBefore, int24 tuBefore,, uint128 liqBefore) = vault.positions(positionId);
         uint128 activeLiqBefore = vault.activeLiquidity();
         int24 currentTickBefore = vault.currentTick();
 
@@ -111,14 +112,11 @@ contract SuccessfulWindDownTest is StartWindDownTestBase {
         vault.startWindDown();
 
         // Verify nothing changed except phase
-        (address ownerAfter, int24 tlAfter, int24 tuAfter,, uint128 liqAfter, uint256 feeGrowthAfter,) =
-            vault.positions(positionId);
+        (address ownerAfter, int24 tlAfter, int24 tuAfter,, uint128 liqAfter) = vault.positions(positionId);
         assertEq(ownerAfter, ownerBefore, "owner unchanged");
         assertEq(tlAfter, tlBefore, "tickLower unchanged");
         assertEq(tuAfter, tuBefore, "tickUpper unchanged");
         assertEq(liqAfter, liqBefore, "liquidity unchanged");
-        assertEq(feeGrowthAfter, feeGrowthBefore, "feeGrowthInsideLast unchanged");
-        assertEq(vault.feeGrowthGlobalX128(), feeGrowthGlobalBefore, "feeGrowthGlobal unchanged");
         assertEq(vault.activeLiquidity(), activeLiqBefore, "activeLiquidity unchanged");
         assertEq(vault.currentTick(), currentTickBefore, "currentTick unchanged");
     }
@@ -250,10 +248,11 @@ contract MintRevertsInWindDownTest is StartWindDownTestBase {
 
 // ──────────────────────────────────────────────
 // SC-JGEK: Exit paths succeed in WindDown
-// What: After startWindDown(), collect still works for positions with accrued
-//       fees, and burnPosition deletes the position, removes its liquidity
-//       from both ticks, and pays the Safe the claim's USDC. The position sits
-//       at its mint tick, so the claim is USDC only.
+// What: After startWindDown(), burnPosition removes the position's liquidity
+//       from both ticks, deletes the record, merges the free pairs, and pays
+//       the Safe the claim's USDC plus its one outcome token, the same amounts
+//       as in Active. The position sits at its mint tick, so the claim is USDC
+//       only and the vault holds no pair to merge.
 // Why:  Capital must never be stranded. The wind-down only prevents new mints;
 //       all exit paths remain open so LPs can withdraw.
 // ──────────────────────────────────────────────
@@ -263,66 +262,29 @@ contract ExitPathsSucceedInWindDownTest is StartWindDownTestBase {
         _windDownVault();
     }
 
-    // SC-JGEK: collect succeeds in WindDown and transfers fees to LP
-    function test_collectSucceedsInWindDown() public {
-        uint256 lpBalBefore = mockUsdc.balanceOf(lp);
-
-        vm.prank(lp);
-        vault.collect(positionId);
-
-        assertTrue(mockUsdc.balanceOf(lp) > lpBalBefore, "LP should receive fees in WindDown");
-    }
-
-    // SC-JGEK: collect emits FeesCollected event in WindDown
-    function test_collectEmitsEventInWindDown() public {
-        uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
-        (,,,,, uint256 feeGrowthInsideLast,) = vault.positions(positionId);
-        uint256 feeGrowthDelta = feeGrowthGlobal - feeGrowthInsideLast;
-        (,,,, uint128 liquidity,,) = vault.positions(positionId);
-        uint256 expectedOwed = uint256(liquidity) * feeGrowthDelta / Q128;
-
-        vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, lp, expectedOwed, expectedOwed);
-
-        vm.prank(lp);
-        vault.collect(positionId);
-    }
-
-    // SC-JGEK: tokensOwed zeroed after collect in WindDown
-    function test_tokensOwedZeroedAfterCollectInWindDown() public {
-        vm.prank(lp);
-        vault.collect(positionId);
-
-        (,,,,,, uint256 tokensOwed) = vault.positions(positionId);
-        assertEq(tokensOwed, 0, "tokensOwed should be zeroed after collect");
-    }
-
-    // SC-JGEK: vault phase remains WindDown after collect
-    function test_phaseUnchangedAfterCollect() public {
-        vm.prank(lp);
-        vault.collect(positionId);
-
-        assertEq(vault.phase(), 2, "phase should still be WindDown");
-    }
-
-    // SC-JGEK, FR-JGEC: after the collect, the burn pays the claim's USDC and deletes the position
-    function test_burnSucceedsInWindDownAfterCollect() public {
-        vm.prank(lp);
-        vault.collect(positionId);
-        uint256 afterCollect = mockUsdc.balanceOf(lp);
-        (,,,, uint128 liquidity,,) = vault.positions(positionId);
+    // SC-JGEK, FR-JGEC: the burn pays the claim's USDC plus its one outcome token and deletes the position
+    function test_whenWoundDownThenBurnPaysTheClaimAndDeletesThePosition() public {
+        (,,,, uint128 liquidity) = vault.positions(positionId);
         assertEq(vault.activeLiquidity(), liquidity, "precondition: the position is in range at its mint tick");
+        uint256 before_ = mockUsdc.balanceOf(lp);
+        uint256 yesBefore = ctf.balanceOf(lp, vault.yesTokenId());
+        uint256 noBefore = ctf.balanceOf(lp, vault.noTokenId());
 
+        // 1000 USDC over [0, 100) at its mint tick: every level is still USDC, so the token leg
+        // is empty. These are the amounts the same burn pays in Active (FEAT-7G40 SC-7G49).
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(positionId, lp, 1000, 1000, 0, 0, 0);
         vm.prank(lp);
         vault.burnPosition(positionId);
 
-        // 1000 USDC over [0, 100) at its mint tick: every level is still USDC
-        assertEq(mockUsdc.balanceOf(lp) - afterCollect, 1000, "the Safe receives the whole principal");
-        (address owner,,,, uint128 liqAfter,,) = vault.positions(positionId);
+        assertEq(mockUsdc.balanceOf(lp) - before_, 1000, "the Safe receives the whole principal");
+        assertEq(ctf.balanceOf(lp, vault.yesTokenId()), yesBefore, "no YES token is owed at the mint tick");
+        assertEq(ctf.balanceOf(lp, vault.noTokenId()), noBefore, "no NO token is owed at the mint tick");
+        (address owner,,,, uint128 liqAfter) = vault.positions(positionId);
         assertEq(owner, address(0), "the position record is deleted");
         assertEq(liqAfter, 0, "the position record is deleted");
-        (uint128 gLower,,,) = vault.ticks(int24(0));
-        (uint128 gUpper,,,) = vault.ticks(int24(100));
+        (uint128 gLower,,) = vault.ticks(int24(0));
+        (uint128 gUpper,,) = vault.ticks(int24(100));
         assertEq(gLower, 0, "tick 0 lost the liquidity");
         assertEq(gUpper, 0, "tick 100 lost the liquidity");
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity fell by the position's liquidity");

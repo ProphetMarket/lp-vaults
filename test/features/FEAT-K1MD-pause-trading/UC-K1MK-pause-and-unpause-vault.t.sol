@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-K1MK: Pause and Unpause Vault
 // Integration tests for every scenario in this use case.
-// Covers: SC-K1ML, SC-K1MM, SC-K1MN, SC-K1MO, SC-K1MP
+// Covers: SC-K1ML, SC-K1MM, SC-K1MN, SC-K1MP
 
 import {Test} from "forge-std/Test.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -13,8 +13,8 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Base test contract for pauseTrading / unpauseTrading scenarios.
-// Deploys factory + vault clone, mints one in-range position (so
-// notifyFees has nonzero activeLiquidity), and provides helpers.
+// Deploys factory + vault clone, mints one in-range position, and
+// provides helpers.
 // ──────────────────────────────────────────────
 contract PauseTradingTestBase is LPVaultFixture {
     LPVaultFactory factory;
@@ -34,7 +34,6 @@ contract PauseTradingTestBase is LPVaultFixture {
     uint128 minFirstLiq = uint128(1e18);
 
     uint256 constant LIQUIDITY_PRECISION = 1e18;
-    uint256 constant Q128 = 2 ** 128;
 
     event TradingPaused(address indexed caller);
     event TradingUnpaused(address indexed caller);
@@ -67,8 +66,7 @@ contract PauseTradingTestBase is LPVaultFixture {
 // SC-K1ML: Admin pauses vault and gated functions revert
 // What: When Admin calls pauseTrading(), paused becomes true and
 //       TradingPaused is emitted. Subsequently, mintPositionFor,
-//       notifyFees, updateTick, and mergePositions all revert with
-//       TradingIsPaused.
+//       updateTick, and mergePositions all revert with TradingIsPaused.
 // Why:  The circuit breaker must immediately halt all trading entry
 //       points to contain damage from a bug or market anomaly.
 // ──────────────────────────────────────────────
@@ -103,22 +101,25 @@ contract PauseTradingPauseAndGateTest is PauseTradingTestBase {
         vault.mintPositionFor(lp, int24(0), int24(100), 100, intentId, FAR_DEADLINE);
     }
 
-    // SC-K1ML: notifyFees reverts while paused
-    function test_notifyFeesRevertsWhilePaused() public {
+    // SC-K1ML: updateTick with a changed tick reverts while paused
+    // SC-K1MM: the same call succeeds after the unpause and moves currentTick
+    function test_whenPausedThenUpdateTickRevertsAndAfterUnpauseItMovesTheTick() public {
+        int24 tickBefore = vault.currentTick();
+        int24 newTick = int24(10);
+        assertTrue(tickBefore != newTick, "precondition: the report changes the tick");
         _pause();
 
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.TradingIsPaused.selector);
-        vault.notifyFees(100);
-    }
+        vault.updateTick(newTick);
+        assertEq(vault.currentTick(), tickBefore, "the paused report moves nothing");
 
-    // SC-K1ML: updateTick reverts while paused
-    function test_updateTickRevertsWhilePaused() public {
-        _pause();
+        vm.prank(admin);
+        vault.unpauseTrading();
 
         vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.TradingIsPaused.selector);
-        vault.updateTick(int24(10));
+        vault.updateTick(newTick);
+        assertEq(vault.currentTick(), newTick, "the report moves the tick after the unpause");
     }
 
     // SC-K1ML: mergePositions reverts while paused
@@ -141,7 +142,8 @@ contract PauseTradingPauseAndGateTest is PauseTradingTestBase {
 // ──────────────────────────────────────────────
 // SC-K1MM: Unpause returns vault to normal
 // What: After Admin calls unpauseTrading(), paused becomes false,
-//       TradingUnpaused is emitted, and gated functions work again.
+//       TradingUnpaused is emitted, and gated functions work again
+//       (the updateTick proof sits beside the SC-K1ML gate test above).
 // Why:  The circuit breaker must be reversible so trading can resume
 //       once the issue is resolved.
 // ──────────────────────────────────────────────
@@ -166,24 +168,6 @@ contract PauseTradingUnpauseTest is PauseTradingTestBase {
 
         vm.prank(admin);
         vault.unpauseTrading();
-    }
-
-    // SC-K1MM: notifyFees succeeds after unpause
-    function test_notifyFeesSucceedsAfterUnpause() public {
-        _pause();
-
-        // Verify it reverts while paused
-        vm.prank(operatorAddr);
-        vm.expectRevert(LPVault.TradingIsPaused.selector);
-        vault.notifyFees(100);
-
-        // Unpause and verify it works
-        vm.prank(admin);
-        vault.unpauseTrading();
-
-        uint256 feeGrowthBefore = vault.feeGrowthGlobalX128();
-        _notifyFees(vault, operatorAddr, 100);
-        assertGt(vault.feeGrowthGlobalX128(), feeGrowthBefore, "feeGrowth should increase after unpause");
     }
 }
 
@@ -215,33 +199,6 @@ contract PauseTradingAccessControlTest is PauseTradingTestBase {
         vm.prank(nobody);
         vm.expectRevert(LPVault.NotAdmin.selector);
         vault.unpauseTrading();
-    }
-}
-
-// ──────────────────────────────────────────────
-// SC-K1MO: Collect works while paused
-// What: While the vault is paused, LP can still call collect() to
-//       withdraw accrued fees from their position.
-// Why:  LP exit paths must never be blocked — capital should never
-//       be trapped by the circuit breaker.
-// Example: Distribute 500 USDC fees, pause, collect → LP receives fees.
-// ──────────────────────────────────────────────
-contract PauseTradingCollectTest is PauseTradingTestBase {
-    // SC-K1MO: collect succeeds while paused
-    function test_collectSucceedsWhilePaused() public {
-        // Distribute fees so the position has something to collect. notifyFees takes
-        // the 500 USDC from the Operator wallet, so the vault holds the payout.
-        _notifyFees(vault, operatorAddr, 500);
-
-        _pause();
-
-        // Collect should succeed despite pause
-        uint256 lpBalBefore = mockUsdc.balanceOf(lp);
-        vm.prank(lp);
-        vault.collect(positionId);
-        uint256 lpBalAfter = mockUsdc.balanceOf(lp);
-
-        assertGt(lpBalAfter, lpBalBefore, "LP should receive fees while paused");
     }
 }
 

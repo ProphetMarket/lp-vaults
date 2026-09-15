@@ -15,12 +15,12 @@ import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 // ──────────────────────────────────────────────
 // Base test contract for updateTick scenarios.
 // Deploys factory + vault clone, mints two positions to set up initialized
-// ticks at 0, 100, 200, notifies fees to give feeGrowthGlobalX128 > 0.
+// ticks at 0, 100, 200.
 //
 // Tick state after setUp:
-//   tick 0:   liquidityGross=10e18, liquidityNet=+10e18, feeGrowthOutside=feeGrowthGlobal
-//   tick 100: liquidityGross=30e18, liquidityNet=+10e18, feeGrowthOutside=0
-//   tick 200: liquidityGross=20e18, liquidityNet=-20e18, feeGrowthOutside=0
+//   tick 0:   liquidityGross=10e18, liquidityNet=+10e18
+//   tick 100: liquidityGross=30e18, liquidityNet=+10e18
+//   tick 200: liquidityGross=20e18, liquidityNet=-20e18
 //   currentTick=0, activeLiquidity=10e18
 // ──────────────────────────────────────────────
 contract UpdateTickTestBase is LPVaultFixture {
@@ -60,9 +60,6 @@ contract UpdateTickTestBase is LPVaultFixture {
 
         // Position B: [100, 200) with 2000 USDC → liquidity = 20e18
         _mintPosition(int24(100), int24(200), 2000, keccak256("pos-b"));
-
-        // Notify 500 USDC fees → feeGrowthGlobalX128 = mulDiv(500, 2^128, 10e18)
-        _notifyFees(vault, operatorAddr, 500);
     }
 
     function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId) internal {
@@ -73,10 +70,10 @@ contract UpdateTickTestBase is LPVaultFixture {
 // ──────────────────────────────────────────────
 // SC-TVS2: Price increases crossing initialized ticks (left-to-right)
 // What: Operator calls updateTick(150) from currentTick=0. Tick 100 is the
-//       only initialized tick in (0, 150]. The crossing flips feeGrowthOutside
-//       at tick 100 and adds its +10e18 liquidityNet to activeLiquidity.
-// Why:  L-to-R is the primary happy path. feeGrowthOutside flip correctness
-//       is critical — every subsequent collect depends on it.
+//       only initialized tick in (0, 150]. The crossing adds its +10e18
+//       liquidityNet to activeLiquidity.
+// Why:  L-to-R is the primary happy path. The activeLiquidity adjustment
+//       decides which positions the claim model counts as in range.
 // ──────────────────────────────────────────────
 contract UpdateTickLeftToRightTest is UpdateTickTestBase {
     // SC-TVS2: currentTick advances to newTick
@@ -98,21 +95,6 @@ contract UpdateTickLeftToRightTest is UpdateTickTestBase {
 
         // tick 100 liquidityNet = -10e18 (from A upper) + 20e18 (from B lower) = +10e18
         assertEq(vault.activeLiquidity(), 20e18, "activeLiquidity should be 20e18 after crossing tick 100");
-    }
-
-    // SC-TVS2: feeGrowthOutsideX128 at tick 100 flipped
-    function test_feeGrowthOutsideFlipped() public {
-        uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
-        (,, uint256 feeGrowthOutsideBefore,) = vault.ticks(int24(100));
-        assertEq(feeGrowthOutsideBefore, 0, "precondition: tick 100 feeGrowthOutside should be 0");
-
-        vm.prank(operatorAddr);
-        vault.updateTick(int24(150));
-
-        (,, uint256 feeGrowthOutsideAfter,) = vault.ticks(int24(100));
-        assertEq(
-            feeGrowthOutsideAfter, feeGrowthGlobal, "tick 100 feeGrowthOutside should equal feeGrowthGlobal after flip"
-        );
     }
 
     // SC-TVS2: TickUpdated event emitted with correct values
@@ -137,10 +119,10 @@ contract UpdateTickLeftToRightTest is UpdateTickTestBase {
 // ──────────────────────────────────────────────
 // SC-TVS3: Price decreases crossing initialized ticks (right-to-left)
 // What: Starting from currentTick=150 (after a forward move), Operator calls
-//       updateTick(50). Tick 100 is crossed R-to-L: feeGrowthOutside flips
-//       back, activeLiquidity has liquidityNet subtracted.
-// Why:  R-to-L is the reverse path. The liquidityNet subtraction and
-//       feeGrowthOutside double-flip must produce symmetric state.
+//       updateTick(50). Tick 100 is crossed R-to-L: activeLiquidity has
+//       liquidityNet subtracted.
+// Why:  R-to-L is the reverse path. The liquidityNet subtraction must
+//       produce symmetric state.
 // ──────────────────────────────────────────────
 contract UpdateTickRightToLeftTest is UpdateTickTestBase {
     function setUp() public override {
@@ -167,46 +149,6 @@ contract UpdateTickRightToLeftTest is UpdateTickTestBase {
         vault.updateTick(int24(50));
 
         assertEq(vault.activeLiquidity(), 10e18, "activeLiquidity should be 10e18 after R-to-L crossing");
-    }
-
-    // SC-TVS3: feeGrowthOutsideX128 at tick 100 flips back to 0
-    function test_feeGrowthOutsideFlippedBack() public {
-        uint256 feeGrowthGlobal = vault.feeGrowthGlobalX128();
-        (,, uint256 feeGrowthOutsideBefore,) = vault.ticks(int24(100));
-        assertEq(feeGrowthOutsideBefore, feeGrowthGlobal, "precondition: tick 100 fGO should be feeGrowthGlobal");
-
-        vm.prank(operatorAddr);
-        vault.updateTick(int24(50));
-
-        (,, uint256 feeGrowthOutsideAfter,) = vault.ticks(int24(100));
-        assertEq(feeGrowthOutsideAfter, 0, "tick 100 feeGrowthOutside should flip back to 0");
-    }
-
-    // SC-TVS3: flip formula is `global - old`, not `global` alone.
-    // After setUp, tick 100 fGO = G1 (the first feeGrowthGlobal). We then
-    // notify a second fee batch so feeGrowthGlobal becomes G2 > G1. When we
-    // cross tick 100 R-to-L, fGO should become G2 - G1, NOT G2.
-    // A mutation like `info.feeGrowthOutsideX128 = feeGrowthGlobalX128`
-    // would set fGO to G2, which this test catches.
-    function test_feeGrowthOutsideFlipUsesOldValue() public {
-        uint256 g1 = vault.feeGrowthGlobalX128();
-        (,, uint256 fGOBefore,) = vault.ticks(int24(100));
-        assertEq(fGOBefore, g1, "precondition: tick 100 fGO equals G1");
-
-        // Second fee batch — activeLiquidity is now 20e18 (after L-to-R cross)
-        // so the increment is mulDiv(750, Q128, 20e18) — strictly smaller than G1
-        // but additive, so G2 > G1 and (G2 - G1) != G2 and (G2 - G1) != 0.
-        _notifyFees(vault, operatorAddr, 750);
-        uint256 g2 = vault.feeGrowthGlobalX128();
-        assertGt(g2, g1, "precondition: G2 > G1");
-
-        vm.prank(operatorAddr);
-        vault.updateTick(int24(50));
-
-        (,, uint256 fGOAfter,) = vault.ticks(int24(100));
-        assertEq(fGOAfter, g2 - g1, "tick 100 fGO should be G2 - G1, not G2");
-        assertGt(fGOAfter, 0, "fGO must be non-zero (guards against `new = global - global` mutation)");
-        assertTrue(fGOAfter != g2, "fGO must differ from G2 (guards against `new = global` mutation)");
     }
 
     // SC-TVS3: TickUpdated event emitted for R-to-L direction
@@ -411,7 +353,7 @@ contract UpdateTickNonOperatorTest is UpdateTickTestBase {
 // SC-TVS7: Same tick refreshes only the heartbeat
 // What: Operator calls updateTick(currentTick). The call succeeds, refreshes
 //       lastOperatorActivityTimestamp, and does nothing else: no crossing, no
-//       event, no change to the tick, the liquidity, or the fee accumulator.
+//       event, no change to the tick, the liquidity, or the tick records.
 // Why:  The keeper reports every 60 seconds and after fills, and most markets
 //       keep the same price, so the unchanged report is the normal case. A
 //       revert would cost gas and refresh nothing (ADR-9J43).
@@ -451,11 +393,10 @@ contract UpdateTickSameTickTest is UpdateTickTestBase {
         assertEq(logs.length, 0, "an unchanged report must emit nothing");
     }
 
-    // SC-TVS7: nothing else moves — tick, liquidity, fee accumulator, tick records
+    // SC-TVS7: nothing else moves — tick, liquidity, tick records
     function test_whenTickIsUnchangedThenNoOtherStateChanges() public {
         int24 tickBefore = vault.currentTick();
         uint128 liquidityBefore = vault.activeLiquidity();
-        uint256 feeGrowthBefore = vault.feeGrowthGlobalX128();
         bytes32 tickRecordsBefore = _tickRecordsHash();
 
         vm.prank(operatorAddr);
@@ -463,17 +404,16 @@ contract UpdateTickSameTickTest is UpdateTickTestBase {
 
         assertEq(vault.currentTick(), tickBefore, "currentTick must not move");
         assertEq(vault.activeLiquidity(), liquidityBefore, "activeLiquidity must not move");
-        assertEq(vault.feeGrowthGlobalX128(), feeGrowthBefore, "feeGrowthGlobalX128 must not move");
         assertEq(_tickRecordsHash(), tickRecordsBefore, "the tick records at 0, 100, and 200 must not move");
     }
 
     /// @dev One hash over the three initialized tick records (liquidityGross,
-    ///      liquidityNet, feeGrowthOutsideX128 at ticks 0, 100, and 200).
+    ///      liquidityNet, noLiquidityNet at ticks 0, 100, and 200).
     function _tickRecordsHash() internal view returns (bytes32) {
-        (uint128 g0, int128 n0, uint256 o0,) = vault.ticks(int24(0));
-        (uint128 g100, int128 n100, uint256 o100,) = vault.ticks(int24(100));
-        (uint128 g200, int128 n200, uint256 o200,) = vault.ticks(int24(200));
-        return keccak256(abi.encode(g0, n0, o0, g100, n100, o100, g200, n200, o200));
+        (uint128 g0, int128 n0, int128 no0) = vault.ticks(int24(0));
+        (uint128 g100, int128 n100, int128 no100) = vault.ticks(int24(100));
+        (uint128 g200, int128 n200, int128 no200) = vault.ticks(int24(200));
+        return keccak256(abi.encode(g0, n0, no0, g100, n100, no100, g200, n200, no200));
     }
 }
 
@@ -558,135 +498,6 @@ contract TickBitmapTest is UpdateTickTestBase {
         vault.updateTick(int24(265));
 
         assertEq(vault.currentTick(), int24(265), "currentTick should be 265");
-    }
-}
-
-// ── Regression: fee-growth wraparound (audit NM-0986-Prophet) ──
-//   Tick crossing succeeds even when a tick's feeGrowthOutside flip
-//   wraps mod 2^256
-// ─────────────────────────────────────────────────────────────
-
-// ──────────────────────────────────────────────
-// Base test contract for the _crossTick wraparound reproduction.
-//
-// _crossTick's flip (`info.feeGrowthOutsideX128 = feeGrowthGlobalX128 -
-// info.feeGrowthOutsideX128`) uses the identical mod-2^256 pattern as
-// _computeFeeGrowthInside, mirroring Uniswap v3's audited _crossTick exactly.
-// This test constructs a tick whose feeGrowthOutsideX128 exceeds the current
-// feeGrowthGlobalX128 directly with a storage write, pinning FR-TVSA's contract:
-// "the flip must not revert regardless of how the tick's outside snapshot
-// arrived at that value" -- the same defensive posture Uniswap v3 itself
-// applies to this exact line.
-// ──────────────────────────────────────────────
-contract CrossTickWraparoundTestBase is LPVaultFixture {
-    LPVaultFactory factory;
-    LPVault vault;
-    MockERC20 mockUsdc;
-
-    address admin = makeAddr("admin");
-    address oracleAddr = makeAddr("oracle");
-    address operatorAddr = makeAddr("operator");
-    address exchangeAddr = makeAddr("exchange");
-
-    uint256 constant LP_PK = 0xA11CE;
-    address lp;
-
-    bytes32 marketId = bytes32(uint256(1));
-    int24 vaultTickSpacing = int24(10);
-    uint128 minFirstLiq = uint128(1e18);
-
-    event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
-
-    uint256 posId;
-
-    function setUp() public virtual {
-        lp = _safeOf(vm.addr(LP_PK));
-
-        LPVault impl = new LPVault();
-        mockUsdc = new MockERC20();
-        _deployConditionalTokens();
-        factory = _deployFactory(
-            address(impl), address(mockUsdc), exchangeAddr, address(ctf), admin, oracleAddr, operatorAddr
-        );
-
-        vault = LPVault(_createVault(factory, oracleAddr, marketId, vaultTickSpacing, minFirstLiq));
-
-        // A position spanning [0, 200) initializes ticks 0 and 200, and
-        // keeps activeLiquidity nonzero so notifyFees can run.
-        posId = _mintPosition(int24(0), int24(200), 1000, keccak256("wide"));
-    }
-
-    function _mintPosition(int24 tickLower, int24 tickUpper, uint256 usdcAmount, bytes32 intentId)
-        internal
-        returns (uint256)
-    {
-        return _escrowAndMint(vault, operatorAddr, LP_PK, tickLower, tickUpper, usdcAmount, intentId);
-    }
-
-    /// @dev Overwrites ticks[tick].feeGrowthOutsideX128 directly.
-    function _setFeeGrowthOutside(int24 tick, uint256 value) internal {
-        VaultStorage.setFeeGrowthOutside(stdstore, address(vault), tick, value);
-    }
-}
-
-// ──────────────────────────────────────────────
-// FR-TVSA: crossing a tick succeeds even when its feeGrowthOutside snapshot
-// exceeds the current feeGrowthGlobalX128
-// What: _crossTick's flip (feeGrowthGlobalX128 - tick.feeGrowthOutsideX128)
-//       underflows if the tick's stored feeGrowthOutsideX128 is larger than
-//       the current global -- a state that can arise as the wrapped,
-//       mod-2^256-consistent result of the same tick's fee-growth history.
-//       Before the fix, crossing such a tick reverts the whole updateTick
-//       call; after the fix, the flip wraps mod 2^256 and the crossing
-//       succeeds, exactly mirroring Uniswap v3's own audited pattern for
-//       this line.
-// ──────────────────────────────────────────────
-contract CrossTickWraparoundTest is CrossTickWraparoundTestBase {
-    function setUp() public override {
-        super.setUp();
-
-        // Give feeGrowthGlobalX128 a modest, known value...
-        _notifyFees(vault, operatorAddr, 100);
-
-        // ...then force tick 200 (the position's upper bound, about to be
-        // crossed) to a feeGrowthOutsideX128 that exceeds the current global.
-        _setFeeGrowthOutside(int24(200), type(uint256).max - 1000);
-    }
-
-    // FR-TVSA: crossing tick 200 succeeds instead of reverting. The target
-    // is exactly tick 200 (not beyond it) so the crossing loop's outer
-    // `while (tick < newTick)` condition is satisfied the instant tick 200
-    // is reached -- exercising only _crossTick's flip on tick 200. This
-    // vault has no initialized tick above 200, and the search stops at the
-    // target's word (FR-5IDE), so no scan past 200 runs.
-    function test_crossingSucceedsDespiteOutsideExceedingGlobal() public {
-        vm.prank(operatorAddr);
-        vault.updateTick(int24(200));
-
-        assertEq(vault.currentTick(), int24(200), "currentTick should advance to 200");
-    }
-
-    // FR-TVSA: TickUpdated is still emitted with the correct crossing count.
-    function test_emitsTickUpdatedEvent() public {
-        vm.expectEmit(true, true, false, true, address(vault));
-        emit TickUpdated(int24(0), int24(200), 1);
-
-        vm.prank(operatorAddr);
-        vault.updateTick(int24(200));
-    }
-
-    // FR-TVSA: activeLiquidity still adjusts correctly by the tick's
-    // liquidityNet despite the wrapped feeGrowthOutside flip.
-    function test_activeLiquidityStillAdjustsCorrectly() public {
-        uint128 before_ = vault.activeLiquidity();
-
-        vm.prank(operatorAddr);
-        vault.updateTick(int24(200));
-
-        // Tick 200 is the position's upper bound (liquidityNet negative);
-        // crossing L-to-R removes it from activeLiquidity. Position liquidity
-        // = usdcAmount(1000) * LIQUIDITY_PRECISION(1e18) / rangeWidth(200) = 5e18.
-        assertEq(vault.activeLiquidity(), before_ - 5e18, "activeLiquidity should drop by the position's liquidity");
     }
 }
 
@@ -791,20 +602,18 @@ contract BoundedTickSearchFarAboveTest is BoundedTickSearchTestBase {
 
     // SC-5IDH: activeLiquidity is unchanged and the planted ticks are untouched
     function test_whenTickIsPlantedFarAboveThenPlantedTicksAreUntouched() public {
-        (uint128 gLower, int128 nLower, uint256 oLower,) = vault.ticks(int24(8388590));
-        (uint128 gUpper, int128 nUpper, uint256 oUpper,) = vault.ticks(int24(8388600));
+        (uint128 gLower, int128 nLower,) = vault.ticks(int24(8388590));
+        (uint128 gUpper, int128 nUpper,) = vault.ticks(int24(8388600));
 
         _move(int24(300));
 
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
-        (uint128 gLowerAfter, int128 nLowerAfter, uint256 oLowerAfter,) = vault.ticks(int24(8388590));
-        (uint128 gUpperAfter, int128 nUpperAfter, uint256 oUpperAfter,) = vault.ticks(int24(8388600));
+        (uint128 gLowerAfter, int128 nLowerAfter,) = vault.ticks(int24(8388590));
+        (uint128 gUpperAfter, int128 nUpperAfter,) = vault.ticks(int24(8388600));
         assertEq(gLowerAfter, gLower, "tick 8388590 liquidityGross must not move");
         assertEq(nLowerAfter, nLower, "tick 8388590 liquidityNet must not move");
-        assertEq(oLowerAfter, oLower, "tick 8388590 feeGrowthOutside must not move");
         assertEq(gUpperAfter, gUpper, "tick 8388600 liquidityGross must not move");
         assertEq(nUpperAfter, nUpper, "tick 8388600 liquidityNet must not move");
-        assertEq(oUpperAfter, oUpper, "tick 8388600 feeGrowthOutside must not move");
     }
 
     // SC-5IDH: the heartbeat is refreshed
@@ -843,20 +652,18 @@ contract BoundedTickSearchFarBelowTest is BoundedTickSearchTestBase {
 
     // SC-5IDI: activeLiquidity is unchanged and the planted ticks are untouched
     function test_whenTickIsPlantedFarBelowThenPlantedTicksAreUntouched() public {
-        (uint128 gLower, int128 nLower, uint256 oLower,) = vault.ticks(int24(-8388600));
-        (uint128 gUpper, int128 nUpper, uint256 oUpper,) = vault.ticks(int24(-8388590));
+        (uint128 gLower, int128 nLower,) = vault.ticks(int24(-8388600));
+        (uint128 gUpper, int128 nUpper,) = vault.ticks(int24(-8388590));
 
         _move(int24(100));
 
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
-        (uint128 gLowerAfter, int128 nLowerAfter, uint256 oLowerAfter,) = vault.ticks(int24(-8388600));
-        (uint128 gUpperAfter, int128 nUpperAfter, uint256 oUpperAfter,) = vault.ticks(int24(-8388590));
+        (uint128 gLowerAfter, int128 nLowerAfter,) = vault.ticks(int24(-8388600));
+        (uint128 gUpperAfter, int128 nUpperAfter,) = vault.ticks(int24(-8388590));
         assertEq(gLowerAfter, gLower, "tick -8388600 liquidityGross must not move");
         assertEq(nLowerAfter, nLower, "tick -8388600 liquidityNet must not move");
-        assertEq(oLowerAfter, oLower, "tick -8388600 feeGrowthOutside must not move");
         assertEq(gUpperAfter, gUpper, "tick -8388590 liquidityGross must not move");
         assertEq(nUpperAfter, nUpper, "tick -8388590 liquidityNet must not move");
-        assertEq(oUpperAfter, oUpper, "tick -8388590 feeGrowthOutside must not move");
     }
 
     // SC-5IDI: the heartbeat is refreshed
@@ -893,24 +700,6 @@ contract BoundedTickSearchTargetWordTest is BoundedTickSearchTestBase {
 
         assertEq(vault.currentTick(), int24(300), "currentTick should be 300");
         assertEq(vault.activeLiquidity(), 10e18, "activeLiquidity should be 10e18 after crossing tick 260");
-    }
-
-    // SC-5IDJ: tick 260's feeGrowthOutside flipped, tick 600's did not
-    function test_whenTickIsInTargetWordThenOnlyThatTickFlips() public {
-        // Give feeGrowthGlobalX128 a nonzero value, so a flip is observable.
-        // notifyFees needs active liquidity, so a second position in range at 100 pays for it.
-        _plant(int24(0), int24(200), 200);
-        _notifyFees(vault, operatorAddr, 100);
-        uint256 global = vault.feeGrowthGlobalX128();
-        assertGt(global, 0, "precondition: feeGrowthGlobalX128 should be nonzero");
-        (,, uint256 outside600Before,) = vault.ticks(int24(600));
-
-        _move(int24(300));
-
-        (,, uint256 outside260,) = vault.ticks(int24(260));
-        (,, uint256 outside600,) = vault.ticks(int24(600));
-        assertEq(outside260, global, "tick 260 feeGrowthOutside should flip to feeGrowthGlobal");
-        assertEq(outside600, outside600Before, "tick 600 must not be crossed");
     }
 }
 

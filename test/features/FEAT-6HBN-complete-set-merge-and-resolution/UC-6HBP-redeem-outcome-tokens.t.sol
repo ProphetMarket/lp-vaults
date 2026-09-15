@@ -113,7 +113,7 @@ contract RedeemOutcomeTokensTestBase is LPVaultFixture {
 //       redeemOutcomeTokens stores (1, 0), burns both balances, and the ConditionalTokens
 //       contract pays 100 × 1 ÷ 1 + 60 × 0 ÷ 1 = 100 USDC to the vault.
 // Why:  After resolution the tokens have a fixed value, USDC is what exits pay, and the
-//       stored payout is what every later burn and collect reads (ADR-6HCK).
+//       stored payout is what every later burn reads (ADR-6HCK).
 // Example: vault 100e6 YES, 60e6 NO, 500e6 USDC → Oracle redeems → 0, 0, 600e6 USDC.
 // ──────────────────────────────────────────────
 contract RedeemAfterYesWinsTest is RedeemOutcomeTokensTestBase {

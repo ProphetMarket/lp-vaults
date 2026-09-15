@@ -4,19 +4,18 @@ pragma solidity 0.8.20;
 // FEAT-9BQZ: Vault Solvency Ledger (NFR-9BRX, the exact conservation invariant; NFR-9BRW)
 // UC-9BR0: Maintain Solvency Totals, UC-9BR1: Accumulate Principal Shift, UC-9BR2: Apply Payout Ratios
 // Invariants required by CLAUDE.md's Foundry conventions and by the ledger requirement of
-// audit-solutions.md (FR-2J6D), for the ledger under mints, burns, collects, fee reports,
-// merges, freezes, tick moves, a resolution, and the Oracle's redemption (the switch,
-// FEAT-6HBN):
-//   1. the four scaled totals equal the sum over every live position of its scaled claim
-//      at currentTick and its scaled fee claim, exactly, with no tolerance (NFR-9BRX). The
-//      claim is computed per level in this file, not from the vault's closed form, so a wrong
-//      closed form is caught too. The switch changes no total, so the check does not change
+// audit-solutions.md (FR-2J6D), for the ledger under mints, burns, merges, freezes, tick
+// moves, a resolution, and the Oracle's redemption (the switch, FEAT-6HBN):
+//   1. the three scaled totals equal the sum over every live position of its scaled claim
+//      at currentTick, exactly, with no tolerance (NFR-9BRX). The claim is computed per
+//      level in this file, not from the vault's closed form, so a wrong closed form is
+//      caught too. The switch changes no total, so the check does not change
 //   2. noSideLiquidity == Σ liquidity over in-range positions whose mintTick <= currentTick
-//   3. no burn or collect paid more of an asset than the vault held, and every burn paid
+//   3. no burn paid more of an asset than the vault held, and every burn paid
 //      exactly floor(owed x min(1, held / total)) per asset before the switch, with held
 //      counting the free pairs (the pairs above what the ledger owes in both tokens, read
 //      before the call) as USDC and less them per token, and
-//      floor((usdcOwed + feesOwed + tokenUsdc) x min(1, held / total)) as one USDC sum after
+//      floor((usdcOwed + tokenUsdc) x min(1, held / total)) as one USDC sum after
 //      it (NFR-9BRW, FR-9BRR, FR-CYS5, FEAT-6HBN ADR-DFE2)
 //   4. updateTick, the exits, and the redemption reverted only for a documented reason
 // The handler's moves are clamped to [-300, 10300] and bounded to 700 ticks, so they cross
@@ -36,13 +35,12 @@ pragma solidity 0.8.20;
 // filled by the keeper at a spread of 2,000 bps through KeeperFillFixture, with the spread
 // income summed in a ghost variable (finding CV-02 of audits/code-validation-round-1.md,
 // UC-9BR2 SC-DFDY). Its invariants: the USDC above escrow plus the free pairs covers the
-// USDC and fee totals and each token balance covers its total, so every ratio is 1; and no
-// burn or collect was cut. Its closing check burns every position and asserts zero tokens
-// and USDC above escrow between the spread income and that plus one unit per completed
-// mint, move, burn, fee report, collect, redemption, and consumed merge position: the fee
-// dust a report and a collect leave (x mod 2^128), the dust a merge debits (FR-9BRH), the
-// per-side floors of a redemption and of a resolved burn, and the per-move floor of the
-// keeper's spend. Mutation check of 2026-09-14: invariant_holdingsCoverTotals fails with
+// USDC total and each token balance covers its total, so every ratio is 1; and no burn was
+// cut. Its closing check burns every position and asserts zero tokens and USDC above escrow
+// between the spread income and that plus one unit per completed mint, move, burn,
+// redemption, and consumed merge position: the per-side floors of a redemption and of a
+// resolved burn, and the per-move floor of the keeper's spend. Mutation check of
+// 2026-09-14: invariant_holdingsCoverTotals fails with
 // _freePairs restored to min(yes, no).
 
 import {StdInvariant} from "forge-std/StdInvariant.sol";
@@ -61,10 +59,10 @@ interface IResultReporter {
 }
 
 // ──────────────────────────────────────────────
-// Handler: bounded action surface the invariant fuzzer drives. The mint and the fee report
-// run with no try/catch, because no documented rejection is reachable inside their bounds.
-// The move, the collect, the burn, and the merge absorb the vault's documented rejections and
-// record the first selector that is not one, so a panic surfaces as an invariant failure.
+// Handler: bounded action surface the invariant fuzzer drives. The mint runs with no
+// try/catch, because no documented rejection is reachable inside its bounds. The move, the
+// burn, and the merge absorb the vault's documented rejections and record the first selector
+// that is not one, so a panic surfaces as an invariant failure.
 // ──────────────────────────────────────────────
 contract SolvencyLedgerHandler is LPVaultFixture {
     LPVault public vault;
@@ -83,9 +81,7 @@ contract SolvencyLedgerHandler is LPVaultFixture {
 
     uint256 public completedMints;
     uint256 public completedMoves;
-    uint256 public completedNotifies;
     uint256 public completedBurns;
-    uint256 public completedCollects;
     uint256 public completedMerges;
     uint256 public completedFreezes;
     uint256 public completedResolutions;
@@ -109,7 +105,6 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         uint256 indexed positionId,
         address indexed owner,
         uint256 usdcOwed,
-        uint256 feesOwed,
         uint256 usdcPaid,
         uint256 tokenId,
         uint256 tokenOwed,
@@ -153,7 +148,7 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         int24 tickLower;
         int24 tickUpper;
         if (copyRange && positionIds.length > 0) {
-            (, int24 lo, int24 hi,, uint128 liq,,) = vault.positions(positionIds[widthSeed % positionIds.length]);
+            (, int24 lo, int24 hi,, uint128 liq) = vault.positions(positionIds[widthSeed % positionIds.length]);
             if (liq > 0) {
                 tickLower = lo;
                 tickUpper = hi;
@@ -209,13 +204,6 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         }
     }
 
-    /// @dev Reports fees, funded from the Operator wallet as the keeper does.
-    function notify(uint256 amountSeed) public {
-        if (vault.phase() == 3 || vault.activeLiquidity() == 0) return;
-        _notifyFees(vault, operatorAddr, bound(amountSeed, 1, 10_000e6));
-        completedNotifies++;
-    }
-
     /// @dev Moves USDC out of the vault through the exchange's standing approval, as a fill
     ///      would (decision C8), one pick in six, so some payouts meet a USDC shortfall.
     function drain(uint256 seed) public virtual {
@@ -236,40 +224,6 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         uint256 no = bound(seed >> 8, 0, 200e6);
         if (yes == 0 && no == 0) return;
         _giveOutcomeTokens(address(vault), vault.conditionId(), yes, no);
-    }
-
-    /// @dev The Safe collects a random position. The paid amount must equal the owed amount
-    ///      times the USDC ratio, read before the call, and never exceed what the vault held.
-    function collect(uint256 idSeed) public {
-        if (positionIds.length == 0) return;
-        uint256 id = positionIds[idSeed % positionIds.length];
-        (uint256 usdcHeld, uint256 usdcTotal, bool resolved) = _usdcRatioSides();
-        uint256 before = mockUsdc.balanceOf(lp);
-        vm.recordLogs();
-        vm.prank(lp);
-        try vault.collect(id) {
-            completedCollects++;
-            if (resolved) resolvedPayouts++;
-            uint256 paid = mockUsdc.balanceOf(lp) - before;
-            _checkCollectedLog(vm.getRecordedLogs(), paid, usdcHeld, usdcTotal);
-        } catch (bytes memory reason) {
-            _recordExitRevert(reason);
-        }
-    }
-
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
-
-    /// @dev A collect that owed something emits its owed and paid amounts; the paid amount must
-    ///      be the transfer and the ratio's share of the owed amount.
-    function _checkCollectedLog(Vm.Log[] memory logs, uint256 paid, uint256 usdcHeld, uint256 usdcTotal) internal {
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].topics[0] != FeesCollected.selector) continue;
-            (uint256 owed, uint256 eventPaid) = abi.decode(logs[i].data, (uint256, uint256));
-            if (eventPaid != paid) _mismatch("a collect's event does not match its transfer");
-            _checkLeg(owed, paid, usdcHeld, usdcTotal, "USDC (collect)");
-            return;
-        }
-        if (paid > 0) _mismatch("a paying collect must emit FeesCollected");
     }
 
     /// @dev The Safe burns a random position. The event's paid amounts must equal
@@ -346,11 +300,11 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         uint256 count = positionIds.length;
         if (count < 2) return;
         uint256 a = positionIds[seedA % count];
-        (, int24 lowerA, int24 upperA, int24 mintA,,,) = vault.positions(a);
+        (, int24 lowerA, int24 upperA, int24 mintA,) = vault.positions(a);
         for (uint256 i = 0; i < count; i++) {
             uint256 b = positionIds[(seedB % count + i) % count];
             if (b == a) continue;
-            (, int24 lowerB, int24 upperB, int24 mintB,,,) = vault.positions(b);
+            (, int24 lowerB, int24 upperB, int24 mintB,) = vault.positions(b);
             if (lowerB == lowerA && upperB == upperA && mintB == mintA) {
                 uint256[] memory ids = new uint256[](2);
                 ids[0] = a;
@@ -374,8 +328,8 @@ contract SolvencyLedgerHandler is LPVaultFixture {
 
     /// @dev The two sides of the USDC ratio (FR-9BRM before the switch, FR-CYS5 after it): held
     ///      is the balance plus the USDC the settlement produces (the free pairs, or every token
-    ///      at the stored payout) less totalEscrowed, floored at zero; total is the principal and
-    ///      the fees owed, plus the token totals at the stored payout after the switch.
+    ///      at the stored payout) less totalEscrowed, floored at zero; total is the principal
+    ///      owed, plus the token totals at the stored payout after the switch.
     function _usdcRatioSides() internal view returns (uint256 held, uint256 total, bool resolved) {
         (uint256 yes, uint256 no) = _balances();
         (uint128 numYes, uint128 numNo) = vault.payoutNumerators();
@@ -384,7 +338,7 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         uint256 balance = mockUsdc.balanceOf(address(vault)) + incoming;
         uint256 escrowed = vault.totalEscrowed();
         held = balance > escrowed ? balance - escrowed : 0;
-        total = vault.totalUsdcOwed() + vault.totalFeesOwed();
+        total = vault.totalUsdcOwed();
         if (resolved) total += _atPayout(vault.totalYesOwed(), vault.totalNoOwed());
     }
 
@@ -397,23 +351,17 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     }
 
     /// @dev After the switch a burn pays one USDC sum: usdcPaid + tokenPaid must equal
-    ///      floor((usdcOwed + feesOwed + tokenUsdc) x min(1, held / total)), never above held,
+    ///      floor((usdcOwed + tokenUsdc) x min(1, held / total)), never above held,
     ///      with the token leg valued at the stored payout (FR-CYS4, FR-CYS5).
     function _checkResolvedBurnedLog(Vm.Log[] memory logs, uint256 usdcHeld, uint256 usdcTotal) internal {
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != PositionBurned.selector) continue;
-            (
-                uint256 usdcOwed,
-                uint256 feesOwed,
-                uint256 usdcPaid,
-                uint256 tokenId,
-                uint256 tokenOwed,
-                uint256 tokenPaid
-            ) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+            (uint256 usdcOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
             uint256 tokenUsdc = tokenId == vault.yesTokenId()
                 ? _atPayout(tokenOwed, 0)
                 : (tokenId == vault.noTokenId() ? _atPayout(0, tokenOwed) : 0);
-            _checkLeg(usdcOwed + feesOwed + tokenUsdc, usdcPaid + tokenPaid, usdcHeld, usdcTotal, "USDC (resolved)");
+            _checkLeg(usdcOwed + tokenUsdc, usdcPaid + tokenPaid, usdcHeld, usdcTotal, "USDC (resolved)");
             // A redemption burns tokens, which is a TransferSingle to the zero address; a
             // transfer to any other address is the token leg the switch forbids
             for (uint256 j = 0; j < logs.length; j++) {
@@ -467,15 +415,9 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     ) internal {
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != PositionBurned.selector) continue;
-            (
-                uint256 usdcOwed,
-                uint256 feesOwed,
-                uint256 usdcPaid,
-                uint256 tokenId,
-                uint256 tokenOwed,
-                uint256 tokenPaid
-            ) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
-            _checkLeg(usdcOwed + feesOwed, usdcPaid, usdcHeld, usdcTotal, "USDC");
+            (uint256 usdcOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
+            _checkLeg(usdcOwed, usdcPaid, usdcHeld, usdcTotal, "USDC");
             if (tokenId == vault.yesTokenId()) _checkLeg(tokenOwed, tokenPaid, yesHeld, yesTotal, "YES");
             else if (tokenId == vault.noTokenId()) _checkLeg(tokenOwed, tokenPaid, noHeld, noTotal, "NO");
             return;
@@ -584,7 +526,7 @@ contract DriftFreeLedgerHandler is SolvencyLedgerHandler, KeeperFillFixture {
     ///      drops the records a merge consumed, which no longer burn (PositionNotFound).
     function burnAll() external {
         for (uint256 i = positionIds.length; i > 0; i--) {
-            (,,,, uint128 liquidity,,) = vault.positions(positionIds[i - 1]);
+            (,,,, uint128 liquidity) = vault.positions(positionIds[i - 1]);
             if (liquidity == 0) {
                 positionIds[i - 1] = positionIds[positionIds.length - 1];
                 positionIds.pop();
@@ -595,9 +537,9 @@ contract DriftFreeLedgerHandler is SolvencyLedgerHandler, KeeperFillFixture {
     }
 }
 
-/// @dev fail-on-revert makes any handler-level revert fail the run. The mint, the fee report,
-///      the merge, and the freeze run with no try/catch on purpose; the move and the exits absorb
-///      their documented rejections, so only an unexpected revert reaches here.
+/// @dev fail-on-revert makes any handler-level revert fail the run. The mint, the merge, and
+///      the freeze run with no try/catch on purpose; the move and the exits absorb their
+///      documented rejections, so only an unexpected revert reaches here.
 /// forge-config: default.invariant.fail-on-revert = true
 contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
     LPVaultFactory factory;
@@ -611,13 +553,11 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
     address exchangeAddr = makeAddr("exchange");
 
     uint256 constant ONE = 10_000;
-    uint256 constant Q128 = 2 ** 128;
 
     struct Sums {
         uint256 usdc;
         uint256 yes;
         uint256 no;
-        uint256 feesX128;
     }
 
     function setUp() public {
@@ -640,14 +580,13 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
         handler.mint(5000, 5, 300e6, false);
         handler.mint(5100, 7, 123_456_789, false);
         handler.move(250);
-        handler.notify(5e6);
         handler.fund(4);
         handler.drain(6);
         handler.burn(1);
     }
 
-    // NFR-9BRX: the four scaled totals equal the sum of every live position's scaled claim at
-    // currentTick and its scaled fee claim, exactly. The claim is summed per level here.
+    // NFR-9BRX: the three scaled totals equal the sum of every live position's scaled claim at
+    // currentTick, exactly. The claim is summed per level here.
     function invariant_ledgerEqualsSumOfClaims() public view {
         Sums memory sums;
         uint256 count = vault.nextPositionId();
@@ -657,7 +596,6 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
         assertEq(vault.totalUsdcOwedScaled(), sums.usdc, "the USDC total must equal the sum of the scaled claims");
         assertEq(vault.totalYesOwedScaled(), sums.yes, "the YES total must equal the sum of the scaled claims");
         assertEq(vault.totalNoOwedScaled(), sums.no, "the NO total must equal the sum of the scaled claims");
-        assertEq(vault.totalFeesOwedX128(), sums.feesX128, "the fee total must equal the sum of the scaled fee claims");
     }
 
     // FR-A2ZS: noSideLiquidity equals the in-range liquidity whose mint tick is at or below the
@@ -667,7 +605,7 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
         uint256 sum;
         uint256 count = vault.nextPositionId();
         for (uint256 i = 0; i < count; i++) {
-            (address owner, int24 lo, int24 hi, int24 m, uint128 l,,) = vault.positions(i);
+            (address owner, int24 lo, int24 hi, int24 m, uint128 l) = vault.positions(i);
             if (owner == address(0)) continue;
             if (lo <= c && c < hi && m <= c) sum += l;
         }
@@ -707,7 +645,6 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
     function afterInvariant() public view {
         assertGt(handler.completedMoves(), 0, "the run must include a completed move");
         assertGt(handler.completedBurns(), 0, "the run must include a completed burn");
-        assertGt(handler.completedBurns() + handler.completedCollects(), 1, "the run must include more than one exit");
         assertGt(handler.cutPayouts(), 0, "the run must include a payout at a ratio below 1");
     }
 
@@ -735,30 +672,12 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
     }
 
     function _addPosition(Sums memory sums, uint256 i) internal view {
-        (address owner, int24 lo, int24 hi, int24 m, uint128 l, uint256 last, uint256 tokensOwed) = vault.positions(i);
+        (address owner, int24 lo, int24 hi, int24 m, uint128 l) = vault.positions(i);
         if (owner == address(0) || l == 0) return;
         (uint256 u, uint256 y, uint256 n) = _claimScaled(lo, hi, m, l);
         sums.usdc += u;
         sums.yes += y;
         sums.no += n;
-        uint256 inside = _feeGrowthInside(lo, hi);
-        // unchecked: the same wraparound-cancelling delta the vault computes (ADR-8L1F)
-        unchecked {
-            sums.feesX128 += uint256(l) * (inside - last) + tokensOwed * Q128;
-        }
-    }
-
-    /// @dev Mirrors LPVault._computeFeeGrowthInside through the public getters.
-    function _feeGrowthInside(int24 lo, int24 hi) internal view returns (uint256) {
-        int24 c = vault.currentTick();
-        uint256 global = vault.feeGrowthGlobalX128();
-        (,, uint256 outLo,) = vault.ticks(lo);
-        (,, uint256 outHi,) = vault.ticks(hi);
-        unchecked {
-            uint256 below = c >= lo ? outLo : global - outLo;
-            uint256 above = c < hi ? outHi : global - outHi;
-            return global - below - above;
-        }
     }
 }
 
@@ -799,20 +718,19 @@ contract SolvencyConservationInvariantTest is StdInvariant, LPVaultFixture {
         excludeSelector(FuzzSelector({addr: address(handler), selectors: excluded}));
 
         // Prologue, as the ledger harness runs it without the donation and the drain: two
-        // positions, a filled move, a fee report, and a burn
+        // positions, a filled move, and a burn
         handler.mint(5000, 5, 300e6, false);
         handler.mint(5100, 7, 123_456_789, false);
         handler.move(250);
-        handler.notify(5e6);
         handler.burn(1);
     }
 
     // SC-DFDY, FR-9BRM to FR-9BRO: under drift-free fills the USDC above escrow plus the free
-    // pairs covers the USDC and fee totals, and each token balance covers its total, so every
-    // ratio is 1 on every call.
+    // pairs covers the USDC total, and each token balance covers its total, so every ratio is
+    // 1 on every call.
     function invariant_holdingsCoverTotals() public view {
         (uint256 held, uint256 total, bool resolved) = handler.usdcSides();
-        assertGe(held, total, "the USDC above escrow plus the free pairs must cover the USDC and fee totals");
+        assertGe(held, total, "the USDC above escrow plus the free pairs must cover the USDC total");
         if (!resolved) {
             assertGe(
                 ctf.balanceOf(address(vault), vault.yesTokenId()), vault.totalYesOwed(), "YES must cover its total"
@@ -821,11 +739,11 @@ contract SolvencyConservationInvariantTest is StdInvariant, LPVaultFixture {
         }
     }
 
-    // SC-DFDY, FR-9BRR: every burn and every collect paid its owed amount in full, and no payout
-    // mismatched the ratio.
+    // SC-DFDY, FR-9BRR: every burn paid its owed amount in full, and no payout mismatched the
+    // ratio.
     function invariant_burnsPayInFull() public view {
         assertFalse(handler.payoutMismatch(), handler.payoutMismatchReason());
-        assertEq(handler.cutPayouts(), 0, "no burn or collect was cut under drift-free fills");
+        assertEq(handler.cutPayouts(), 0, "no burn was cut under drift-free fills");
     }
 
     /// @dev Reports the result of the vault's condition; only the handler may call it, as in the
@@ -837,8 +755,8 @@ contract SolvencyConservationInvariantTest is StdInvariant, LPVaultFixture {
 
     /// @dev The closing check: every position burns, the vault holds no token, and the USDC
     ///      above escrow is the spread income plus at most the dust the roundings leave, one unit
-    ///      per completed mint, move, burn, fee report, collect, redemption, and consumed merge
-    ///      position (see the file header). A run with no completed move or burn proves nothing,
+    ///      per completed mint, move, burn, redemption, and consumed merge position (see the file
+    ///      header). A run with no completed move or burn proves nothing,
     ///      so both counters must be above zero.
     function afterInvariant() public {
         assertGt(handler.completedMoves(), 0, "the run must include a completed move");
@@ -853,8 +771,7 @@ contract SolvencyConservationInvariantTest is StdInvariant, LPVaultFixture {
         uint256 above = mockUsdc.balanceOf(address(vault)) - vault.totalEscrowed();
         uint256 income = handler.spreadIncome();
         uint256 residueBound = handler.completedMints() + handler.completedMoves() + handler.completedBurns()
-            + handler.completedNotifies() + handler.completedCollects() + handler.completedRedemptions()
-            + handler.completedMerges();
+            + handler.completedRedemptions() + handler.completedMerges();
         assertGe(above, income, "the vault keeps at least the spread income");
         assertLe(above, income + residueBound, "the vault keeps at most the spread income plus the rounding dust");
     }

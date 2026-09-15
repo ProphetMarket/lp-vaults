@@ -3,7 +3,7 @@ pragma solidity 0.8.20;
 
 // UC-9BR2: Apply Payout Ratios
 // Integration tests for every scenario in this use case.
-// Covers: SC-9BSC, SC-9BSD, SC-9BSE, SC-9BSF, SC-9BSG, SC-COET, SC-COEU, SC-CYSB, SC-CYSC, SC-DFDY
+// Covers: SC-9BSC, SC-9BSD, SC-9BSE, SC-9BSF, SC-9BSG, SC-COEU, SC-CYSB, SC-CYSC, SC-DFDY
 
 import {Vm} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -40,7 +40,6 @@ contract PayoutRatioTestBase is LPVaultFixture {
     int24 constant MINT_TICK = 6000;
     uint256 constant PRINCIPAL = 300e6;
     uint128 constant LIQUIDITY = 3e23;
-    uint256 constant Q128 = 2 ** 128;
 
     // The claim at 5700 (SC-7G44): 90 YES and the USDC the band did not spend
     uint256 constant FELL_USDC = 247_354_500;
@@ -50,13 +49,11 @@ contract PayoutRatioTestBase is LPVaultFixture {
         uint256 indexed positionId,
         address indexed owner,
         uint256 usdcOwed,
-        uint256 feesOwed,
         uint256 usdcPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
     );
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
     event OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount);
     event CompleteSetsMerged(address indexed caller, uint256 amount);
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
@@ -112,9 +109,9 @@ contract PayoutRatioTestBase is LPVaultFixture {
 
     /// @dev Expects the burn's event with the given paid amounts, the owed ones being the
     ///      SC-7G44 claim.
-    function _expectFellBurn(uint256 id, uint256 fees, uint256 usdcPaid, uint256 yesPaid) internal {
+    function _expectFellBurn(uint256 id, uint256 usdcPaid, uint256 yesPaid) internal {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(id, safe, FELL_USDC, fees, usdcPaid, vault.yesTokenId(), BAND_TOKENS, yesPaid);
+        emit PositionBurned(id, safe, FELL_USDC, usdcPaid, vault.yesTokenId(), BAND_TOKENS, yesPaid);
     }
 
     /// @dev Reports the result, winds the vault down, and has the Oracle redeem: the switch
@@ -138,8 +135,8 @@ contract PayoutRatioTestBase is LPVaultFixture {
     function _paidSum(Vm.Log[] memory logs) internal pure returns (uint256) {
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != PositionBurned.selector) continue;
-            (,, uint256 usdcPaid,,, uint256 tokenPaid) =
-                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+            (, uint256 usdcPaid,,, uint256 tokenPaid) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
             return usdcPaid + tokenPaid;
         }
         revert("no PositionBurned log");
@@ -199,7 +196,6 @@ contract ThreeBurnsAfterSwitchTest is PayoutRatioTestBase {
         assertEq(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "the vault holds the escrow total");
         assertEq(vault.totalUsdcOwed(), 0, "the USDC total is empty");
         assertEq(vault.totalYesOwed(), 0, "the YES total is empty");
-        assertEq(vault.totalFeesOwed(), 0, "the fee total is empty");
     }
 
     // SC-CYSB: the two legs are one prorated sum, so usdcPaid + tokenPaid never exceeds held
@@ -211,8 +207,7 @@ contract ThreeBurnsAfterSwitchTest is PayoutRatioTestBase {
         uint256 tokenPaid;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != PositionBurned.selector) continue;
-            (,, usdcPaid,,, tokenPaid) =
-                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+            (, usdcPaid,,, tokenPaid) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
         }
         // floor(247,354,500 x 641,031,750 / 1,012,063,500) = 156,672,650; the token leg is the rest
         assertEq(usdcPaid, uint256(FELL_USDC) * 641_031_750 / 1_012_063_500, "usdcPaid is the prorated principal");
@@ -247,7 +242,7 @@ contract LateTokensRedeemedByPayoutTest is PayoutRatioTestBase {
         vm.expectEmit(true, false, false, true, address(vault));
         emit OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6);
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, 0, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
 
         vm.recordLogs();
         _burn(positionId);
@@ -264,31 +259,28 @@ contract LateTokensRedeemedByPayoutTest is PayoutRatioTestBase {
 // ──────────────────────────────────────────────
 // SC-9BSC: A covered vault pays every claim in full
 // What: The vault at 5700 holds 500 YES and 1,300 USDC against one claim of 247.3545 USDC
-//       plus 90 YES and 9,999,999 units of fees; both ratios read 1 and the burn pays the
-//       whole claim, leaving the surplus in the vault.
+//       plus 90 YES; both ratios read 1 and the burn pays the whole claim, leaving the
+//       surplus in the vault.
 // Why:  FR-9BRP: a holding at or above the total is a ratio of exactly 1, and a surplus is
 //       never a bonus.
 // ──────────────────────────────────────────────
 contract CoveredVaultTest is PayoutRatioTestBase {
     uint256 positionId;
-    uint256 fees;
 
     function setUp() public override {
         super.setUp();
         positionId = _mintExample(keccak256("a"));
-        _notifyFees(vault, operatorAddr, 10e6);
-        fees = 9_999_999;
         _moveTick(5700);
         _fundVault(500e6, 0);
         mockUsdc.mint(address(vault), 1_000e6);
     }
 
-    // SC-9BSC: the whole claim and the whole fees
+    // SC-9BSC: the whole claim
     function test_whenTheVaultCoversTheClaimThenTheBurnPaysInFull() public {
-        _expectFellBurn(positionId, fees, FELL_USDC + fees, BAND_TOKENS);
+        _expectFellBurn(positionId, FELL_USDC, BAND_TOKENS);
         _burn(positionId);
 
-        assertEq(mockUsdc.balanceOf(safe), FELL_USDC + fees, "the claim's USDC plus the fees");
+        assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "the claim's USDC");
         assertEq(_yesOf(safe), BAND_TOKENS, "the claim's YES");
     }
 
@@ -299,7 +291,6 @@ contract CoveredVaultTest is PayoutRatioTestBase {
         assertEq(_yesOf(address(vault)), 500e6 - BAND_TOKENS, "the vault keeps the YES it did not owe");
         assertEq(vault.totalUsdcOwedScaled(), 0, "the ledger settled the claim");
         assertEq(vault.totalYesOwedScaled(), 0, "the ledger settled the claim");
-        assertEq(vault.totalFeesOwedX128(), 0, "the ledger settled the fees");
     }
 }
 
@@ -332,17 +323,17 @@ contract ThreeBurnsSameRatioTest is PayoutRatioTestBase {
     function test_whenShortOfYesThenThreeBurnsPayTheSameShare() public {
         _fundVault(150e6, 0);
 
-        _expectFellBurn(a, 0, FELL_USDC, 50e6);
+        _expectFellBurn(a, FELL_USDC, 50e6);
         _burn(a);
         assertEq(_yesOf(safe), 50e6, "first burn: 90 x 150 / 270");
         assertEq(vault.totalYesOwed(), 180e6, "debited by the full 90");
         assertEq(_yesOf(address(vault)), 100e6, "100 held against 180 owed, the same 5/9");
 
-        _expectFellBurn(b, 0, FELL_USDC, 50e6);
+        _expectFellBurn(b, FELL_USDC, 50e6);
         _burn(b);
         assertEq(_yesOf(safe), 100e6, "second burn: the same 50");
 
-        _expectFellBurn(c, 0, FELL_USDC, 50e6);
+        _expectFellBurn(c, FELL_USDC, 50e6);
         _burn(c);
         assertEq(_yesOf(safe), 150e6, "third burn: the same 50");
         assertEq(_yesOf(address(vault)), 0, "nothing left");
@@ -355,17 +346,17 @@ contract ThreeBurnsSameRatioTest is PayoutRatioTestBase {
         _fundVault(270e6, 0);
         uint256 owed = 3 * FELL_USDC;
         _drainTo(owed / 2);
-        assertEq(vault.totalUsdcOwed() + vault.totalFeesOwed(), owed, "precondition: the USDC total");
+        assertEq(vault.totalUsdcOwed(), owed, "precondition: the USDC total");
 
-        _expectFellBurn(a, 0, FELL_USDC / 2, BAND_TOKENS);
+        _expectFellBurn(a, FELL_USDC / 2, BAND_TOKENS);
         _burn(a);
         assertEq(mockUsdc.balanceOf(safe), FELL_USDC / 2, "first burn: half");
 
-        _expectFellBurn(b, 0, FELL_USDC / 2, BAND_TOKENS);
+        _expectFellBurn(b, FELL_USDC / 2, BAND_TOKENS);
         _burn(b);
         assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "second burn: the same half");
 
-        _expectFellBurn(c, 0, FELL_USDC / 2, BAND_TOKENS);
+        _expectFellBurn(c, FELL_USDC / 2, BAND_TOKENS);
         _burn(c);
         assertEq(mockUsdc.balanceOf(safe), FELL_USDC + FELL_USDC / 2, "third burn: the same half");
         assertEq(_yesOf(safe), 270e6, "YES was never short");
@@ -375,7 +366,7 @@ contract ThreeBurnsSameRatioTest is PayoutRatioTestBase {
 }
 
 // ──────────────────────────────────────────────
-// SC-9BSE: Escrowed USDC never pays a burn or a collect
+// SC-9BSE: Escrowed USDC never pays a burn
 // What: Another Safe escrowed 500 USDC the Operator never minted, and the vault's balance was
 //       drained below totalEscrowed; the burn of a USDC-only claim pays zero, does not revert,
 //       settles the claim, and the later reclaim pays the recorded 500.
@@ -396,7 +387,7 @@ contract EscrowSeniorTest is PayoutRatioTestBase {
     // SC-9BSE: the burn pays zero USDC and settles
     function test_whenBelowEscrowThenTheBurnPaysZeroAndSettles() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, 0, 0, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, 0, 0, 0, 0);
         _burn(positionId);
 
         assertEq(mockUsdc.balanceOf(safe), 0, "nothing paid");
@@ -436,7 +427,7 @@ contract IndependentRatiosTest is PayoutRatioTestBase {
 
     // SC-9BSF: only the YES leg is cut
     function test_whenShortOfYesOnlyThenOnlyTheYesLegIsCut() public {
-        _expectFellBurn(a, 0, FELL_USDC, 45e6);
+        _expectFellBurn(a, FELL_USDC, 45e6);
         _burn(a);
 
         assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "USDC in full");
@@ -463,68 +454,12 @@ contract PriceOnlyDevaluationTest is PayoutRatioTestBase {
 
     // SC-9BSG: both ratios read 1
     function test_whenOnlyThePriceMovedThenTheBurnPaysInFull() public {
-        _expectFellBurn(positionId, 0, FELL_USDC, BAND_TOKENS);
+        _expectFellBurn(positionId, FELL_USDC, BAND_TOKENS);
         _burn(positionId);
 
         assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "the whole USDC leg");
         assertEq(_yesOf(safe), BAND_TOKENS, "the whole YES leg");
         assertEq(mockUsdc.balanceOf(address(vault)), 0, "the vault held exactly the claim");
-    }
-}
-
-// ──────────────────────────────────────────────
-// SC-COET: A collect at a ratio pays its share, zeroes tokensOwed, and emits both amounts
-// What: The in-range position is owed 9,999,999 units of fees and the vault holds above
-//       escrow 40 percent of the principal and the fees it owes; the collect pays 40 percent
-//       of the fees, sets tokensOwed to zero, debits the whole scaled claim, and emits both
-//       amounts; a later collect owes only the fees that grew since.
-// Why:  ADR-COEN: a cut is final, and the LP chose the moment.
-// ──────────────────────────────────────────────
-contract CollectAtRatioTest is PayoutRatioTestBase {
-    uint256 positionId;
-    uint256 owed;
-    uint256 expectedPaid;
-
-    function setUp() public override {
-        super.setUp();
-        positionId = _mintExample(keccak256("a"));
-        _notifyFees(vault, operatorAddr, 10e6);
-        owed = 9_999_999;
-        uint256 total = vault.totalUsdcOwed() + vault.totalFeesOwed();
-        uint256 held = total * 4 / 10;
-        _drainTo(held);
-        expectedPaid = owed * held / total;
-    }
-
-    // SC-COET: the share, the event, and the settled claim
-    function test_whenTheVaultIsShortThenTheCollectPaysItsShareAndSettles() public {
-        vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, safe, owed, expectedPaid);
-        vm.prank(safe);
-        vault.collect(positionId);
-
-        assertEq(mockUsdc.balanceOf(safe), expectedPaid, "40 percent of the fees owed");
-        (,,,,,, uint256 tokensOwed) = vault.positions(positionId);
-        assertEq(tokensOwed, 0, "nothing waits for a later collect");
-        assertEq(vault.totalFeesOwedX128(), 0, "the ledger settled the whole scaled claim");
-    }
-
-    // SC-COET: the later collect owes only the new fees
-    function test_whenCollectedAgainThenOnlyTheNewFeesAreOwed() public {
-        vm.prank(safe);
-        vault.collect(positionId);
-        _notifyFees(vault, operatorAddr, 5e6);
-        uint256 newOwed = 4_999_999;
-        uint256 total = vault.totalUsdcOwed() + vault.totalFeesOwed();
-        uint256 held = mockUsdc.balanceOf(address(vault));
-        uint256 expectedPaid2 = held < total ? newOwed * held / total : newOwed;
-
-        vm.expectEmit(true, true, false, true, address(vault));
-        emit FeesCollected(positionId, safe, newOwed, expectedPaid2);
-        vm.prank(safe);
-        vault.collect(positionId);
-
-        assertEq(mockUsdc.balanceOf(safe), expectedPaid + expectedPaid2, "the new fees at the ratio then in force");
     }
 }
 
@@ -547,7 +482,7 @@ contract FullDebitOnShortPayoutTest is PayoutRatioTestBase {
 
     // SC-COEU: the event shows the cut and the totals fall by owed
     function test_whenTheBurnPaysLessThenTheTotalsFallByTheOwedAmounts() public {
-        _expectFellBurn(positionId, 0, 200e6, 60e6);
+        _expectFellBurn(positionId, 200e6, 60e6);
         _burn(positionId);
 
         assertEq(vault.totalUsdcOwed(), 0, "247,354,500 debited, not 200,000,000");
@@ -610,15 +545,9 @@ contract DriftFreeConservationTest is PayoutRatioTestBase, KeeperFillFixture {
             if (logs[i].topics[0] == CompleteSetsMerged.selector) merged += abi.decode(logs[i].data, (uint256));
             if (logs[i].topics[0] != PositionBurned.selector) continue;
             burns++;
-            (
-                uint256 usdcOwed,
-                uint256 feesOwed,
-                uint256 usdcPaid,
-                uint256 tokenId,
-                uint256 tokenOwed,
-                uint256 tokenPaid
-            ) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
-            assertEq(usdcPaid, usdcOwed + feesOwed, "the USDC leg is paid in full");
+            (uint256 usdcOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
+            assertEq(usdcPaid, usdcOwed, "the USDC leg is paid in full");
             uint256 tokenExpected = afterSwitch ? (tokenId == vault.yesTokenId() ? tokenOwed : 0) : tokenOwed;
             assertEq(tokenPaid, tokenExpected, "the token leg is paid in full");
         }
