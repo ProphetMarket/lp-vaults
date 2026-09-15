@@ -4,8 +4,8 @@ name: Mint LP Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 7
-refs: [FEAT-REPZ, FEAT-3ZRI, FEAT-JAIJ]
+version: 8
+refs: [FEAT-REPZ, FEAT-3ZRI, FEAT-JAIJ, FEAT-E943, FEAT-6HBN]
 ---
 
 # Mint LP Position
@@ -20,6 +20,7 @@ refs: [FEAT-REPZ, FEAT-3ZRI, FEAT-JAIJ]
 - Does not handle tick crossing / updateTick -- see feature 4
 - Does not handle vault wind-down or emergency cancel -- see feature 8
 - Does not manage vault-level role registries -- see FEAT-REPZ
+- Does not measure or attribute the spread -- FEAT-E943 owns both, and the mint is one of its four credit sites
 
 ## Actors
 
@@ -55,7 +56,7 @@ Linked to: UC-T7AG
 ### Tick State
 
 **FR-T7AV** `When a position is minted, the system shall increment liquidityGross on both tickLower and tickUpper by the position's liquidity, add the position's liquidity to liquidityNet on tickLower, subtract it from liquidityNet on tickUpper, book the position's NO sub-range [mintTick, tickUpper) by adding its liquidity to noLiquidityNet on mintTick and subtracting it on tickUpper, and, when mintTick lies strictly inside the range, initialize mintTick and increment its liquidityGross by the position's liquidity.`
-Fit Criterion: Given a mint with liquidity L, ticks[tickLower].liquidityGross increases by L, ticks[tickLower].liquidityNet increases by L, ticks[tickUpper].liquidityGross increases by L, ticks[tickUpper].liquidityNet decreases by L; when mintTick < tickUpper, ticks[mintTick].noLiquidityNet increases by L and ticks[tickUpper].noLiquidityNet decreases by L; when tickLower < mintTick < tickUpper, ticks[mintTick].liquidityGross increases by L and its bitmap bit is set, so `updateTick` crosses it (FEAT-TVS0 ADR-COEW). A mint at its upper bound books no NO sub-range, because that side is empty.
+Fit Criterion: Given a mint with liquidity L, ticks[tickLower].liquidityGross increases by L, ticks[tickLower].liquidityNet increases by L, ticks[tickUpper].liquidityGross increases by L, ticks[tickUpper].liquidityNet decreases by L; when mintTick < tickUpper, ticks[mintTick].noLiquidityNet increases by L and ticks[tickUpper].noLiquidityNet decreases by L; when tickLower < mintTick < tickUpper, ticks[mintTick].liquidityGross increases by L and its bitmap bit is set, so `updateTick` crosses it (FEAT-TVS0 ADR-COEW). A mint at its upper bound books no NO sub-range, because that side is empty. Since R18 the mint also credits the measured surplus before any of this, so the new position never joins the set that receives it; sets each tick's `spreadGrowthOutsideX128` on its first reference, to `spreadGrowthGlobalX128` when the tick is at or below `currentTick` and to zero otherwise; and records `spreadGrowthInsideLastX128` after both bounds are referenced, so a position minted right after a credit has a spread claim of exactly zero (FEAT-E943 FR-E94A, FR-E94B).
 Linked to: UC-T7AG
 
 ### Active Liquidity
@@ -118,11 +119,13 @@ Linked to: UC-T7AG
 
 ## Non-Functional Requirements
 
-**NFR-T7B6** Gas: `When an Operator mints a position (including tick initialization), the total gas cost shall remain below 300,000 gas on Polygon.`
+**NFR-T7B6** Gas: `When an Operator mints a position, including the initialization of both bounds and an interior mint tick, the spread credit, the snapshot, and the merge of the free pairs, the call gas measured cold against the mock USDC and the real ConditionalTokens bytecode shall remain below 340,000.`
+Rationale: measured cold on 2026-09-15 on the R18 build with ten positions already in range, a surplus pending, and free pairs to merge, `optimizer_runs` at 100 (ADR-E94X): 309,662 for a range whose two bounds are new, and 274,971 for a range whose ticks already exist. The 300,000 figure this replaces did not say whether it counted the 21,000 transaction base, and it predates the credit, the snapshot, and the merge the mint now runs.
 
-**NFR-T7B7** Security: `The system shall apply an inline nonReentrant modifier to the mint function as defense in depth: the mint makes no external call, and the guard keeps position, tick, and activeLiquidity state closed to any guarded path that re-enters, so a later revision that adds an external call cannot inherit an unguarded function.`
+**NFR-T7B7** Security: `The system shall apply an inline nonReentrant modifier to the mint function: the mint's one external call is the merge of the free pairs through the ConditionalTokens contract, which runs after every effect, and the guard keeps position, tick, and activeLiquidity state closed to any guarded path that re-enters.`
+Rationale: the guard was defence in depth until R18, against exactly the revision R18 turned out to be. It is load-bearing now.
 
-**NFR-T7B8** Security: `The system shall follow checks-effects-interactions ordering in the mint function: validate inputs and confirm that the escrow names this Safe and this intent hash first; then set usedIntents, delete the escrow, reduce totalEscrowed, and update position, tick, and activeLiquidity state. The mint performs no external call.`
+**NFR-T7B8** Security: `The system shall follow checks-effects-interactions ordering in the mint function: validate inputs and confirm that the escrow names this Safe and this intent hash first; then read both token balances and the USDC balance; then credit the measured surplus, set usedIntents, delete the escrow, reduce totalEscrowed, update position, tick, and activeLiquidity state, and record the spread snapshot; then merge the free pairs as the one external call.`
 
 ## Acceptance
 
@@ -138,7 +141,8 @@ Linked to: UC-T7AG
 - Replay protection prevents double-use of intentId
 - activeLiquidity updates only for in-range positions
 - Inline nonReentrant guard on mint function
-- Checks-effects-interactions ordering verified
+- Checks-effects-interactions ordering verified, with the merge of the free pairs as the one external call and every effect before it
+- A position minted while a surplus is pending has a spread claim of exactly zero, and the liquidity that was already in range receives that surplus
 - Forge fmt passes; no console.log in production code
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
 - FEATURES.md status is `implemented`

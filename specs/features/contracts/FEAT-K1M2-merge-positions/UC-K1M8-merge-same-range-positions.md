@@ -3,7 +3,7 @@ id: UC-K1M8
 name: Merge Same-Range Positions
 feature: FEAT-K1M2
 status: implemented
-version: 6
+version: 7
 actor: Operator
 ---
 
@@ -33,14 +33,18 @@ Operator calls `mergePositions(uint256[] calldata positionIds)` on the vault.
 3. System validates all positions share the same owner, tickLower, tickUpper, and mintTick
 4. System sums liquidity into the first position (posA)
 5. System zeroes the consumed position (posB)
+6. System computes both spread claims, writes posA's `spreadGrowthInsideLastX128` as `inside − floor((x_a + x_b) ÷ 1000)`, zeroes posB's snapshot, and debits the dust from `totalSpreadOwedX128` (FEAT-9BQZ FR-9BRH)
 
 **Outcomes:**
 - posA.liquidity == 1000 (sum of both)
 - posB.liquidity == 0
+- posA's spread claim equals the sum of the two claims less at most 1,000 X128 units, which is far below one USDC unit
+- Two positions minted at different moments hold different snapshots, so one survivor snapshot cannot represent both exactly; the dust the floor drops is debited rather than left behind
 
 **Side Effects:**
-- `PositionsMerged(uint256[] positionIds, uint256 survivorId)` event emitted
+- `PositionsMerged(uint256[] positionIds, uint256 survivorId)` event emitted, and no `SpreadCredited`, because a position merge measures nothing
 - Tick `liquidityGross` unchanged (net liquidity on the range is the same)
+- `totalSpreadOwedX128` storage: decreased by the dust, with checked arithmetic, so a ledger bug reverts the Operator's call
 - `lastOperatorActivityTimestamp` storage: refreshed to `block.timestamp` -- a successful merge is proof the Operator is alive (FEAT-JXQO)
 - No USDC transferred
 

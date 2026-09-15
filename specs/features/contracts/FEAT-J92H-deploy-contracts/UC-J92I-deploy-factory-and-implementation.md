@@ -3,7 +3,7 @@ id: UC-J92I
 name: Deploy Factory and Implementation
 feature: FEAT-J92H
 status: implemented
-version: 3
+version: 4
 actor: Factory Owner
 ---
 

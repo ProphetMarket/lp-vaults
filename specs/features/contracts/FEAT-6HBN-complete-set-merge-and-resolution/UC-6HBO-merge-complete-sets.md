@@ -3,7 +3,7 @@ id: UC-6HBO
 name: Merge Complete Sets
 feature: FEAT-6HBN
 status: implemented
-version: 3
+version: 4
 actor: Any Wallet
 ---
 
@@ -19,6 +19,8 @@ actor: Any Wallet
 
 Any wallet calls `mergeCompleteSets()` on the vault, usually the keeper after fills.
 
+Since R18 the call also reads the vault's USDC balance and credits the measured spread to the liquidity in range before it merges (FEAT-E943 UC-E944). The scenarios below assert the merge; UC-E944 asserts what the credit computes. A scenario whose vault holds no live position in range writes no growth and emits no `SpreadCredited`, and its surplus stays measurable for the next credit that finds liquidity (FEAT-E943 FR-E949). A scenario that does hold one names the credit in its side effects, because a donated or earned USDC balance above what the ledger owes is exactly what the measurement is for.
+
 ---
 
 ### SC-6HC9: Any wallet merges the vault's matched pairs into USDC
@@ -32,18 +34,20 @@ Any wallet calls `mergeCompleteSets()` on the vault, usually the keeper after fi
 1. A wallet calls `mergeCompleteSets()`
 2. The vault reads its YES and NO balances on the ConditionalTokens contract and the two owed totals
 3. The vault computes the free pairs, `amount = min(100 − 0, 60 − 0) = 60`
-4. The vault calls `mergePositions(usdc, bytes32(0), conditionId, [1, 2], 60)`
-5. ConditionalTokens burns 60 YES and 60 NO and transfers 60 USDC to the vault
+4. The vault reads its USDC balance, computes the surplus above escrow, above the principal it owes, and above the spread it already credited, counting the 60 pairs as USDC, and credits it to the liquidity in range (FEAT-E943 FR-E945, FR-E946)
+5. The vault calls `mergePositions(usdc, bytes32(0), conditionId, [1, 2], 60)`
+6. ConditionalTokens burns 60 YES and 60 NO and transfers 60 USDC to the vault
 
 **Outcomes:**
 - The vault holds 40 YES, 0 NO, and B + 60 USDC
 - The caller's balances do not change
 
 **Side Effects:**
+- `SpreadCredited(amount, spreadGrowthGlobalX128)` emitted before `CompleteSetsMerged(caller, 60)`, when the surplus is above zero and liquidity is in range
 - `CompleteSetsMerged(caller, 60)` emitted by the vault
 - `PositionsMerge` emitted by ConditionalTokens
 - No receiver hook runs, because a burn calls no hook
-- No vault storage written: phase, positions, ticks, and `lastOperatorActivityTimestamp` keep their values
+- `spreadGrowthGlobalX128` and `totalSpreadOwedX128` written when the surplus is above zero, and nothing else: phase, positions, ticks, and `lastOperatorActivityTimestamp` keep their values
 
 ---
 
@@ -63,10 +67,12 @@ Any wallet calls `mergeCompleteSets()` on the vault, usually the keeper after fi
 **Outcomes:**
 - The vault holds 90 YES, 60 NO, and B + 520,951,500 USDC: above B, exactly what the ledger owes
 - A second call merges nothing
+- Both positions are in range at 5700, so the call also credits everything the vault holds above what the ledger owes, which here is the donated base B plus the fills' margin, to A and B in proportion to their liquidity (FEAT-E943 FR-E946). A second call credits nothing, because the first one made the surplus owed
 
 **Side Effects:**
+- `SpreadCredited(amount, spreadGrowthGlobalX128)` emitted once, before `CompleteSetsMerged`
 - `CompleteSetsMerged(caller, 60)` emitted once
-- No vault storage written
+- `spreadGrowthGlobalX128` and `totalSpreadOwedX128` written; no other vault storage written
 
 ---
 
@@ -81,12 +87,14 @@ Any wallet calls `mergeCompleteSets()` on the vault, usually the keeper after fi
 2. The vault computes the free pairs `min(90 − 90, 50 − 0) = 0`
 
 **Outcomes:**
-- No `mergePositions` call and no event
+- No `mergePositions` call and no `CompleteSetsMerged` event
 - The vault still holds 90 YES and 50 NO
 - The position's burn pays the 90 YES in full
+- The position is in range at 5700 and both token balances cover their owed totals, so the call still credits the USDC the vault holds above what the ledger owes, the donated base B plus the fall's margin (FEAT-E943 FR-E946). The donated 50 NO is not credited, because a token is not USDC and no pair is free
 
 **Side Effects:**
-- None from the merge call
+- `SpreadCredited(amount, spreadGrowthGlobalX128)` emitted, and `spreadGrowthGlobalX128` and `totalSpreadOwedX128` written
+- No `mergePositions` call and no `CompleteSetsMerged` event
 
 ---
 

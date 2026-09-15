@@ -3,7 +3,7 @@ id: FEAT-6HBN
 name: Complete-Set Merge and Resolution Redemption
 use_cases: [UC-6HBO, UC-6HBP]
 scenarios: [SC-6HC9, SC-6HCA, SC-6HCB, SC-6HCC, SC-DFDV, SC-DFDW, SC-6HCD, SC-6HCE, SC-6HCF, SC-6HCG, SC-6HCH, SC-6HCI, SC-CYS6]
-last_update: 2026-09-14
+last_update: 2026-09-15
 ---
 
 # Architecture: Complete-Set Merge and Resolution Redemption
@@ -81,7 +81,7 @@ erDiagram
 **Invariants:**
 - A merge of `amount` complete sets lowers the vault's YES and NO balances by `amount` each and raises its USDC balance by `amount`
 - After a successful `mergeCompleteSets()`, the free pairs are 0: `min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed())) == 0`, so every token the vault still holds is one the ledger owes, or one whose complement the ledger owes (ADR-DFE2)
-- The merge writes no vault storage: `phase`, `paused`, positions, ticks, and `lastOperatorActivityTimestamp` keep their values
+- The public merge writes `spreadGrowthGlobalX128` and `totalSpreadOwedX128` when it finds a surplus and liquidity in range (FEAT-E943), and nothing else: `phase`, `paused`, positions, ticks, and `lastOperatorActivityTimestamp` keep their values
 - The USDC from a merge or a redemption goes only to the vault, because the ConditionalTokens contract pays its caller and the caller is the vault
 - The merge works in every phase, including Cancelled (decision C9, ADR-6HCM); the redemption works in WindDown and Cancelled and reverts while Active (ADR-6HCK)
 - The stored payout is written once, from the ConditionalTokens contract, and never by an argument; the switch is on when `payoutNumeratorYes | payoutNumeratorNo != 0`, and the denominator is their sum
@@ -171,6 +171,7 @@ erDiagram
 **ADR-6HCJ:** Complete-set merge is a separate function that any wallet can call, never part of a receiver hook
 In the context of a vault that gains YES and NO tokens at every fill, facing the fact that a receiver hook runs inside the exchange's settlement transaction so a revert there reverts the user's match, we decided to merge through a separate `mergeCompleteSets()` that any wallet can call. It merges `min(YES, NO)` and returns without a call when that amount is zero. This achieves capital recycling that can never block a trade. One YES plus one NO always pays exactly 1 USDC, so a merge moves no value between parties and the caller receives nothing. We accept that pairs can sit unmerged until a keeper or a payout calls it.
 Superseded in part on 2026-09-14 by ADR-DFE2: the merge takes only the free pairs (finding CV-01 of `audits/code-validation-round-1.md`), because the sentence "a merge moves no value between parties" holds only for a pair no claim is owed. The separate-function decision and the hook rejection stand.
+Extended on 2026-09-15 (step R18, ADR-E94V in FEAT-E943): the public merge credits the measured spread to the liquidity in range before it merges, which is where a round trip that ends where it began is attributed, because the unchanged-tick report reads no balance. The caller still receives nothing, so the call still cannot favor its caller; the MEV analysis on the function states the one residual, that a caller who is an LP in range can time the call ahead of a report or a mint, bounded by the surplus pending at that moment.
 
 **Rejected alternative -- merge inside `onERC1155Received`:** it would revert settlement on any merge failure, and it would break the stateless-hook decision (ADR-3WLP).
 
@@ -180,6 +181,7 @@ In the context of a vault that holds one claim's YES and another claim's NO at o
 **Rejected alternative -- merge every pair and pay a missing token in USDC at the current tick:** it moves price risk between LPs who exit at different times.
 
 **Rejected alternative -- a sweep function for the stranded residue:** it treats the symptom, and the residue has no owner.
+Superseded on 2026-09-15 (step R18, ADR-E94U in FEAT-E943): the residue has an owner now, the last live position, and the sweep runs inside that position's burn rather than as a separate function anyone could time. The reason this alternative was rejected in 2026-09-14 no longer holds, and the two objections it raised are both answered: the credit treats the cause, and the sweep takes only what the credit could not attribute.
 
 **Rejected alternative -- no merge at all:** every round-trip pair would then be paid in kind as two tokens, which decision C26 dropped (ADR-85DL).
 

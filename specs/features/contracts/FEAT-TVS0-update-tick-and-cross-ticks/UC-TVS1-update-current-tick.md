@@ -3,7 +3,7 @@ id: UC-TVS1
 name: Update Current Tick
 feature: FEAT-TVS0
 status: implemented
-version: 7
+version: 8
 actor: Operator
 ---
 
@@ -24,6 +24,8 @@ Operator calls `updateTick(int24 newTick)` on the vault.
 The `lastOperatorActivityTimestamp` refresh named in the scenarios below is the shared Operator-liveness mechanism owned by FEAT-JXQO (FR-JXQS): every successful Operator-gated call refreshes it, and a reverted call does not. A report with the current tick (SC-TVS7) succeeds and refreshes the timer, so the keeper's 60-second report is proof of life on a market whose price does not move. `updateTick` keeps its pause and phase checks, so while the vault is paused or wound down the keeper calls `heartbeat()` instead.
 
 Since R11 every move also shifts the three totals of the solvency ledger (FEAT-9BQZ) for each segment it traverses, and an interior mint tick is crossed like a boundary and counted in `ticksCrossed`. The scenarios below assert the tick state; the totals are asserted in UC-9BR1.
+
+Since R18 a moving report also measures the vault's surplus after the ledger shift, credits it per segment to the liquidity that was in range there, and merges the vault's free pairs as its one external call (FEAT-E943, UC-E944). Each crossed tick's `spreadGrowthOutsideX128` is flipped by the crossing and then gains the growth credited before it was crossed. The scenarios below assert the tick state; the credit is asserted in UC-E944.
 
 ---
 
@@ -154,13 +156,14 @@ Since R11 every move also shifts the three totals of the solvency ledger (FEAT-9
 - The call succeeds
 - currentTick is 100
 - lastOperatorActivityTimestamp is block.timestamp
-- The call costs about 20,500 gas net, against about 15,600 for `heartbeat()`, measured on 2026-09-12
+- The call reads no balance and credits no spread. A round trip that ends where it began is credited by `mergeCompleteSets()` instead, which the keeper already calls when it sees free pairs (FEAT-E943 SC-E94J, ADR-E94V). The user chose this on 2026-09-15 after measuring the unchanged report against a version that checks whether either token balance is above its owed total: the checked path costs roughly twice the plain one, so the quiet report keeps its cost
 
 **Side Effects:**
 - `lastOperatorActivityTimestamp` updated to `block.timestamp`
-- No `TickUpdated` event emitted
+- No `TickUpdated` event emitted and no `SpreadCredited` event emitted
 - No tick crossed and no `tickBitmap` word read
-- No change to `currentTick`, `activeLiquidity`, or any tick record
+- No balance read on USDC or on the ConditionalTokens contract, and no merge call
+- No change to `currentTick`, `activeLiquidity`, any tick record, `spreadGrowthGlobalX128`, or `totalSpreadOwedX128`
 - The reentrancy guard slot is written twice and ends at its starting value
 
 ---

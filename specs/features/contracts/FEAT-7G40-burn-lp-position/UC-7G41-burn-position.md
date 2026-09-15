@@ -3,7 +3,7 @@ id: UC-7G41
 name: Burn Position
 feature: FEAT-7G40
 status: implemented
-version: 8
+version: 9
 actor: LP
 ---
 
@@ -20,6 +20,8 @@ actor: LP
 ## Trigger
 
 The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe transaction the owner key signs.
+
+Since R18 every burn does two more things, and they apply to every scenario below (FEAT-E943 UC-E944). First, it credits the measured spread before it values the claim, with the exiting position still counted, and pays that position's spread as a fourth leg at the pooled USDC ratio; `PositionBurned` therefore carries nine fields, with `spreadOwed` and `spreadPaid` after `usdcPaid`. Second, the burn whose ledger debit takes `totalUsdcOwedScaled` to zero is the last live position's burn, so it also pays its owner every USDC the vault holds above `totalEscrowed` and every outcome token the vault still holds, and emits `ResidueSwept` with the amounts beyond that position's own claim (FR-E94C). Unless a scenario says otherwise, its vault holds exactly what the ledger owes, so no spread is creditable, both spread fields read zero, and the `ResidueSwept` that closes a single-position scenario carries zeros.
 
 ---
 
@@ -43,7 +45,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - `activeLiquidity` decreases by `3e23`, because the position was in range
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 300000000, 300000000, 0, 0, 0)` emitted
+- `PositionBurned(positionId, safe, 300000000, 300000000, 0, 0, 0, 0, 0)` emitted
 - `positions[positionId]` storage: deleted
 - `ticks[5500]` and `ticks[6500]` storage: `liquidityGross` decreased by `3e23`; `liquidityNet` decreased by `3e23` at 5500 and increased by `3e23` at 6500; `noLiquidityNet` increased by `3e23` at 6500
 - `ticks[6000]` storage (the interior mint tick): `liquidityGross` and `noLiquidityNet` decreased by `3e23`, the record deleted and its bitmap bit cleared, because nothing else references it
@@ -77,7 +79,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The position no longer exists
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, 0, 0, yesTokenId, 90000000, 90000000)` emitted
 - `positions[positionId]` storage: deleted
 - `ticks[5500]` and `ticks[6500]` storage: liquidity removed as in SC-7G43
 - USDC transferred from vault to the Safe
@@ -107,7 +109,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The position no longer exists
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 265345500, 265345500, noTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 265345500, 265345500, 0, 0, noTokenId, 90000000, 90000000)` emitted
 - `positions[positionId]` storage: deleted
 - `ticks[5500]` and `ticks[6500]` storage: liquidity removed
 - USDC transferred from vault to the Safe
@@ -255,7 +257,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 
 **Side Effects:**
 - `CompleteSetsMerged(safe, 50)` emitted before `PositionBurned` in the log
-- `PositionBurned(positionId, safe, 300000000, 300000000, 0, 0, 0)` emitted
+- `PositionBurned(positionId, safe, 300000000, 300000000, 0, 0, 0, 0, 0)` emitted
 - `PositionsMerge` emitted by ConditionalTokens
 - USDC transferred from ConditionalTokens to the vault, then from the vault to the Safe
 
@@ -304,7 +306,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - In every case `totalUsdcOwed()` falls by the claim's USDC and the band's token total by its tokens, whatever was paid: 247,354,500 and 90,000,000 in case A
 
 **Side Effects:**
-- Case A: `PositionBurned(positionId, safe, 247354500, 200000000, yesTokenId, 90000000, 60000000)` emitted, so an indexer sees `paid < owed`
+- Case A: `PositionBurned(positionId, safe, 247354500, 200000000, 0, 0, yesTokenId, 90000000, 60000000)` emitted, so an indexer sees `paid < owed`
 - Case B: `PositionBurned` emitted with `usdcPaid == 0`, and no USDC transfer
 - `totalUsdcOwedScaled` and the band's token total storage: debited by the full scaled claim in every case
 - `totalEscrowed` unchanged in every case: escrowed USDC never pays a burn
@@ -330,7 +332,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - A mint below its range holds an empty YES side and a NO side that is the whole range, so a rise into the range fills `[tickLower, currentTick)` with NO
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 260845500, 260845500, noTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 260845500, 260845500, 0, 0, noTokenId, 90000000, 90000000)` emitted
 - `positions[positionId]` storage: deleted
 - ERC-1155 NO transferred from vault to the Safe
 
@@ -354,7 +356,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The Safe receives no token
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted, where `tokenPaid` is the token leg's USDC after the switch
+- `PositionBurned(positionId, safe, 247354500, 247354500, 0, 0, yesTokenId, 90000000, 90000000)` emitted, where `tokenPaid` is the token leg's USDC after the switch
 - One `Transfer` from the vault to the Safe, of 337,354,500 units
 - No `TransferSingle`, no `PayoutRedemption`, no `OutcomeTokensRedeemed`
 
@@ -376,7 +378,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The Safe receives no token
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 0)` emitted; `tokenOwed` still reports the 90 tokens the claim held
+- `PositionBurned(positionId, safe, 247354500, 247354500, 0, 0, yesTokenId, 90000000, 0)` emitted; `tokenOwed` still reports the 90 tokens the claim held
 - No `TransferSingle`
 
 ---
@@ -396,7 +398,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The Safe's USDC balance increases by 292,354,500 units
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 45000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, 0, 0, yesTokenId, 90000000, 45000000)` emitted
 - No `TransferSingle`
 
 ---
@@ -417,7 +419,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The Safe redeems the 90 YES at the ConditionalTokens contract for 90 USDC in its own transaction, so no LP waits on the Oracle
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, 0, 0, yesTokenId, 90000000, 90000000)` emitted
 - `TransferSingle` from the ConditionalTokens contract as the last external call
 - No `redeemPositions` call, no `OutcomeTokensRedeemed`
 
@@ -438,15 +440,48 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 4. Case B only: the Operator reports 5700, and the second Safe calls `burnPosition`
 
 **Outcomes:**
-- Case A: the Safe receives 247,354,500 USDC units and no token, the vault holds 90,000,000 YES and no USDC above `totalEscrowed`, and every ledger total reads zero
-- Case B: the first Safe receives 251,741,625 units and no token (its cut of 48,258,375 is less than its own fill's 52,645,500); after the report the second claim is owed 256,128,750 units plus 75 YES; the second Safe receives 251,741,625 units plus 75 YES, so the stayer takes the 4,387,125 units the leaver's cut did not cover; the vault holds 90,000,000 YES and no USDC above escrow, and every total reads zero
-- In both cases the leftover YES belong to no claim and stay until the switch (decision C8, finding CV-08 of `audits/code-validation-round-1.md`, ADR-DYNK)
+- Neither case credits any spread: the unreported spend puts the vault's USDC below what the ledger owes, so the measurement finds nothing creditable (FEAT-E943 FR-E945). At model prices there is no spread to find either
+- Case A: the Safe receives 247,354,500 USDC units and, through the closing sweep, all 90,000,000 YES, because its burn takes `totalUsdcOwedScaled` to zero and it is therefore the last live position (FEAT-E943 FR-E94C). The vault holds no token and no USDC above `totalEscrowed`, and every ledger total reads zero
+- Case B: the first Safe receives 251,741,625 units and no token, and forfeits 48,258,375, less than its own fill's 52,645,500; after the report the second claim is owed 256,128,750 units plus 75 YES; the second Safe receives 251,741,625 units and, as the last live position, all 165,000,000 YES, so the stayer takes both the 4,387,125 units the leaver's cut did not cover and the 90,000,000 YES the fill bought for a claim that left
+- In both cases the leftover YES reach the remaining positions instead of staying until the switch. That is the change R18 makes to decision C8 and ADR-DYNK: the cut the leaver takes stays exactly as it was, and what it forfeits no longer strands
 
 **Side Effects:**
-- Case A: `PositionBurned(positionId, safe, 300000000, 247354500, 0, 0, 0)` emitted, so an indexer sees `paid < owed`
-- Case A: no `TransferSingle` from the vault, and no `CompleteSetsMerged`, because the vault holds no NO
-- Case B: `PositionBurned(positionA, safeA, 300000000, 251741625, 0, 0, 0)`, then `TickUpdated(6000, 5700, 1)` (the report crosses the second claim's interior mint tick), then `PositionBurned(positionB, safeB, 256128750, 251741625, yesTokenId, 75000000, 75000000)`
+- Case A: `ResidueSwept(positionId, safe, 0, 90000000, 0)` then `PositionBurned(positionId, safe, 300000000, 247354500, 0, 0, 0, 0, 0)` emitted, so an indexer sees `paid < owed` on the principal and the residue beside it
+- Case A: one `TransferSingle` from the vault for the swept YES, and no `CompleteSetsMerged`, because the vault holds no NO
+- Case B: `PositionBurned(positionA, safeA, 300000000, 251741625, 0, 0, 0, 0, 0)` with no `ResidueSwept`, because the second claim is still live; then `TickUpdated(6000, 5700, 1)` (the report crosses the second claim's interior mint tick); then `ResidueSwept(positionB, safeB, 0, 90000000, 0)` and `PositionBurned(positionB, safeB, 256128750, 251741625, 0, 0, yesTokenId, 75000000, 165000000)`
+- No `SpreadCredited` in either case
 - `totalUsdcOwedScaled` storage: debited by the full scaled claim at each burn
 - No `updateTick` before the first burn in either case
+
+---
+
+### SC-E94P: An exit is final and complete
+
+**Given:**
+- The Safe owns 300 USDC over `[5500, 6500)` minted at 6000, the only live position, so `liquidity = 3e23`
+- The keeper filled a fall from 6000 to 5900 and then a rise back to 6000, both at 400 basis points, with no report between them, so the vault holds 271,200,000 USDC units, 30,000,000 YES, and 30,000,000 NO
+- `currentTick` is still 6000 and the ledger owes 300,000,000 USDC units and no token, so the round trip's 1,200,000 units of margin are unrealized, unmerged, and uncredited
+- `totalEscrowed` is zero
+
+**Steps:**
+1. The Safe calls `burnPosition(positionId)`
+2. System reads both token balances, the switch, the 30,000,000 free pairs, and the USDC balance, once
+3. System credits the 1,200,000 units of surplus to `activeLiquidity`, which still counts this position
+4. System values the claim at 300,000,000 units of principal, 1,200,000 of spread, and no token
+5. System debits the four totals, deletes the record with its snapshot, merges the free pairs, and pays
+
+**Outcomes:**
+- The Safe receives 301,200,000 USDC units in one transfer and no outcome token: its principal, its share of the round trip, and nothing withheld. The credit attributed 1,199,999 of the round trip's margin and the closing sweep carried the last unit, which the growth floor dropped
+- `positions(positionId)` reads empty on all six words, the snapshot included
+- `totalUsdcOwedScaled`, `totalYesOwedScaled`, `totalNoOwedScaled`, and `totalSpreadOwedX128` all read zero
+- The vault holds exactly `totalEscrowed`, 0 YES, and 0 NO
+- A later report, merge, or credit changes nothing for that position id, and no later `SpreadCredited` can reach it
+- The vault owes this position nothing and holds nothing for it
+
+**Side Effects:**
+- `SpreadCredited(1199999, spreadGrowthGlobalX128)`, then `CompleteSetsMerged(safe, 30000000)`, then `ResidueSwept(positionId, safe, 1, 0, 0)`, then `PositionBurned(positionId, safe, 300000000, 300000000, 1199999, 1199999, 0, 0, 0)` emitted
+- `positions[positionId]` storage: deleted
+- `spreadGrowthGlobalX128` written by the credit; `totalSpreadOwedX128` written twice, up by the credit and down to zero by the debit
+- No `lastOperatorActivityTimestamp` write
 
 ---

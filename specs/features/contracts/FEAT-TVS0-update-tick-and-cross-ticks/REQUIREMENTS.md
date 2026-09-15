@@ -4,8 +4,8 @@ name: Update Tick and Cross Ticks
 module: contracts
 domain: "@ticks"
 status: implemented
-version: 5
-refs: [FEAT-REPZ, FEAT-T7AF, FEAT-JXQO, FEAT-9BQZ]
+version: 6
+refs: [FEAT-REPZ, FEAT-T7AF, FEAT-JXQO, FEAT-9BQZ, FEAT-E943, FEAT-6HBN]
 ---
 
 # Update Tick and Cross Ticks
@@ -16,7 +16,8 @@ refs: [FEAT-REPZ, FEAT-T7AF, FEAT-JXQO, FEAT-9BQZ]
 
 - Does not initialize or deinitialize ticks — tick lifecycle managed by mint (FEAT-T7AF) and burn (feature 6)
 - Does not implement off-chain Keeper logic (price monitoring, chunking decisions) — only the on-chain `updateTick` entry point
-- Does not move USDC or outcome tokens — only updates accounting state (activeLiquidity, noSideLiquidity, currentTick, and the three ledger totals of FEAT-9BQZ)
+- Does not place, match, or settle any order, and does not pay any address — a moving report reads three balances, writes accounting state (activeLiquidity, noSideLiquidity, currentTick, and the four ledger totals of FEAT-9BQZ and FEAT-E943), and merges the vault's own free pairs into the vault's own USDC as its one external call
+- Does not measure or credit the spread itself — FEAT-E943 owns the measurement and the credit, and the report is one of its four call sites
 
 ## Actors
 
@@ -26,8 +27,8 @@ refs: [FEAT-REPZ, FEAT-T7AF, FEAT-JXQO, FEAT-9BQZ]
 
 ## Functional Requirements
 
-**FR-TVS9** `When the Operator calls updateTick(newTick), the system shall iterate from currentTick toward newTick, crossing each initialized tick encountered using the TickBitmap to skip uninitialized ticks.`
-Fit Criterion: Given currentTick=100, newTick=300, and initialized ticks at 150, 200, 250 with gaps elsewhere, exactly three ticks are crossed in order and currentTick is 300 after the call.
+**FR-TVS9** `When the Operator calls updateTick(newTick) with newTick different from currentTick, the system shall iterate from currentTick toward newTick, crossing each initialized tick encountered using the TickBitmap to skip uninitialized ticks, record each segment's in-range liquidity and model spend, and after the ledger shift measure the vault's surplus, credit it per segment to the liquidity that was in range there, and merge the free pairs as the report's one external call.`
+Fit Criterion: Given currentTick=100, newTick=300, and initialized ticks at 150, 200, 250 with gaps elsewhere, exactly three ticks are crossed in order, currentTick is 300 after the call, four segments are recorded, and the surplus the fills left is credited to the four in-range sets in proportion to `active × Σ (10000 − t)` over each segment's levels (FEAT-E943 FR-E947). Given no surplus, no credit is written and no `SpreadCredited` is emitted. Given no free pair, no merge call is made.
 Linked to: UC-TVS1
 
 **FR-TVSB** `When an initialized tick is crossed left-to-right (price increasing), the system shall add the tick's liquidityNet to activeLiquidity.`
@@ -80,7 +81,8 @@ Linked to: UC-TVS1
 
 ## Non-Functional Requirements
 
-**NFR-TVSK** Performance: `updateTick with zero initialized ticks crossed shall consume less than 50,000 gas on Polygon.`
+**NFR-TVSK** Performance: `updateTick with zero initialized ticks crossed shall consume less than 140,000 call gas measured cold against the mock USDC and the real ConditionalTokens bytecode, and an unchanged-tick report less than 25,000.`
+Rationale: measured cold on 2026-09-15 on the R18 build with ten positions in range, `optimizer_runs` at 100 (ADR-E94X): an unchanged report costs 18,065; a 40-level move whose fill never arrived, so the token-cover check withholds the credit, costs 121,063 on the first move after every slot is cold; the same move with a credit to write costs 67,055 once the ledger slots are warm. The 50,000 figure this replaces predates the R11 ledger, the R18 credit, and the crossings of an interior mint tick, and was already false on the R17 build. A moving report reads three balances, may write two accumulator slots and one snapshot per crossed tick, and merges the vault's free pairs; the unchanged path reads no balance at all (ADR-9J43, ADR-E94V).
 
 **NFR-TVSL** Security: `updateTick shall apply an inline nonReentrant guard following checks-effects-interactions ordering.`
 

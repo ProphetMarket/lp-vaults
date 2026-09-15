@@ -3,7 +3,8 @@ id: FEAT-T7AF
 name: Mint LP Position
 use_cases: [UC-T7AG]
 scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AR, SC-3XU5, SC-3XU6, SC-3Z9J, SC-45IE, SC-3Z9K, SC-AFPM, SC-AFPN]
-last_update: 2026-09-14
+# The mint's spread credit and its snapshot are specified in FEAT-E943 UC-E944 (SC-E94M).
+last_update: 2026-09-15
 ---
 
 # Architecture: Mint LP Position
@@ -148,7 +149,8 @@ erDiagram
 
 | System | Protocol | Direction | Purpose |
 |--------|----------|-----------|---------|
-| none | — | — | The mint makes no external call; the USDC entered at `depositForIntent` (FEAT-3ZRI) |
+| Gnosis ConditionalTokens | contract call | outbound | Since R18 the mint reads both outcome-token balances for the measurement (FEAT-E943) and merges the vault's free pairs as its one external call (FEAT-6HBN) |
+| USDC (ERC-20) | contract call | outbound | Since R18 the mint reads the vault's USDC balance for the measurement (FEAT-E943). No USDC moves at the mint; it entered at `depositForIntent` (FEAT-3ZRI) |
 
 ## Code Map
 
@@ -182,6 +184,7 @@ In the context of representing LP price ranges on a prediction market with bound
 
 **ADR-T7CE:** Liquidity formula: L = usdcAmount * PRECISION / rangeWidth
 In the context of computing position liquidity from a USDC deposit, facing the choice between v3's sqrt-price-based formula and a linear USDC-per-tick model, we decided to use `liquidity = usdcAmount * PRECISION / (tickUpper - tickLower)` to achieve a direct, auditable relationship between USDC deposited and liquidity weight, accepting that this is simpler than v3's model because the CLOB handles trade execution -- the vault only needs liquidity for fee-accounting weight, not for swap output computation. See `research/lp-provisioning-engine.md` section "Mapping L (liquidity) to USDC capital" for the derivation. Under the claim model (decision C26), the same number is the token count on every tick of the range, each tick funded with 1 USDC per token, so a burn values a claim without a loop; the liquidity unit decision (ADR-7G5F in FEAT-7G40) records the choice and the formula. Since 2026-09-14 (step R17) liquidity is the claim's weight, not a fee-accounting weight.
+Since 2026-09-15 (step R18) it is both the claim's weight and the spread's weight: a credit is split across the in-range set in proportion to liquidity, which is exact because every position in one in-range set placed the same liquidity on every level of it (FEAT-E943 NFR-E94D).
 
 **ADR-T7CF:** EIP-712 signed intent for operator-gated minting
 In the context of LP onboarding under the operator-executes-all model (ADR-RFS9 from FEAT-REPZ), facing the need for the LP to authorize specific mint parameters without directly calling the vault, we decided to use EIP-712 typed structured data (MintIntent struct) signed by the LP and submitted by the Operator, with intentId-based replay protection, to achieve cryptographic authorization verifiable on-chain while keeping the execution path operator-gated, accepting that the LP must pre-approve the vault for USDC (ERC-20 approve) and trust the Operator to submit their intent in a timely manner -- a trust assumption bounded by the reclaimDeposit escape hatch planned in feature 7.
@@ -199,6 +202,7 @@ In the context of Uniswap v3 lazy fee accounting compiled under Solidity 0.8.20 
 The mechanism: a tick initialized late assumes all past growth sits on one side of it, so `below + above` can exceed `global`, and `global - below - above` must wrap modulo 2^256. A position stores that wrapped value as its snapshot. Later, `inside_now - snapshot` must also wrap, because both values wrapped by the same offset and the subtraction cancels the offset to the true small delta. That subtraction is the load-bearing part. On a correct delta, `liquidity * delta` fits in 256 bits for every reachable value, so `_mulDiv` and the unchecked product return the same number. On a wrong delta, both return a wrong number. The no-`_mulDiv` rule is therefore a convention that keeps one shape at every fee site and keeps the shape the auditors reviewed, not a safety claim.
 
 Rejected: signed integers, because `feeGrowthGlobalX128` itself can approach 2^256. Rejected: a fee model without wraparound, because it would replace an audited pattern with a new one. The sites at the time of this decision: `_computeFeeGrowthInside()`, `_crossTick()`, `collect()`, `mergePositions()` (survivor and consumed), and `emergencyCancelAll()`. A burn (R9 in `audits/audit-fixes-ranged.md`) adds a sixth site with the same shape. The freeze (R10) removed the cancel's site on 2026-09-13, so five sites remain: `_computeFeeGrowthInside()`, `_crossTick()`, `_collect()`, `mergePositions()`, and `_burnAmounts()`. Superseded on 2026-09-14 (step R17 in `audits/audit-fixes-ranged.md`): every fee-growth site is deleted with the fee accounting, so the exception to `CLAUDE.md` checklist item 3 ends with it, and audit issue 6.5 closes by deletion.
+Reinstated on 2026-09-15 (step R18, ADR-E94R and NFR-E94G in FEAT-E943) for the spread growth, with the same mechanism, the same comment shape at each site, and the same no-`_mulDiv` convention. The sites are `_spreadGrowthInside()`, the flip in `_crossTick()`, the scaled product in `_burnAmounts()`, the two products in `mergePositions()`, and the outside adjustment after a per-segment credit in the report's settlement tail. The exception to `CLAUDE.md` checklist item 3 returns with them, and the reasoning above is unchanged: only the delta is meaningful, and both values wrapped by the same offset.
 
 **ADR-AFPP:** The mint tick is clamped into the range at mint
 In the context of the claim model (decision C26 in `audits/audit-fixes-ranged.md`), where a claim's assets follow the price from the tick at which it was minted, facing a mint whose `currentTick` sits outside its own range, we decided to store `mintTick = currentTick` clamped into `[tickLower, tickUpper]` inside `mintPositionFor` (`tickLower` when the price is below the range, `tickUpper` when it is at or above it), to achieve one stored value that R9 reads as settled and that gives two positions minted on the same side of their range the same mint tick so they can merge under decision C16, accepting that R9 must still decide what the level exactly at the mint tick holds, a question an in-range mint poses in the same form, and that the Operator sets the value through the order of its `updateTick` and `mintPositionFor` calls, which the mint's OPERATOR TRUST ASSUMPTION states. The field sits after `tickUpper` in the `Position` struct, so it packs into the first storage slot and the mint writes no new slot. The user chose this on 2026-09-12. Under the solvency ledger (FEAT-9BQZ, R11) the clamp is also what makes the ledger's split exact: with the mint tick inside the range, the YES sub-range `[tickLower, mintTick)` and the NO sub-range `[mintTick, tickUpper)` partition the range, so the vault books the NO side as a `noLiquidityNet` pair at the mint tick and at `tickUpper`.

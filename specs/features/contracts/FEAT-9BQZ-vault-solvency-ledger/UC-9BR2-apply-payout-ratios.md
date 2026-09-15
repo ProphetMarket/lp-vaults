@@ -3,7 +3,7 @@ id: UC-9BR2
 name: Apply Payout Ratios
 feature: FEAT-9BQZ
 status: implemented
-version: 5
+version: 6
 actor: LP
 ---
 
@@ -22,6 +22,8 @@ actor: LP
 
 The Safe calls `burnPosition` on a position it owns, or the Operator relays the owner key's `BurnIntent` through `burnPositionFor`.
 
+Since R18 every burn credits the measured spread before it values the claim, the USDC ratio's denominator carries `totalSpreadOwed()`, and `PositionBurned` carries nine fields with `spreadOwed` and `spreadPaid` after `usdcPaid` (FEAT-E943 UC-E944, FR-9BRM, FR-9BRR). A burn whose debit takes `totalUsdcOwedScaled` to zero is the last live position's burn and also pays every USDC the vault holds above escrow and every token it still holds, reporting the excess in `ResidueSwept` (FEAT-E943 FR-E94C). In a shortfall scenario below the vault holds less than it owes, so the credit is zero and both spread fields read zero; the sweep still runs on the burn that empties the USDC total, and carries zeros when nothing is left over.
+
 ---
 
 ### SC-9BSC: A covered vault pays every claim in full
@@ -31,17 +33,20 @@ The Safe calls `burnPosition` on a position it owns, or the Operator relays the 
 
 **Steps:**
 1. The Safe calls `burnPosition`
-2. System reads the totals and computes the USDC ratio and the YES ratio, both 1
-3. System pays the claim in full
+2. System reads both token balances, finds no free pair because it holds no NO, and reads its USDC balance
+3. System measures 1,052,645,500 units of surplus, `1,300,000,000 − 247,354,500`, and credits 1,052,645,499 of it to the only liquidity in range, one unit below the measurement because the growth is floored per unit of liquidity, this position
+4. System computes the USDC ratio and the YES ratio, both 1, and pays the claim and the spread in full
+5. The ledger debit takes `totalUsdcOwedScaled` to zero, so the closing sweep runs
 
 **Outcomes:**
-- The Safe receives 247,354,500 USDC units and 90 YES
-- The vault keeps the 410 YES and the USDC it did not owe: a surplus is never a bonus
+- The Safe receives 1,300,000,000 USDC units in one transfer, 247,354,500 of principal, 1,052,645,499 of spread, and the one unit the sweep carries, and all 500 YES
+- The vault keeps nothing above `totalEscrowed`: this is the last live position, so the sweep pays it every USDC above escrow and every remaining token (FEAT-E943 FR-E94C)
+- A surplus is still never a bonus through the ratio, which stays capped at 1 (FR-9BRP). It reaches this LP as owed spread, which is what the credit is for
 
 **Side Effects:**
 - USDC and YES transferred to the Safe
-- The totals storage: debited by the scaled claim, to zero
-- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted
+- The totals storage: debited by the scaled claim and the scaled spread, to zero
+- `SpreadCredited(1052645499, spreadGrowthGlobalX128)`, then `ResidueSwept(positionId, safe, 1, 410000000, 0)`, then `PositionBurned(positionId, safe, 247354500, 247354500, 1052645499, 1052645499, yesTokenId, 90000000, 90000000)` emitted, because `PositionBurned` reports the claim's own legs and `ResidueSwept` reports what went beyond them
 
 ---
 
@@ -63,8 +68,10 @@ The Safe calls `burnPosition` on a position it owns, or the Operator relays the 
 - No burn is made whole at another's expense and none is left with nothing because it came last
 
 **Side Effects:**
-- Case A: three `PositionBurned` events with `tokenOwed = 90000000` and `tokenPaid = 50000000`; `totalYesOwedScaled` falls by `3e23 × 300` per burn
-- Case B: three `PositionBurned` events with `usdcOwed = 247354500` and `usdcPaid = 123677250`; `totalUsdcOwedScaled` falls by the full scaled claim per burn
+- Case A: three `PositionBurned` events with `spreadOwed = spreadPaid = 0`, `tokenOwed = 90000000`, and `tokenPaid = 50000000`; `totalYesOwedScaled` falls by `3e23 × 300` per burn
+- Case B: three `PositionBurned` events with `usdcOwed = 247354500`, `usdcPaid = 123677250`, and `spreadOwed = spreadPaid = 0`; `totalUsdcOwedScaled` falls by the full scaled claim per burn
+- No `SpreadCredited` in either case: the vault holds no USDC above what it owes
+- `ResidueSwept(positionId, safe, 0, 0, 0)` on the third burn in both cases, which takes the USDC total to zero and finds nothing left over
 - No revert on any burn
 
 ---
@@ -85,7 +92,8 @@ The Safe calls `burnPosition` on a position it owns, or the Operator relays the 
 - The pending depositor's later reclaim pays the recorded 500 USDC, because escrowed USDC is senior (decision C7) and the reclaim applies no ratio
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 300000000, 0, 0, 0, 0)` emitted
+- `PositionBurned(positionId, safe, 300000000, 0, 0, 0, 0, 0, 0)` emitted, and `ResidueSwept(positionId, safe, 0, 0, 0)` before it, because the debit takes the USDC total to zero and the vault holds nothing above `totalEscrowed`
+- No `SpreadCredited`: the USDC above escrow is zero, so there is no surplus to measure
 - No USDC transfer
 - `totalEscrowed` unchanged
 - `totalUsdcOwedScaled` storage: debited by the full scaled claim
@@ -107,7 +115,8 @@ The Safe calls `burnPosition` on a position it owns, or the Operator relays the 
 - The vault does not report itself covered on the strength of the asset it can pay in full
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 45000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, 0, 0, yesTokenId, 90000000, 45000000)` emitted, and no `ResidueSwept`, because the second position still holds a USDC claim
+- No `SpreadCredited`: the vault holds exactly the USDC it owes
 - USDC transferred in full; YES transferred at the reduced amount
 - No revert
 
@@ -130,6 +139,8 @@ The Safe calls `burnPosition` on a position it owns, or the Operator relays the 
 **Side Effects:**
 - Full payout transferred on both legs
 - The totals storage: debited by the scaled claim, to zero
+- No `SpreadCredited`: the vault holds exactly the USDC it owes
+- `ResidueSwept(positionId, safe, 0, 0, 0)` emitted, because this burn takes the USDC total to zero and nothing is left over
 - No revert
 
 ---
@@ -149,7 +160,8 @@ The Safe calls `burnPosition` on a position it owns, or the Operator relays the 
 - `totalUsdcOwed()` and `totalYesOwed()` read zero, not the 47.3545 USDC and 30 YES that went unpaid: no phantom claim lowers the next claimant's ratio
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 200000000, yesTokenId, 90000000, 60000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 200000000, 0, 0, yesTokenId, 90000000, 60000000)` emitted, and `ResidueSwept(positionId, safe, 0, 0, 0)` before it
+- No `SpreadCredited`: the vault is short on both assets, so there is no surplus
 - `totalUsdcOwedScaled` and `totalYesOwedScaled` storage: debited by the full scaled claim
 - No revert
 
@@ -172,7 +184,9 @@ The Safe calls `burnPosition` on a position it owns, or the Operator relays the 
 - After the third, `totalUsdcOwed()` and `totalYesOwed()` read zero and the vault holds `totalEscrowed`
 
 **Side Effects:**
-- Three `PositionBurned` events, each with `usdcPaid + tokenPaid = 213677250`
+- Three `PositionBurned` events, each with `spreadOwed = spreadPaid = 0` and `usdcPaid + tokenPaid = 213677250`
+- No `SpreadCredited`: after the switch the vault holds 641,031,750 against 1,012,063,500 owed, so there is no surplus
+- `ResidueSwept(positionId, safe, 0, 0, 0)` on the third burn, which takes the USDC total to zero
 - No `OutcomeTokensRedeemed`, because the Oracle redeemed first
 - No `TransferSingle`
 
@@ -190,11 +204,12 @@ The Safe calls `burnPosition` on a position it owns, or the Operator relays the 
 3. System pays 337,354,500 USDC units
 
 **Outcomes:**
-- The Safe receives 337,354,500 USDC units
-- The vault keeps the 5 USDC and holds no token
+- The Safe receives 342,354,500 USDC units: 337,354,500 of claim plus the 5,000,000 the late tokens redeemed for, of which the credit attributed 4,999,999 as spread and the closing sweep carried the last unit
+- The vault holds no token and nothing above `totalEscrowed`, because this is the only position
 
 **Side Effects:**
-- `OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6)` emitted, then `PositionBurned`
+- `SpreadCredited(4999999, spreadGrowthGlobalX128)` emitted, because the redeemed value puts the vault above what it owes and the position is in range
+- `OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6)` emitted, then `ResidueSwept(positionId, safe, 1, 0, 0)`, then `PositionBurned` with `spreadOwed = spreadPaid = 4999999`
 - `PayoutRedemption` emitted by ConditionalTokens
 - No `CompleteSetsMerged`
 
@@ -214,12 +229,16 @@ The Safe calls `burnPosition` on a position it owns, or the Operator relays the 
 3. Each run at σ = 0 and at σ = 2,000 bps
 
 **Outcomes:**
-- Every `PositionBurned` reports `paid == owed` on every leg, in every run
-- The vault ends with 0 YES, 0 NO, and exactly `totalEscrowed` plus the spread income the test summed over every fill (the model price less the bid, per token), which is 0 at σ = 0
-- The spread income is held, not paid: FR-9BRP caps every ratio at 1, and the income decision (O1b in `audits/audit-fixes-ranged.md`) splits the pool later
+- Every `PositionBurned` reports `paid == owed` on every leg, the spread leg included, in every run
+- The Safes together receive their deposits plus the spread income the test summed over every fill (the model price less the bid, per token), within one unit per completed credit and per burn; that income is 0 at σ = 0
+- The vault ends with 0 YES, 0 NO, and exactly `totalEscrowed`
+- The last burn's `ResidueSwept` carries the dust only, below three units at σ = 2,000 bps and zero at σ = 0
+- The spread income is paid, not held: since R18 the credit turns it into an obligation the ledger carries, and the income decision (O1b in `audits/audit-fixes-ranged.md`) is answered on chain -- the LPs own it, per tick
 
 **Side Effects:**
 - `CompleteSetsMerged` amounts sum to the round-trip pairs, the YES held above `totalYesOwed()` before the first burn, which equals the NO held above `totalNoOwed()`
+- `SpreadCredited` at every report that moved a level with liquidity in range and at every mint and burn that found a surplus; the sum of every `spreadPaid` plus the final residue equals the fixture's spread income
 - On the source before R14, run A fails at both spreads: the merge takes every pair, the last burns pay a cut token leg, and the vault keeps USDC above the spread income; run B passes on both sources, because after the switch every token redeems at the payout
+- On the source before R18, both runs fail at σ = 2,000 bps: the spread income stays in the vault after the last burn instead of reaching the Safes
 
 ---

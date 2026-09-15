@@ -3,7 +3,7 @@ id: FEAT-K1M2
 name: Merge Positions
 use_cases: [UC-K1M8]
 scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-3XUP, SC-3XUQ, SC-AFPQ, SC-AFPR, SC-DU2W]
-last_update: 2026-09-14
+last_update: 2026-09-15
 ---
 
 # Architecture: Merge Positions
@@ -39,6 +39,7 @@ erDiagram
         int24 tickUpper "must match across merged positions"
         int24 mintTick "must match across merged positions (C26)"
         uint128 liquidity "summed into survivor; zeroed on consumed"
+        uint256 spreadGrowthInsideLastX128 "FEAT-E943: rolled into one survivor snapshot; zeroed on consumed"
     }
 ```
 
@@ -47,7 +48,8 @@ erDiagram
 - After merge: `survivor.liquidity == sum(consumed.liquidity)` (total liquidity unchanged)
 - The sum of `position.liquidity` over every position is unchanged by a merge, which equals half the sum of `liquidityGross` over the distinct referenced ticks
 - After merge: tick `liquidityGross` unchanged (same total liquidity on same range)
-- After merge: consumed positions have `liquidity == 0`
+- After merge: consumed positions have `liquidity == 0` and a zero spread snapshot
+- After merge: the survivor's spread claim equals the sum of the merged claims less a dust below the merged liquidity in X128 units, and `totalSpreadOwedX128` fell by exactly that dust (FEAT-9BQZ FR-9BRH)
 
 ## Component Inventory
 
@@ -65,6 +67,7 @@ erDiagram
 **Non-events (explicit):**
 - Failed merge (mismatched ranges, insufficient positions): no events emitted
 - No USDC transferred during merge
+- No `SpreadCredited`: a position merge reads no balance and measures nothing, although it does write `totalSpreadOwedX128` by the dust its floor drops
 
 ## API Surface
 
@@ -93,6 +96,8 @@ _None — merge is a pure storage operation with no external calls._
 ## Architecture Decisions
 
 The mint tick that a merge compares is the clamped value the mint stores; see the clamp decision (ADR-AFPP) in FEAT-T7AF.
+
+The spread roll-up and its dust debit follow the reconstruction-truncation decision (ADR-9Q3Y) and the ledger decision (ADR-COEN) in FEAT-9BQZ, reinstated for the spread on 2026-09-15 under the growth-structure decision (ADR-E94R) in FEAT-E943. The wrapping subtractions in this function are two of the sites the fee-growth wraparound decision (ADR-8L1F in FEAT-T7AF) names, each with its own comment.
 
 ## Testing Decisions
 

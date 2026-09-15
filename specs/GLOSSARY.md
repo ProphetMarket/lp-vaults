@@ -74,3 +74,11 @@
 **Freeze** -- What `emergencyCancelAll` does after the Operator has been silent for the vault's emergency-cancel timelock: any address sets the phase to Cancelled, and nothing else changes. Every LP exit and the complete-set merge keep working, and the vault approves no new order (decisions C9 and C22 in `audits/audit-fixes-ranged.md`).
 
 **Emergency-cancel timelock** -- The silence, measured from `lastOperatorActivityTimestamp`, after which any address may freeze a vault. Each vault copies it at creation from the factory's `defaultEmergencyCancelTimelock` (7 days at deployment, Admin-set within (0, 30 days]) and never changes it (decision C10).
+
+**Spread growth** -- The spread the vault has credited per unit of in-range liquidity since it was created, held as `spreadGrowthGlobalX128` in Q128 fixed point. Its absolute size carries no meaning: every reader takes a difference against a per-tick or per-position snapshot (FEAT-E943, ADR-E94R).
+
+**Measured surplus** -- The USDC the vault holds above its escrow total, above the principal the ledger owes, and above the spread it has already credited. The vault computes it from its own balances and accepts no amount from any caller, so no Operator key can inflate it (FEAT-E943 FR-E945).
+
+**Spread credit** -- Turning a measured surplus into an obligation the ledger carries, by adding growth per unit of the liquidity that was in range. It happens at four sites: the Operator's tick report, the public complete-set merge, the mint, and the burn (FEAT-E943 FR-E94A).
+
+**Closing sweep** -- What the burn whose ledger debit takes `totalUsdcOwedScaled` to zero does: it pays its owner every USDC the vault holds above the escrow total and, before the switch, every outcome token the vault still holds. That burn belongs to the last live position, so the vault ends its life with no remainder (FEAT-E943 FR-E94C).

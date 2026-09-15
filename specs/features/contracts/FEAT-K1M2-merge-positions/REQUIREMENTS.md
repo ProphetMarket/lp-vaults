@@ -4,8 +4,8 @@ name: Merge Positions
 module: contracts
 domain: "@positions"
 status: implemented
-version: 6
-refs: [FEAT-T7AF]
+version: 7
+refs: [FEAT-T7AF, FEAT-9BQZ, FEAT-E943]
 ---
 
 # Merge Positions
@@ -19,6 +19,7 @@ refs: [FEAT-T7AF]
 - Does not merge across vaults
 - Does not merge positions with different mint ticks -- reverts, because the mint tick is part of what a claim holds (decision C26 in `audits/audit-fixes-ranged.md`)
 - Does not merge YES and NO outcome tokens into USDC -- that is the complete-set merge `mergeCompleteSets()` that audit-fix step R9 adds (C26)
+- Does not measure or credit the spread -- FEAT-E943 owns that, and this merge only rolls two existing spread claims into one snapshot
 
 ## Actors
 
@@ -30,8 +31,8 @@ refs: [FEAT-T7AF]
 
 ### Merge Operation
 
-**FR-K1M3** `When the Operator calls mergePositions with two or more distinct position IDs that share the same owner, tickLower, tickUpper, and mintTick, the system shall combine them into one position with the summed liquidity, zeroing the consumed positions' liquidity.`
-Fit Criterion: Given positions [A, B] with identical owner, range, and mintTick, after merge the surviving position holds `liquidityA + liquidityB`, consumed positions have `liquidity == 0`, tick state `liquidityGross` is unchanged.
+**FR-K1M3** `When the Operator calls mergePositions with two or more distinct position IDs that share the same owner, tickLower, tickUpper, and mintTick, the system shall combine them into one position with the summed liquidity and one rolled-up spread snapshot, zeroing the consumed positions' liquidity and snapshots.`
+Fit Criterion: Given positions [A, B] with identical owner, range, and mintTick, after merge the surviving position holds `liquidityA + liquidityB`, consumed positions have `liquidity == 0` and a zero snapshot, and tick state `liquidityGross` is unchanged. The survivor's spread claim equals the sum of the merged claims less the dust the floor drops, and `totalSpreadOwedX128` falls by exactly that dust (FEAT-9BQZ FR-9BRH).
 Linked to: UC-K1M8
 
 **FR-K1M4** `If mergePositions is called with position IDs that have different tickLower or tickUpper values, then the system shall revert.`

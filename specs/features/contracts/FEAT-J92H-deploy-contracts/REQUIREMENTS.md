@@ -4,7 +4,7 @@ name: Deploy Contracts
 module: contracts
 domain: "@vault"
 status: implemented
-version: 2
+version: 3
 refs: [FEAT-REPZ]
 ---
 

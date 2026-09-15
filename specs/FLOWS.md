@@ -65,7 +65,7 @@ What each phase allows, from the checks in the code:
 
 ### 1.1 Deploy the factory (`LPVaultFactory` constructor)
 
-`LPVaultFactory.sol:185-223`. The `LPVault` implementation is deployed first. Its constructor calls `_disableInitializers()` (`LPVault.sol:580-589`), which sets `_initialized = true` on the implementation, so nobody can call `initialize` on it.
+`LPVaultFactory.sol:185-223`. The `LPVault` implementation is deployed first. Its constructor calls `_disableInitializers()` (`LPVault.sol:646-648`), which sets `_initialized = true` on the implementation, so nobody can call `initialize` on it.
 
 ```mermaid
 sequenceDiagram
@@ -85,7 +85,7 @@ The constructor checks no other argument for zero. A zero `admin_` leaves the fa
 
 ### 1.2 Create a vault for a market (`createVault` and `initialize`)
 
-`LPVaultFactory.sol:241-282`, `LPVaultFactory.sol:308-323`, `LPVault.sol:621-674`.
+`LPVaultFactory.sol:241-282`, `LPVaultFactory.sol:308-323`, `LPVault.sol:680-733`.
 
 ```mermaid
 sequenceDiagram
@@ -116,9 +116,9 @@ sequenceDiagram
     Factory-->>Oracle: VaultCreated(marketId, vault, minimumFirstLiquidity)
 ```
 
-The vault stores no roles. Every role check reads the factory at call time (`LPVault.sol:517-527`).
+The vault stores no roles. Every role check reads the factory at call time (`LPVault.sol:576-586`).
 
-`tickSpacing` is stored without a check. A zero `tickSpacing` makes `_requireValidRange` (`LPVault.sol:2060`) divide by zero on every deposit and mint. A negative `tickSpacing` works, because Solidity's `%` takes the sign of the dividend.
+`tickSpacing` is stored without a check. A zero `tickSpacing` makes `_requireValidRange` (`LPVault.sol:2449`) divide by zero on every deposit and mint. A negative `tickSpacing` works, because Solidity's `%` takes the sign of the dividend.
 
 ## 2. Factory governance
 
@@ -200,7 +200,7 @@ sequenceDiagram
 
 ## 3. Signature verification (shared by every relayed LP path)
 
-`LPVault.sol:2087-2141`. `depositForIntent`, `reclaimDepositFor`, and `burnPositionFor` all call `_verifySafeOwnerSignature(lp, structHash, signature)`.
+`LPVault.sol:2476-2485`. `depositForIntent`, `reclaimDepositFor`, and `burnPositionFor` all call `_verifySafeOwnerSignature(lp, structHash, signature)`.
 
 ```mermaid
 sequenceDiagram
@@ -215,7 +215,7 @@ sequenceDiagram
     Note right of Vault: derived = CREATE2 address(safeFactory, keccak256(abi.encode(signer)), safeProxyBytecodeHash)<br/>derived != lp → InvalidSignature
 ```
 
-The three type strings (`LPVault.sol:315-330`):
+The three type strings (`LPVault.sol:343-357`):
 
 | Type | Fields | Replay record |
 |---|---|---|
@@ -223,13 +223,13 @@ The three type strings (`LPVault.sol:315-330`):
 | `ReclaimIntent` | `lp, intentId, deadline` | `usedIntents[intentId]` |
 | `BurnIntent` | `lp, positionId, deadline` | `usedBurnAuthorizations[structHash]` |
 
-The domain is `name = "LPVault"`, `version = "1"`, `chainId`, and the vault's address (`LPVault.sol:2469-2473`).
+The domain is `name = "LPVault"`, `version = "1"`, `chainId`, and the vault's address (`LPVault.sol:2876-2880`).
 
 ## 4. Escrow and mint
 
 ### 4.1 Escrow a deposit (`depositForIntent`)
 
-`LPVault.sol:939-982`. Modifiers: `onlyOperator`, `whenNotPaused`, `nonReentrant`, `touchesHeartbeat`.
+`LPVault.sol:998-1041`. Modifiers: `onlyOperator`, `whenNotPaused`, `nonReentrant`, `touchesHeartbeat`.
 
 ```mermaid
 sequenceDiagram
@@ -253,32 +253,37 @@ sequenceDiagram
 
 ### 4.2 Mint the position (`mintPositionFor`)
 
-`LPVault.sol:1021-1113`. Modifiers: `onlyOperator`, `whenNotPaused`, `nonReentrant`, `touchesHeartbeat`. No signature, no USDC movement, no clock read, no external call.
+Modifiers: `onlyOperator`, `whenNotPaused`, `nonReentrant`, `touchesHeartbeat`. No signature, no USDC movement, no clock read. Since R18 the mint has one external call, the merge of the vault's free pairs, which runs after every effect.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Operator
     participant Vault as LPVault
+    participant CTF as ConditionalTokens
 
     Operator->>Vault: mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, deadline)
     Note right of Vault: modifiers: NotOperator, TradingIsPaused, Reentrancy, heartbeat
     Note right of Vault: checks in order:<br/>phase != 1 → VaultNotActive<br/>usdcAmount == 0 → ZeroAmount<br/>_requireValidRange → InvalidRange or TickNotAligned<br/>usedIntents[intentId] → IntentAlreadyUsed<br/>escrow.lp == 0 → DepositNotEscrowed<br/>escrow.lp != lp → NotIntentOwner<br/>escrow.structHash != hash(lp, range, usdcAmount, intentId, deadline) → IntentMismatch
+    Note right of Vault: reads: both token balances, the switch, the free pairs, the USDC balance (FEAT-E943)
+    Note right of Vault: credit: the measured surplus to activeLiquidity as it stands,<br/>before the new position joins it → SpreadCredited
     Note right of Vault: effects:<br/>usedIntents[intentId] = true<br/>delete pendingDeposits[intentId]<br/>totalEscrowed -= escrow.amount
     Note right of Vault: liquidity = uint128(usdcAmount × 1e18 ÷ (tickUpper − tickLower)) or SafeCastOverflow<br/>nextPositionId == 0 and liquidity < minimumFirstLiquidity → BelowMinimumFirstLiquidity
     Note right of Vault: ticks[tickLower]: initialize if liquidityGross == 0 (set bitmap bit), liquidityGross += L, liquidityNet += L<br/>ticks[tickUpper]: same initialize, liquidityGross += L, liquidityNet -= L
     Note right of Vault: mintTick = currentTick clamped into [tickLower, tickUpper]
-    Note right of Vault: positionId = nextPositionId++<br/>positions[positionId] = (lp, tickLower, tickUpper, mintTick, L)
+    Note right of Vault: positionId = nextPositionId++<br/>positions[positionId] = (lp, tickLower, tickUpper, mintTick, L, 0)
     Note right of Vault: if tickLower <= currentTick < tickUpper: activeLiquidity += L, noSideLiquidity += L
     Note right of Vault: totalUsdcOwedScaled += L × width × 10000<br/>_addNoSubRange: if mintTick != tickUpper: ticks[mintTick].noLiquidityNet += L, ticks[tickUpper].noLiquidityNet -= L, and if mintTick != tickLower: initialize mintTick and liquidityGross += L
+    Note right of Vault: positions[positionId].spreadGrowthInsideLastX128 = growth inside [tickLower, tickUpper)<br/>taken after both bounds hold their outside snapshots, so the new claim is zero
+    Vault->>CTF: mergePositions(free pairs), when above zero → CompleteSetsMerged
     Vault-->>Operator: PositionMinted(positionId, lp, tickLower, tickUpper, mintTick, L, usdcAmount, intentId)
 ```
 
-The mint's claim on the ledger is USDC only. An interior mint tick becomes a crossable tick with `liquidityNet == 0` and a non-zero `noLiquidityNet`.
+The mint's claim on the ledger is USDC only, and its spread claim is exactly zero: the credit runs before the position joins the in-range set, so a position minted after a trade never claims that trade's value (FEAT-E943 FR-E94B). An interior mint tick becomes a crossable tick with `liquidityNet == 0` and a non-zero `noLiquidityNet`, and it carries a spread growth snapshot that is written and flipped but never read.
 
 ### 4.3 Reclaim an escrow (`reclaimDeposit`, `reclaimDepositFor`)
 
-`LPVault.sol:1514-1604`. `reclaimDeposit` has only `nonReentrant`. `reclaimDepositFor` has `onlyOperator`, `nonReentrant`, `touchesHeartbeat`. Neither checks the phase or the pause.
+`LPVault.sol:1665-1755`. `reclaimDeposit` has only `nonReentrant`. `reclaimDepositFor` has `onlyOperator`, `nonReentrant`, `touchesHeartbeat`. Neither checks the phase or the pause.
 
 ```mermaid
 sequenceDiagram
@@ -308,13 +313,14 @@ A mint and a reclaim of one `intentId` share `usedIntents`, so exactly one of th
 
 ### 5.1 Move the price (`updateTick`)
 
-`LPVault.sol:1663-1722`, with `_nextInitializedTick` (`2352-2410`), `_crossTick` (`2202-2212`), `_accrueSegment` (`2231-2261`), and `_applyShift` (`2266-2270`). Modifiers: `onlyOperator`, `whenNotPaused`, `nonReentrant`, `touchesHeartbeat`. Active only.
+`LPVault.sol:1814-1883`, with `_nextInitializedTick` (`2759-2817`), `_crossTick` (`2600-2619`), `_accrueSegment` (`2638-2668`), and `_applyShift` (`2673-2677`). Modifiers: `onlyOperator`, `whenNotPaused`, `nonReentrant`, `touchesHeartbeat`. Active only.
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor Operator
     participant Vault as LPVault
+    participant CTF as ConditionalTokens
 
     Operator->>Vault: updateTick(newTick)
     Note right of Vault: modifiers: NotOperator, TradingIsPaused, Reentrancy, heartbeat
@@ -336,14 +342,20 @@ sequenceDiagram
         Note right of Vault: _accrueSegment(newTick, lastCrossed, down): the trailing segment
     end
     Note right of Vault: _applyShift: each non-zero delta written once to totalUsdcOwedScaled, totalYesOwedScaled, totalNoOwedScaled (checked, both directions)<br/>currentTick = newTick
+    Note right of Vault: _settleReport: read both token balances, the switch, the free pairs, the USDC balance<br/>creditable = held − principal owed − spread owed, zero while a token balance is short
+    Note right of Vault: split creditable by active × model spend per segment; each segment's growth<br/>goes to spreadGrowthGlobalX128 and totalSpreadOwedX128 → SpreadCredited
+    Note right of Vault: each crossed tick's spreadGrowthOutsideX128 gains the growth credited before it
+    Vault->>CTF: mergePositions(free pairs), when above zero → CompleteSetsMerged
     Vault-->>Operator: TickUpdated(oldTick, newTick, crossCount)
 ```
 
-A move that needs more than 256 crossings, or that jumps many empty bitmap words, is chunked by the Operator into several calls. The totals land on the same values either way.
+A move that needs more than 256 crossings, or that jumps many empty bitmap words, is chunked by the Operator into several calls. The totals land on the same values either way, and chunking at every initialized tick also makes the spread credit exact per segment (FEAT-E943 NFR-E94D).
+
+The unchanged-tick path reads no balance and credits nothing, so a round trip that ends where it began is credited by `mergeCompleteSets()` instead (section 7.1, ADR-E94V).
 
 ### 5.2 Merge position records (`mergePositions`)
 
-`LPVault.sol:1756-1820`. Modifiers: `onlyOperator`, `whenNotPaused`, `nonReentrant`, `touchesHeartbeat`. Works in Active and WindDown. This joins LP records. It is not the complete-set merge of section 7.1.
+`LPVault.sol:2005-2097`. Modifiers: `onlyOperator`, `whenNotPaused`, `nonReentrant`, `touchesHeartbeat`. Works in Active and WindDown. This joins LP records. It is not the complete-set merge of section 7.1.
 
 ```mermaid
 sequenceDiagram
@@ -358,19 +370,20 @@ sequenceDiagram
     Note right of Vault: totalLiquidity = survivor.liquidity
     loop each consumed id
         Note right of Vault: owner, tickLower, or tickUpper differ → RangeMismatch<br/>mintTick differs → MintTickMismatch
-        Note right of Vault: totalLiquidity += consumed.liquidity<br/>consumed.liquidity = 0 (owner stays)
+        Note right of Vault: spreadSum += consumed.liquidity × (inside − consumed.spreadGrowthInsideLastX128)<br/>totalLiquidity += consumed.liquidity<br/>consumed.liquidity = 0, consumed.spreadGrowthInsideLastX128 = 0 (owner stays)
     end
-    Note right of Vault: survivor.liquidity = totalLiquidity<br/>ticks untouched
+    Note right of Vault: survivor.spreadGrowthInsideLastX128 = inside − floor(spreadSum ÷ totalLiquidity)<br/>totalSpreadOwedX128 −= the dust the floor dropped (checked)
+    Note right of Vault: survivor.liquidity = totalLiquidity<br/>ticks untouched, principal totals untouched
     Vault-->>Operator: PositionsMerged(ids, ids[0])
 ```
 
-A consumed record keeps its owner with zero liquidity. `burnPosition` rejects it with `PositionNotFound` (`LPVault.sol:1161`).
+A consumed record keeps its owner with zero liquidity. `burnPosition` rejects it with `PositionNotFound` (`LPVault.sol:1242`).
 
 The function does not check that the survivor exists. If every id names a record with `owner == address(0)` (never minted or burned), the owner check passes on all of them and the call merges empty records and emits the event.
 
 ### 5.3 Signal liveness (`heartbeat`)
 
-`LPVault.sol:1627-1631`. Modifiers: `onlyOperator`, `touchesHeartbeat`. No pause check.
+`LPVault.sol:1778-1782`. Modifiers: `onlyOperator`, `touchesHeartbeat`. No pause check.
 
 ```mermaid
 sequenceDiagram
@@ -388,7 +401,7 @@ Every Operator function carries `touchesHeartbeat`, so any successful Operator c
 
 ### 6.1 Burn a position (`burnPosition`, `burnPositionFor`)
 
-`LPVault.sol:1155-1375` and `_claim` (`1396-1440`). `burnPosition` has only `nonReentrant`. `burnPositionFor` has `onlyOperator`, `nonReentrant`, `touchesHeartbeat`. Neither checks the phase or the pause.
+`LPVault.sol:1236-1521` and `_claim` (`1542-1586`). `burnPosition` has only `nonReentrant`. `burnPositionFor` has `onlyOperator`, `nonReentrant`, `touchesHeartbeat`. Neither checks the phase or the pause.
 
 ```mermaid
 sequenceDiagram
@@ -408,22 +421,24 @@ sequenceDiagram
         Operator->>Vault: burnPositionFor(lp, positionId, deadline, signature)
         Note right of Vault: now > deadline → IntentExpired<br/>_verifySafeOwnerSignature → InvalidSignature<br/>usedBurnAuthorizations[structHash] → IntentAlreadyUsed<br/>owner == 0 or liquidity == 0 → PositionNotFound<br/>owner != lp → NotPositionOwner<br/>usedBurnAuthorizations[structHash] = true
     end
-    Note right of Vault: _burnAmounts, all reads before any write:<br/>_claim(range, mintTick, L) at currentTick → usdcScaled, tokenId, tokenScaled<br/>usdcOwed = usdcScaled ÷ (10000 × 1e18), tokenOwed = tokenScaled ÷ 1e18
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
     Vault->>USDC: balanceOf(vault)
+    Note right of Vault: _holdings: the free pairs, the switch, held, total, and the creditable surplus<br/>creditable is zero while a token balance is below its owed total (FEAT-E943)
+    Note right of Vault: the one effect before the valuation: credit the surplus to activeLiquidity,<br/>which still counts this position → SpreadCredited; then re-read total
+    Note right of Vault: _burnAmounts, from the values already read:<br/>_claim(range, mintTick, L) at currentTick → usdcScaled, tokenId, tokenScaled<br/>usdcOwed = usdcScaled ÷ (10000 × 1e18), tokenOwed = tokenScaled ÷ 1e18<br/>spreadScaled = L × (spreadGrowthInside − the position's snapshot), spreadOwed = spreadScaled ÷ 2^128
     alt switch off (stored payout is zero)
-        Note right of Vault: pairs = free pairs, read before the debit<br/>held = max(0, balance + pairs − totalEscrowed), total = totalUsdcOwed<br/>usdcPaid = usdcOwed × min(1, held ÷ total)<br/>tokenPaid = tokenOwed × min(1, (tokenBalance − pairs) ÷ tokenTotalOwed)
+        Note right of Vault: held = max(0, balance + pairs − totalEscrowed), total = totalUsdcOwed + totalSpreadOwed<br/>usdcPaid = usdcOwed × min(1, held ÷ total)<br/>spreadPaid = (usdcOwed + spreadOwed) × min(1, held ÷ total) − usdcPaid<br/>tokenPaid = tokenOwed × min(1, (tokenBalance − pairs) ÷ tokenTotalOwed)
     else switch on
-        Note right of Vault: tokenUsdc = tokenOwed × numerator ÷ (numYes + numNo)<br/>held = max(0, balance + atPayout(YES, NO) − totalEscrowed)<br/>total = totalUsdcOwed + atPayout(totalYesOwed, totalNoOwed)<br/>usdcPaid = usdcOwed × min(1, held ÷ total), the same prorate as before the switch<br/>paidSum = (usdcOwed + tokenUsdc) × min(1, held ÷ total)<br/>tokenPaid = paidSum − usdcPaid
+        Note right of Vault: tokenUsdc = tokenOwed × numerator ÷ (numYes + numNo)<br/>held = max(0, balance + atPayout(YES, NO) − totalEscrowed)<br/>total = totalUsdcOwed + totalSpreadOwed + atPayout(totalYesOwed, totalNoOwed)<br/>usdcPaid and spreadPaid as above<br/>tokenPaid = (usdcOwed + spreadOwed + tokenUsdc) × min(1, held ÷ total) − usdcPaid − spreadPaid
     end
-    Note right of Vault: effects:<br/>_removeNoSubRange (noLiquidityNet at mintTick and tickUpper, drop the interior reference)<br/>ticks[tickLower].liquidityNet −= L, ticks[tickUpper].liquidityNet += L, liquidityGross −= L on both<br/>a tick at liquidityGross == 0 is deleted and its bitmap bit cleared<br/>if in range: activeLiquidity −= L, and if mintTick <= currentTick: noSideLiquidity −= L<br/>ledger: totalUsdcOwedScaled −= usdcScaled, the band's token total −= tokenScaled, both saturating<br/>delete positions[positionId]
+    Note right of Vault: effects:<br/>_removeNoSubRange (noLiquidityNet at mintTick and tickUpper, drop the interior reference)<br/>ticks[tickLower].liquidityNet −= L, ticks[tickUpper].liquidityNet += L, liquidityGross −= L on both<br/>a tick at liquidityGross == 0 is deleted, its bitmap bit cleared, and its growth snapshot deleted with it<br/>if in range: activeLiquidity −= L, and if mintTick <= currentTick: noSideLiquidity −= L<br/>ledger: totalUsdcOwedScaled −= usdcScaled, totalSpreadOwedX128 −= spreadScaled, the band's token total −= tokenScaled, all saturating<br/>lastPosition = totalUsdcOwedScaled == 0 after the debit<br/>delete positions[positionId], the spread snapshot with it
     alt switch off
         opt pairs > 0
             Vault->>CTF: mergePositions(usdc, 0, conditionId, [1, 2], pairs)
             Note right of Vault: CompleteSetsMerged(msg.sender, pairs)
         end
-        opt usdcPaid > 0
-            Vault->>USDC: transfer(owner, usdcPaid)
+        opt usdcPaid + spreadPaid > 0
+            Vault->>USDC: transfer(owner, usdcPaid + spreadPaid)
         end
         opt tokenPaid > 0
             Vault->>CTF: safeTransferFrom(vault, owner, tokenId, tokenPaid, "") — the last call
@@ -433,11 +448,14 @@ sequenceDiagram
             Vault->>CTF: redeemPositions(usdc, 0, conditionId, [1, 2])
             Note right of Vault: OutcomeTokensRedeemed(msg.sender, YES, NO, atPayout(YES, NO))
         end
-        opt usdcPaid + tokenPaid > 0
-            Vault->>USDC: transfer(owner, usdcPaid + tokenPaid) — the last call
+        opt usdcPaid + spreadPaid + tokenPaid > 0
+            Vault->>USDC: transfer(owner, usdcPaid + spreadPaid + tokenPaid) — the last call
         end
     end
-    Vault-->>Safe: PositionBurned(positionId, owner, usdcOwed, usdcPaid, tokenId, tokenOwed, tokenPaid)
+    opt lastPosition
+        Note right of Vault: the closing sweep replaces both transfer blocks above:<br/>pay every USDC above totalEscrowed, and before the switch every remaining YES and NO<br/>ResidueSwept(positionId, owner, the amounts beyond this position's own claim)
+    end
+    Vault-->>Safe: PositionBurned(positionId, owner, usdcOwed, usdcPaid, spreadOwed, spreadPaid, tokenId, tokenOwed, tokenPaid)
 ```
 
 The claim (`_claim`), with `m` the mint tick, `c` the current tick, `L` the liquidity, and `width = tickUpper − tickLower`:
@@ -450,7 +468,7 @@ The claim (`_claim`), with `m` the mint tick, `c` the current tick, `L` the liqu
 
 `Σ ticks of the band` is the arithmetic series `band × (first + last) ÷ 2` over the band's tick indices, exact because `band × (a + m − 1)` is always even.
 
-A burn is valued at the last reported tick (decision C8). A fill the keeper has not reported yet has already spent the vault's USDC. The ledger's ratio spreads that spend over every claim in proportion to its USDC owed, and a burn inside that window takes its share as a final cut. The tokens the fill bought belong to no claim after the report. They stay in the vault, and at the switch they redeem into the USDC ratio. Before a self-service burn, compare `totalYesOwed()` and `totalNoOwed()` with the vault's two token balances: a balance above the owed total and above the free pairs can be an unreported fill. The Operator reports the tick before it relays `burnPositionFor`, which closes this window on the relayed path (finding CV-08 of `audits/code-validation-round-1.md`, and ADR-DYNK in FEAT-7G40).
+A burn is valued at the last reported tick (decision C8). A fill the keeper has not reported yet has already spent the vault's USDC. The ledger's ratio spreads that spend over every claim in proportion to its USDC owed, and a burn inside that window takes its share as a final cut, and credits nothing, because the unreported spend puts the vault below what the ledger owes. The tokens the fill bought belong to no claim after the report. Since R18 they reach the positions that stayed: through the spread credit once the switch values them, or through the closing sweep on the last live position's burn (FEAT-E943 FR-E94C). Before a self-service burn, compare `totalYesOwed()` and `totalNoOwed()` with the vault's two token balances: a balance above the owed total and above the free pairs can be an unreported fill. The Operator reports the tick before it relays `burnPositionFor`, which closes this window on the relayed path (finding CV-08 of `audits/code-validation-round-1.md`, and ADR-DYNK in FEAT-7G40).
 
 ### 6.2 Exit after a freeze
 
@@ -460,7 +478,7 @@ After `emergencyCancelAll` the burn and the reclaim run unchanged at the frozen 
 
 ### 7.1 Merge free pairs (`mergeCompleteSets`)
 
-`LPVault.sol:1841-1899`. Modifier: `nonReentrant` only. No role, phase, pause, or heartbeat.
+`LPVault.sol:2118-2182`. Modifier: `nonReentrant` only. No role, phase, pause, or heartbeat.
 
 ```mermaid
 sequenceDiagram
@@ -468,12 +486,18 @@ sequenceDiagram
     actor Anyone
     participant Vault as LPVault
     participant CTF as ConditionalTokens
+    participant USDC
 
     Anyone->>Vault: mergeCompleteSets()
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
+    Vault->>USDC: balanceOf(vault)
     Note right of Vault: either balance == 0 → pairs = 0<br/>pairs = min(YES − min(YES, totalYesOwed), NO − min(NO, totalNoOwed))
+    Note right of Vault: creditable = held − principal owed − spread owed, counting the pairs as USDC<br/>zero while a token balance is below its owed total
+    opt creditable > 0 and activeLiquidity > 0
+        Note right of Vault: credit the surplus to the liquidity in range<br/>Vault-->>Anyone: SpreadCredited(amount, spreadGrowthGlobalX128)
+    end
     alt pairs == 0
-        Note right of Vault: return with no call and no event
+        Note right of Vault: return with no merge call and no CompleteSetsMerged event
     else pairs > 0
         Vault->>CTF: mergePositions(usdc, 0, conditionId, [1, 2], pairs)
         Note right of Vault: the CTF pays the vault pairs USDC
@@ -483,9 +507,11 @@ sequenceDiagram
 
 A pair below the owed totals is a claim's band token. It never merges, so one claim's YES is never netted against another claim's NO. The call still works after the switch: a free pair merges for 1 USDC, the same value a redemption pays for it.
 
+Since R18 the call also credits the measured spread before it merges (FEAT-E943 FR-6HBZ). This is where a round trip that ends where it began is attributed, because the unchanged-tick report reads no balance (section 5.1, ADR-E94V). The caller still receives nothing. The one residual the MEV analysis records: a caller who is an LP in range can time the call ahead of a report or a mint, bounded by the surplus pending at that moment.
+
 ### 7.2 Fill a vault order (`isValidSignature` and the receiver hooks)
 
-`LPVault.sol:788-808` and `693-727`. The vault is the maker of its own orders. The keeper signs with the Operator key and names the vault as `maker` and `signer` with `signatureType = POLY_1271`.
+`LPVault.sol:847-867` and `752-781`. The vault is the maker of its own orders. The keeper signs with the Operator key and names the vault as `maker` and `signer` with `signatureType = POLY_1271`.
 
 ```mermaid
 sequenceDiagram
@@ -515,7 +541,7 @@ The vault checks who signed, never what was signed. There is no size cap, price 
 
 ### 7.3 Redeem after resolution (`redeemOutcomeTokens`)
 
-`LPVault.sol:1939-1999`. Modifiers: `onlyOracle`, `nonReentrant`. No heartbeat, no pause check, no phase change.
+`LPVault.sol:2222-2264`. Modifiers: `onlyOracle`, `nonReentrant`. No heartbeat, no pause check, no phase change.
 
 ```mermaid
 sequenceDiagram
@@ -546,7 +572,7 @@ The Oracle can delay the switch. It cannot set the payout: the vault reads it fr
 
 ### 8.1 Wind down (`startWindDown`)
 
-`LPVault.sol:843-847`. Modifier: `onlyOracle`. No reentrancy guard, because there is no external call.
+`LPVault.sol:902-906`. Modifier: `onlyOracle`. No reentrancy guard, because there is no external call.
 
 ```mermaid
 sequenceDiagram
@@ -563,7 +589,7 @@ After it, `depositForIntent`, `mintPositionFor`, and `updateTick` revert `VaultN
 
 ### 8.2 Freeze after Operator silence (`emergencyCancelAll`)
 
-`LPVault.sol:890-904`. No modifier at all.
+`LPVault.sol:949-963`. No modifier at all.
 
 ```mermaid
 sequenceDiagram
@@ -580,7 +606,7 @@ The freeze keeps every position, tick, escrow, balance, and ledger total. `merge
 
 ### 8.3 Pause and unpause (`pauseTrading`, `unpauseTrading`)
 
-`LPVault.sol:857-867`. Modifier: `onlyAdmin`. Neither checks the current value, so a repeated call succeeds and emits again.
+`LPVault.sol:916-926`. Modifier: `onlyAdmin`. Neither checks the current value, so a repeated call succeeds and emits again.
 
 ```mermaid
 sequenceDiagram
@@ -601,7 +627,7 @@ sequenceDiagram
 
 ### 8.4 Set the first-mint floor (`setMinimumFirstLiquidity`)
 
-`LPVault.sol:822-829`. Modifier: `onlyOracle`.
+`LPVault.sol:881-888`. Modifier: `onlyOracle`.
 
 ```mermaid
 sequenceDiagram

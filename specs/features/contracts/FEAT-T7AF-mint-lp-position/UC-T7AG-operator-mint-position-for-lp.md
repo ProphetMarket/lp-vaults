@@ -3,7 +3,7 @@ id: UC-T7AG
 name: Operator Mint Position for LP
 feature: FEAT-T7AF
 status: implemented
-version: 8
+version: 9
 actor: Operator
 ---
 
@@ -21,6 +21,8 @@ actor: Operator
 ## Trigger
 
 Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, deadline)` on the vault.
+
+Since R18 the mint reads both outcome-token balances and its USDC balance after its checks, credits the measured spread to the liquidity already in range, writes the new position's `spreadGrowthInsideLastX128` after both bounds are referenced, and merges the vault's free pairs as its one external call (FEAT-E943 UC-E944, SC-E94M). So `positions(id)` returns six words and a position minted right after a credit has a spread claim of exactly zero. The scenarios below have no surplus and no free pair, so they credit nothing, emit no `SpreadCredited` and no `CompleteSetsMerged`, and make no external call; the statement "the mint makes no external call" holds for them and is no longer a property of the function.
 
 ---
 
@@ -43,7 +45,7 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 8. System computes liquidity = 600 * PRECISION / (80 - 20)
 9. System creates position at nextPositionId with owner = the Safe, tickLower = 20, tickUpper = 80, mintTick = 50 (currentTick is inside the range, so no clamp), computed liquidity
 10. System adds liquidity to activeLiquidity (position is in-range: 20 <= 50 < 80)
-11. System makes no external call
+11. System reads both token balances and the USDC balance, finds no surplus and no free pair, and so credits nothing and makes no external call
 
 **Outcomes:**
 - Position record exists at positionId with owner = the Safe, mintTick = 50, liquidity > 0

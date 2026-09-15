@@ -20,20 +20,21 @@
 | FEAT-JXQO | Emergency Cancel All Positions | Any-address freeze after the vault's operator-silence timelock that sets the terminal Cancelled phase and changes nothing else, so every LP exits alone through the paths that work in every phase | implemented |
 | FEAT-K1MD | Pause Trading | Admin-callable circuit breaker that halts trading entry points while keeping LP exit paths live | implemented |
 | FEAT-KX5N | Upgradeable Vault Implementation Pointer | Admin-driven two-step timelocked upgrade of the factory's implementation pointer with per-clone version tracking | implemented |
-| FEAT-6HBN | Complete-Set Merge and Resolution Redemption | Any wallet merges the vault's matched YES and NO tokens into USDC held by the vault, in every phase, and every payout merges first; after the market resolves the Oracle redeems the vault's tokens, and that first call switches every later payout to USDC at the reported payout | implemented |
-| FEAT-9BQZ | Vault Solvency Ledger | Running totals of what the vault owes per asset in the claim's pre-division unit, moved on every mint, burn, merge, and segment of a tick move under the claim model (decision C26), and a per-asset ratio that every burn applies, so a shortfall is a cut every claimant takes alike (decision O2) | implemented |
+| FEAT-6HBN | Complete-Set Merge and Resolution Redemption | Any wallet merges the vault's matched YES and NO tokens into USDC held by the vault, in every phase, crediting the measured spread first so a round trip with no net tick move reaches the liquidity in range, and every payout merges first; after the market resolves the Oracle redeems the vault's tokens, and that first call switches every later payout to USDC at the reported payout | implemented |
+| FEAT-9BQZ | Vault Solvency Ledger | Running totals of what the vault owes per asset in the claim's pre-division unit, plus the spread total in X128 units, moved on every mint, burn, merge, credit, and segment of a tick move under the claim model (decision C26), and a per-asset ratio that every burn applies, so a shortfall is a cut every claimant takes alike (decision O2) | implemented |
 | FEAT-C0DJ | Vault Order Authorization | EIP-1271 vouching that lets a registered Operator author orders naming the vault as maker, answered to the exchange only and only while the vault is Active and not paused, so vault-held capital is filled without leaving the vault and a paused, wound-down, or frozen vault takes no new fill (decision C22) | implemented |
+| FEAT-E943 | Spread Attribution | The vault measures the USDC it holds above escrow, above the principal it owes, and above the spread it already credited, and attributes that surplus to the liquidity that was in range at the levels where the fills earned it, as a growth accumulator the burn pays out as a fourth leg, with the last live position taking whatever no credit could attribute (decision O1b, answered on-chain) | implemented |
 
 ## @positions
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
-| FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation that consumes a per-intent escrow, with v3-style tick initialization and a clamped mint tick on every position | implemented |
+| FEAT-T7AF | Mint LP Position | Operator-gated concentrated-liquidity position creation that consumes a per-intent escrow, with v3-style tick initialization, a clamped mint tick on every position, and a spread credit to the liquidity already in range before the new position joins it | implemented |
 | FEAT-U079 | Collect Fees on a Position | LP withdraws accumulated trading fees from a position, by the Safe or relayed with the owner key's CollectIntent, using the v3 feeGrowthInside accumulator, merging the vault's pairs first, and paying its share of what the vault holds above escrow at the ledger's USDC ratio | deprecated |
-| FEAT-7G40 | Burn LP Position | LP-initiated closure of a position, by the Safe or relayed with the owner key's BurnIntent, that values the claim from its mint tick (decision C26), merges the vault's pairs, removes the liquidity from both ticks, and pays USDC plus one outcome token, each asset's owed amount times its ratio from the solvency ledger | implemented |
+| FEAT-7G40 | Burn LP Position | LP-initiated closure of a position, by the Safe or relayed with the owner key's BurnIntent, that credits the measured spread before it values the claim from its mint tick (decision C26), merges the vault's pairs, removes the liquidity from both ticks, and pays USDC, the position's spread, and one outcome token, each asset's owed amount times its ratio from the solvency ledger, with the last live position also taking the residue | implemented |
 | FEAT-JAIJ | LP Escape Hatch | LP-initiated recovery of the USDC escrowed against a mint intent that the Operator did not mint, in one call by the LP's Safe or one relayed call with the owner key's signature, in every vault phase | implemented |
 | FEAT-3ZRI | Escrow Deposit for Mint Intent | Operator-gated escrow of an LP's USDC from the LP's Safe against a signed mint intent, recorded per intentId with the Safe, the amount, and the intent hash, so the mint and the reclaim spend exactly what was recorded | implemented |
-| FEAT-K1M2 | Merge Positions | Operator-called housekeeping to combine distinct same-range same-owner same-mint-tick positions into a single record preserving total liquidity | implemented |
+| FEAT-K1M2 | Merge Positions | Operator-called housekeeping to combine distinct same-range same-owner same-mint-tick positions into a single record preserving total liquidity and rolling their spread claims into one snapshot | implemented |
 
 ## @fees
 
@@ -45,4 +46,4 @@
 
 | ID | Feature | Description | Status |
 |----|---------|-------------|--------|
-| FEAT-TVS0 | Update Tick and Cross Ticks | Operator-driven tick synchronization that crosses initialized ticks between the vault's current price and the CLOB mid-price, adjusting active liquidity and the NO-side liquidity so the claim model values every position at the reported price | implemented |
+| FEAT-TVS0 | Update Tick and Cross Ticks | Operator-driven tick synchronization that crosses initialized ticks between the vault's current price and the CLOB mid-price, adjusting active liquidity and the NO-side liquidity so the claim model values every position at the reported price, then crediting the measured spread per segment and merging the vault's free pairs | implemented |

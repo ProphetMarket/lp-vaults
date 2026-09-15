@@ -3,7 +3,7 @@ id: UC-7G42
 name: Operator Burn Position for LP
 feature: FEAT-7G40
 status: implemented
-version: 3
+version: 4
 actor: Operator
 ---
 
@@ -21,6 +21,8 @@ actor: Operator
 ## Trigger
 
 The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the vault.
+
+Since R18 this path runs the same shared burn body as `burnPosition`, so it credits the measured spread before it values the claim, pays the position's spread as a fourth leg, and sweeps the residue when its debit takes `totalUsdcOwedScaled` to zero (FEAT-E943 UC-E944, UC-7G41). `PositionBurned` carries nine fields. Unless a scenario says otherwise, its vault holds exactly what the ledger owes, so both spread fields read zero and the closing `ResidueSwept` carries zeros.
 
 ---
 
@@ -43,7 +45,7 @@ The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the
 - `activeLiquidity` decreases by the position's liquidity
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 300000000, 300000000, 0, 0, 0)` emitted
+- `PositionBurned(positionId, safe, 300000000, 300000000, 0, 0, 0, 0, 0)` emitted
 - `usedBurnAuthorizations[structHash]` storage: set to true
 - `positions[positionId]` storage: deleted
 - `ticks[5500]` and `ticks[6500]` storage: liquidity removed
@@ -71,7 +73,7 @@ The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the
 - Every asset lands with `position.owner`, never with `msg.sender`
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, 0, 0, yesTokenId, 90000000, 90000000)` emitted
 - `usedBurnAuthorizations[structHash]` storage: set to true
 - `positions[positionId]` storage: deleted
 - USDC and ERC-1155 YES transferred from vault to the Safe
@@ -97,7 +99,7 @@ The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the
 - The Operator's balances are unchanged
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 265345500, 265345500, noTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 265345500, 265345500, 0, 0, noTokenId, 90000000, 90000000)` emitted
 - `usedBurnAuthorizations[structHash]` storage: set to true
 - `positions[positionId]` storage: deleted
 - USDC and ERC-1155 NO transferred from vault to the Safe
@@ -284,5 +286,28 @@ The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the
 **Side Effects:**
 - `lastOperatorActivityTimestamp` storage: written to `block.timestamp`
 - `PositionBurned` emitted
+
+---
+
+### SC-E94Q: The relayed exit pays the same spread as the self-service one
+
+**Given:**
+- The state of SC-E94P in UC-7G41: one position of 300 USDC over `[5500, 6500)` minted at 6000, a filled and unreported round trip, the vault holding 271,200,000 USDC units, 30,000,000 YES, and 30,000,000 NO, and 1,200,000 units of surplus pending
+- The owner key signed a valid `BurnIntent(lp, positionId, deadline)` with a deadline in the future
+
+**Steps:**
+1. The Operator calls `burnPositionFor(lp, positionId, deadline, signature)`
+2. System checks the deadline, the signature, the used record, and the position, then runs the same shared burn body
+
+**Outcomes:**
+- The Safe receives 301,200,000 USDC units, exactly what `burnPosition` pays for the same state, and the Operator receives nothing but the gas cost
+- `PositionBurned` reports the same nine values on both paths, `spreadOwed` and `spreadPaid` included
+- The two paths differ only in their authorization checks and in the heartbeat refresh, as FR-7G4L requires
+- The Operator's choice of block decides which credit this exit sees, bounded by the deadline the LP signed, which the trust block on the function states
+
+**Side Effects:**
+- `SpreadCredited(1199999, spreadGrowthGlobalX128)`, then `CompleteSetsMerged(operator, 30000000)`, then `ResidueSwept(positionId, safe, 1, 0, 0)`, then `PositionBurned(positionId, safe, 300000000, 300000000, 1199999, 1199999, 0, 0, 0)` emitted
+- `usedBurnAuthorizations[structHash]` storage: set before any external call
+- `lastOperatorActivityTimestamp` set to `block.timestamp`, unlike the self-service path
 
 ---

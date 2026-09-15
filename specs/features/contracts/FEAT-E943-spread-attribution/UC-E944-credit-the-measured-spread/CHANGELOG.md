@@ -1,0 +1,4 @@
+TODO:
+
+DONE:
+- 20260915T071849 [implemented] command:spec plan:20260915T070744-spread-attribution-per-tick-r18 — The vault measures the spread its round trips earn and credits it to the liquidity in range at the levels where it was earned (audit-fix step R18). New feature FEAT-E943 with one use case: the measurement from the vault's own balances (FR-E945), the growth credit (FR-E946), the per-segment split inside one report (FR-E947), the token-cover check that withholds a reported fill the vault never received (FR-E948), the carry-forward when nothing is in range (FR-E949), the four credit sites behind one helper and one writer (FR-E94A), the per-position spread claim (FR-E94B), the closing sweep to the last live position (FR-E94C), and the views (FR-E94Y). Eight scenarios, SC-E94H to SC-E94O. Six decision records, ADR-E94R to ADR-E94W. Source: exploration 20260915T065517-spread-attribution-per-tick-r18.

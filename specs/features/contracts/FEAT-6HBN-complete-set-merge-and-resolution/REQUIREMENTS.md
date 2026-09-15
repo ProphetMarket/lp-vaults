@@ -4,8 +4,8 @@ name: Complete-Set Merge and Resolution Redemption
 module: contracts
 domain: "@vault"
 status: implemented
-version: 5
-refs: [FEAT-REPZ, FEAT-JXQO, FEAT-JGE7, FEAT-7G40, FEAT-9BQZ]
+version: 6
+refs: [FEAT-REPZ, FEAT-JXQO, FEAT-JGE7, FEAT-7G40, FEAT-9BQZ, FEAT-E943]
 ---
 
 # Complete-Set Merge and Resolution Redemption
@@ -19,6 +19,7 @@ refs: [FEAT-REPZ, FEAT-JXQO, FEAT-JGE7, FEAT-7G40, FEAT-9BQZ]
 - Does not merge inside the ERC-1155 receiver hooks -- a hook runs inside the exchange's settlement transaction, so a revert there reverts the match (ADR-3WLP)
 - Does not split USDC into complete sets -- the exchange splits at fill time
 - Does not value, price, or pay a claim -- see FEAT-7G40 (burn), which calls the internal merge first and, after the switch, the internal redemption
+- Does not measure or attribute the spread -- FEAT-E943 owns both, and the public merge is one of its four call sites
 - Does not change the vault phase
 
 ## Actors
@@ -32,8 +33,8 @@ refs: [FEAT-REPZ, FEAT-JXQO, FEAT-JGE7, FEAT-7G40, FEAT-9BQZ]
 
 ### Complete-Set Merge
 
-**FR-6HBZ** `When any wallet calls mergeCompleteSets, the system shall merge the free pairs, min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed())), as complete sets of the vault's condition through the ConditionalTokens contract into USDC held by the vault, and emit CompleteSetsMerged(caller, amount).`
-Fit Criterion: Given the vault holds 100 YES and 60 NO and the ledger owes no token, after `mergeCompleteSets()` the vault holds 40 YES, 0 NO, and 60 more USDC, and `CompleteSetsMerged(caller, 60)` is emitted. Given the vault holds 150 YES and 120 NO and the ledger owes 90 YES and 60 NO, the merge takes `min(150 − 90, 120 − 60) = 60` pairs and leaves 90 YES, 60 NO, and 60 more USDC. The caller receives nothing. A pair below what the ledger owes is a claim's band token, and merging it would pay that claim a cut token leg and strand the USDC (finding CV-01 of `audits/code-validation-round-1.md`).
+**FR-6HBZ** `When any wallet calls mergeCompleteSets, the system shall read both token balances, compute the free pairs, min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed())), credit the surplus those balances and the USDC balance show to the liquidity in range, then merge the free pairs as complete sets of the vault's condition through the ConditionalTokens contract into USDC held by the vault, and emit CompleteSetsMerged(caller, amount).`
+Fit Criterion: Given the vault holds 100 YES and 60 NO and the ledger owes no token, after `mergeCompleteSets()` the vault holds 40 YES, 0 NO, and 60 more USDC, and `CompleteSetsMerged(caller, 60)` is emitted. Given the vault holds 150 YES and 120 NO and the ledger owes 90 YES and 60 NO, the merge takes `min(150 − 90, 120 − 60) = 60` pairs and leaves 90 YES, 60 NO, and 60 more USDC. In the first example the vault credits the 60 free pairs' USDC less what the ledger already owes as spread growth to the liquidity in range, and emits `SpreadCredited(amount, spreadGrowthGlobalX128)` before `CompleteSetsMerged`. The caller receives nothing either way. Given a vault with no liquidity in range, the merge still runs and the surplus carries forward (FEAT-E943 FR-E949). This is where a round trip that ends where it began is credited, because the unchanged-tick report reads no balance (ADR-E94V).
 Linked to: UC-6HBO
 
 **FR-6HC0** `If the vault holds no free pair when mergeCompleteSets or an internal merge runs, then the system shall return without calling mergePositions and without emitting an event.`
