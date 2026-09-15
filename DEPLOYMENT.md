@@ -186,7 +186,7 @@ Create `.env` from the example:
 cp .env.example .env
 ```
 
-Fill in every value. `.gitignore` excludes `.env`, so the file never reaches git. The file holds addresses only. It holds no private key.
+Fill in every value. Leave a role's account empty only when that role signs nothing on this chain. `.gitignore` excludes `.env`, so the file never reaches git. The file holds addresses and keystore account names only. It holds no private key.
 
 | Variable | Read by | Amoy | Mainnet |
 |---|---|---|---|
@@ -202,8 +202,8 @@ Fill in every value. `.gitignore` excludes `.env`, so the file never reaches git
 | `EXPECTED_CHAIN_ID` | The checks in this guide | `80002` | `137` |
 | `EXPECTED_SAFE_HASH` | The checks in this guide | Section 2 | Section 2 |
 | `EXPECTED_TEST_SAFE` | The checks in this guide | Section 2 | Section 2 |
-| `DEPLOYER_ACCOUNT`, `DEPLOYER_ADDRESS` | The commands in this guide | Section 7 | Section 7 |
-| `ADMIN_ACCOUNT`, `ORACLE_ACCOUNT` | The commands in this guide | Section 7 | Section 7 |
+| `DEPLOYER_ADDRESS` | The broadcast, as `--sender` | Section 7 | Section 7 |
+| `DEPLOYER_ACCOUNT`, `ADMIN_ACCOUNT`, `ORACLE_ACCOUNT`, `OPERATOR_ACCOUNT` | The commands in this guide | Section 7 | Section 7 |
 
 Keep one `.env` per chain, for example `.env.amoy` and `.env.polygon`, and copy the one you need to `.env`.
 
@@ -217,7 +217,14 @@ set -a; source .env; set +a
 
 ## 7. Create the keystore accounts
 
-Foundry's keystore stores an encrypted private key on your machine, so no command ever carries a raw key.
+Foundry's keystore stores an encrypted private key on your machine, under `~/.foundry/keystores/`, so no command ever carries a raw key. Each role that signs in this guide needs one keystore account:
+
+| Role | `.env` variable | Signs in |
+|---|---|---|
+| Deployer | `DEPLOYER_ACCOUNT` | Sections 9.5, 10.5, and 15 |
+| Admin | `ADMIN_ACCOUNT` | Sections 14.1, 14.2, 14.6, 14.7, and 15 |
+| Oracle | `ORACLE_ACCOUNT` | Sections 12.5, 14.5, and 14.8 |
+| Operator | `OPERATOR_ACCOUNT` | Section 14.3 |
 
 ```bash
 cast wallet import deployer-amoy --interactive   # paste the key, then choose a password
@@ -225,11 +232,11 @@ cast wallet list
 cast wallet address --account deployer-amoy
 ```
 
-Write the account name in `DEPLOYER_ACCOUNT` and the printed address in `DEPLOYER_ADDRESS`. Do the same for the wallets that send transactions in sections 11 to 15: `ADMIN_ACCOUNT` and `ORACLE_ACCOUNT`.
+Write each account name in the role's variable, for example `DEPLOYER_ACCOUNT=deployer-amoy`, and write the deployer's printed address in `DEPLOYER_ADDRESS`. Foundry 1.7.1 prints each name in `cast wallet list` with `0x` in front, as in `0xdeployer-amoy (Local)`. The account name has no `0x`. Cast asks for the keystore password on every signed command.
 
-Every broadcast command below passes `--account` and `--sender`. `--account` signs the transactions. `--sender` names the address the simulation uses, and it must equal the account's address.
+A broadcast passes `--account` and `--sender`. `--account` signs the transactions. `--sender` names the address the simulation uses, and it must equal the account's address. Section 8 checks both.
 
-With a hardware wallet, replace `--account $DEPLOYER_ACCOUNT` with `--ledger` or `--trezor`, and keep `--sender $DEPLOYER_ADDRESS`.
+With a hardware wallet, replace `--account $<ROLE>_ACCOUNT` with `--ledger` or `--trezor`, and keep `--sender $DEPLOYER_ADDRESS` on a broadcast.
 
 ---
 
@@ -262,6 +269,15 @@ check "exchange oracle is the Oracle (when it registers tokens)" "$(cast call $E
 echo "Deployer balance: $(cast balance $DEPLOYER_ADDRESS --ether --rpc-url $RPC_URL) POL"
 ```
 
+Check that each keystore account signs as its role's address. Cast asks for each keystore password. Skip a role that signs nothing on this chain.
+
+```bash
+check "Deployer account" "$(cast wallet address --account $DEPLOYER_ACCOUNT)" "$DEPLOYER_ADDRESS"
+check "Admin account" "$(cast wallet address --account $ADMIN_ACCOUNT)" "$ADMIN_ADDRESS"
+check "Oracle account" "$(cast wallet address --account $ORACLE_ACCOUNT)" "$ORACLE_ADDRESS"
+check "Operator account" "$(cast wallet address --account $OPERATOR_ACCOUNT)" "$OPERATOR_ADDRESS"
+```
+
 What a mismatch means:
 
 | Check | A mismatch means | Action |
@@ -269,6 +285,7 @@ What a mismatch means:
 | The first seven checks | A wrong chain, a wrong address, or a retired contract | Stop. Correct `.env` from section 2. Never deploy with a mismatch here. |
 | Exchange is not paused | An exchange Admin paused trading | The deployment works, but no vault order fills until the exchange unpauses. |
 | Oracle differs from Operator | The same wallet in both variables | Stop. The constructor reverts with `RoleSeparation()`. |
+| An account check | The keystore account holds another key, or `.env` names another address | Stop. Correct the account or the address. A deployment with a wrong role address gives that role to a key that your account does not hold. |
 | The last two checks | Another wallet submits matches or registers tokens | Not a blocker, if that other wallet holds the exchange role. |
 
 The deployer needs POL for about 8.5 million gas. See the budget in sections 9.2 and 10.2.
@@ -371,6 +388,7 @@ Deploy to mainnet only when every item is true:
 - [ ] `forge test`, the size check, and `forge fmt --check` pass on that commit (section 5).
 - [ ] The Admin, Oracle, and Operator wallets are final, and each wallet's owner confirmed its address.
 - [ ] The deployer keystore or hardware wallet sent one low-value mainnet transaction successfully.
+- [ ] Every account check in section 8 prints `OK` with the mainnet accounts.
 - [ ] `.env` holds the mainnet values of section 2, and `RPC_URL` points to a private RPC.
 - [ ] The Prophet server, the keeper, and the Oracle service are ready to receive the new factory address.
 
@@ -486,7 +504,7 @@ The Oracle creates one vault per market. `createVault` checks the outcome token 
 
 - The market's condition is prepared on the Conditional Tokens contract with exactly two outcomes. The Prophet Oracle service does this through the `Resolution` contract when it creates the market.
 - The exchange has the market's two tokens registered (section 12.4).
-- `ORACLE_ACCOUNT` is the keystore account of the LP vault factory's Oracle.
+- `ORACLE_ACCOUNT` is the keystore account of the LP vault factory's Oracle, and its account check in section 8 prints `OK`.
 
 ### 12.2 Choose the parameters
 
@@ -592,7 +610,7 @@ Run one full market through the new Amoy factory before any mainnet deployment. 
 
 ## 14. Operations
 
-Every command uses the keystore account of the wallet that holds the role.
+Every command signs with the keystore account of the role that the function requires (section 7).
 
 ### 14.1 Operators and the Oracle
 
@@ -621,7 +639,7 @@ A pause stops `depositForIntent`, `mintPositionFor`, `updateTick`, and `mergePos
 The emergency freeze becomes callable by any address after the Operator is silent for the vault's `emergencyCancelTimelock()` (7 days by default). Every Operator call refreshes the timer. While a vault is paused or wound down, `updateTick` reverts, so the keeper calls `heartbeat()` instead:
 
 ```bash
-cast send $VAULT "heartbeat()" --rpc-url $RPC_URL --account <operator account>
+cast send $VAULT "heartbeat()" --rpc-url $RPC_URL --account $OPERATOR_ACCOUNT
 ```
 
 ### 14.4 The emergency freeze
@@ -752,11 +770,12 @@ The constructor arguments must be the values the factory holds. Section 11 confi
 | `RoleSeparation()` at deployment | `ORACLE_ADDRESS` equals `OPERATOR_ADDRESS` | Use two wallets |
 | The verification does not run | `ETHERSCAN_API_KEY` is unset or empty | Set it and run section 16 |
 | Verification fails with a bytecode mismatch | The source or `foundry.toml` differs from the deployed build | Check out the deployed commit, run `forge build`, and verify again |
-| `--account` not found | The keystore account does not exist | `cast wallet import <name> --interactive` |
+| `--account` not found | The keystore account does not exist, or its name carries the `0x` that `cast wallet list` prints | `cast wallet import <name> --interactive`, and write the name without `0x` |
+| `MISMATCH  <role> account` | The keystore account holds a key for another address | Correct the role's account or its address in `.env` before any transaction |
 | `insufficient funds` | The deployer has too little POL | Fund it (sections 9.2 and 10.2) |
 | `transaction underpriced`, or a transaction stays pending | The gas price moved | Add `--with-gas-price <wei>` and `--priority-gas-price <wei>`, then run again with `--resume` |
 | `nonce too low` after a stopped run | Foundry sent part of the run | Run the same command with `--resume` in place of `--broadcast` |
-| `NotOracle()` on `createVault` | The sender is not the factory's Oracle | Use `ORACLE_ACCOUNT` |
+| `NotOracle()` on `createVault` | The sender is not the factory's Oracle | Sign with `--account $ORACLE_ACCOUNT`, and check that the Oracle account check in section 8 prints `OK` |
 | `DuplicateMarket()` on `createVault` | A vault exists for this market ID | Read `vaultForMarket(<market ID>)` on the factory |
 | `ZeroFloor()` on `createVault` | `MIN_FIRST_LIQUIDITY` is zero | Pass a value above zero (section 12.2) |
 | `InvalidTickSpacing()` on `createVault` | `TICK_SPACING` is zero or negative | Pass a positive spacing |
@@ -765,7 +784,7 @@ The constructor arguments must be the values the factory holds. Section 11 confi
 | `DuplicateTokenId()` on `createVault` | YES and NO are the same ID | Pass index set 1 as YES and index set 2 as NO |
 | `NotBinaryCondition()` on `createVault` | The condition is not prepared, or it has more than two outcomes | `getOutcomeSlotCount(<condition>)` must return `2` |
 | `TokenIdMismatch()` on `createVault` | The IDs belong to another condition, YES and NO are swapped, or `USDC_ADDRESS` is not the exchange collateral | Compute the IDs again from the vault factory's `usdc()` (section 12.3) |
-| `NotAdmin()` | The sender is not a factory Admin | Use `ADMIN_ACCOUNT` |
+| `NotAdmin()` | The sender is not a factory Admin | Sign with `--account $ADMIN_ACCOUNT`, and check that the Admin account check in section 8 prints `OK` |
 | `ZeroTimelock()` or `TimelockTooLong()` | The default timelock is 0 or above 30 days | Pass a value in (0, 2592000] |
 | `TimelockNotElapsed()` on `applyImplementation` | Seven days have not passed since the schedule | Wait until `implementationUnlockAt()` |
 | `ScheduleAlreadyPending()` | Another upgrade is scheduled | Apply it, or `cancelScheduledImplementation()` first |
@@ -794,6 +813,7 @@ Copy this table into the pull request or the release notes for every deployment.
 | Admin | |
 | Oracle | |
 | Operator | |
+| Keystore account or hardware wallet of each role | |
 | Explorer verification (both contracts) | |
 | Section 11 checks all `OK` | |
 | Broadcast record committed | |
