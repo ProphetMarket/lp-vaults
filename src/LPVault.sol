@@ -5,12 +5,8 @@ pragma solidity 0.8.20;
 // UC-REQ0: Deploy Factory, UC-REQ1: Create Vault for Market
 // FEAT-T7AF: Mint LP Position
 // UC-T7AG: Operator Mint Position for LP
-// FEAT-TOGR: Notify and Distribute Fees
-// UC-TOGS: Operator Notify Fee Revenue
 // FEAT-TVS0: Update Tick and Cross Ticks
 // UC-TVS1: Update Current Tick
-// FEAT-U079: Collect Fees on a Position
-// UC-U07A: Collect Position Fees
 // FEAT-JGE7: Vault Wind-Down Lifecycle
 // UC-JGEE: Start Wind Down
 // FEAT-JXQO: Emergency Cancel All Positions
@@ -28,7 +24,6 @@ pragma solidity 0.8.20;
 // UC-7G41: Burn Position, UC-7G42: Operator Burn Position for LP
 // FEAT-6HBN: Complete-Set Merge and Resolution Redemption
 // UC-6HBO: Merge Complete Sets, UC-6HBP: Redeem Outcome Tokens After Resolution
-// UC-BMF8: Operator Collect Fees for LP
 // FEAT-9BQZ: Vault Solvency Ledger
 // UC-9BR0: Maintain Solvency Totals, UC-9BR1: Accumulate Principal Shift, UC-9BR2: Apply Payout Ratios
 
@@ -84,7 +79,7 @@ interface ILPVaultFactory {
 /// @title LPVault
 /// @notice Per-market vault holding USDC and ERC-1155 outcome tokens. Deployed as EIP-1167
 ///         minimal-proxy clone by LPVaultFactory. Manages v3-style concentrated-liquidity
-///         positions and fee accumulators.
+///         positions and a solvency ledger of what it owes per asset.
 /// @dev Auth pattern inlined from ctf-exchange/lib/ctf-exchange/src/exchange/mixins/Auth.sol
 ///      with the addition of `oracle` role, `factory` guard, and role-separation checks.
 ///      All per-vault configuration lives in storage (not immutable) because EIP-1167 clones
@@ -169,25 +164,23 @@ contract LPVault {
     uint8 public phase;
 
     /// @dev Circuit breaker flag. When true, trading entry points
-    ///      (depositForIntent, mintPositionFor, notifyFees, updateTick, mergePositions) revert.
-    ///      LP exit paths (collect, collectFor, burnPosition, burnPositionFor, reclaimDeposit,
-    ///      reclaimDepositFor), mergeCompleteSets, and emergencyCancelAll are unaffected.
+    ///      (depositForIntent, mintPositionFor, updateTick, mergePositions) revert.
+    ///      LP exit paths (burnPosition, burnPositionFor, reclaimDeposit, reclaimDepositFor),
+    ///      mergeCompleteSets, and emergencyCancelAll are unaffected.
     ///      Independent of the phase state machine.
     bool public paused;
 
     /// @dev Running total of liquidity in range
     uint128 public activeLiquidity;
 
-    /// @dev Global fee accumulator (Q128 fixed-point)
-    uint256 public feeGrowthGlobalX128;
-
     /// @dev Current tick for the vault's market price
     int24 public currentTick;
 
     /// @dev The liquidity of the in-range positions whose mint tick is at or below currentTick:
     ///      the NO side of the claim model (decision C26), booked the way activeLiquidity is
-    ///      (a per-tick noLiquidityNet that _crossTick applies). Declared right after currentTick
-    ///      so the two pack into one slot, which a move writes anyway (FEAT-9BQZ, ADR-COEW).
+    ///      (a per-tick noLiquidityNet that _crossTick applies) (FEAT-9BQZ, ADR-COEW). Since the
+    ///      fee accumulator left (R17), currentTick packs into activeLiquidity's slot, and this
+    ///      counter takes the next one; a different order is a Part 7 candidate, not this step's.
     uint128 public noSideLiquidity;
 
     /// @dev Counter for minting new positions
@@ -215,16 +208,13 @@ contract LPVault {
         // into the first slot with owner and the two bounds, so the mint writes no new slot.
         int24 mintTick;
         uint128 liquidity;
-        uint256 feeGrowthInsideLastX128;
-        uint256 tokensOwed;
     }
 
     struct TickInfo {
         uint128 liquidityGross;
         int128 liquidityNet;
-        uint256 feeGrowthOutsideX128;
         // FEAT-9BQZ: the liquidityNet of the NO sub-ranges [mintTick, tickUpper) that reference
-        // this tick, +L at a position's mint tick and -L at its tickUpper (ADR-COEW). Third slot;
+        // this tick, +L at a position's mint tick and -L at its tickUpper (ADR-COEW). Second slot;
         // deleted with the record.
         int128 noLiquidityNet;
     }
@@ -232,14 +222,14 @@ contract LPVault {
     /// @dev positionId => Position record
     mapping(uint256 => Position) public positions;
 
-    /// @dev tick index => per-tick fee and liquidity state
+    /// @dev tick index => per-tick liquidity state
     mapping(int24 => TickInfo) public ticks;
 
     /// @dev intentId => true if already used (replay protection)
     mapping(bytes32 => bool) public usedIntents;
 
     // ──────────────────────────────────────────────
-    // Exit authorizations (FEAT-7G40, FEAT-U079)
+    // Exit authorizations (FEAT-7G40)
     // ──────────────────────────────────────────────
 
     /// @dev BurnIntent struct hash => consumed. A burn hash is a pure function of
@@ -248,10 +238,6 @@ contract LPVault {
     ///      hash and block that exit forever (ADR-85DM). Checked before the position, because
     ///      the hash needs only calldata, so a replay reports IntentAlreadyUsed (FR-7G55).
     mapping(bytes32 => bool) public usedBurnAuthorizations;
-
-    /// @dev CollectIntent struct hash => consumed. Same reasoning as the burn record; the type
-    ///      carries a nonce because a collect repeats over a position's life (FR-BMFA).
-    mapping(bytes32 => bool) public usedCollectAuthorizations;
 
     // ──────────────────────────────────────────────
     // Escrow state (FEAT-3ZRI)
@@ -292,8 +278,6 @@ contract LPVault {
     uint256 public totalYesOwedScaled;
     /// @dev NO tokens, in token units x LIQUIDITY_PRECISION. Never netted against YES (FR-9BR5).
     uint256 public totalNoOwedScaled;
-    /// @dev Fees, in USDC units x 2^128.
-    uint256 public totalFeesOwedX128;
 
     // ──────────────────────────────────────────────
     // Resolution (FEAT-6HBN)
@@ -346,11 +330,6 @@ contract LPVault {
     bytes32 private constant BURN_INTENT_TYPEHASH =
         keccak256("BurnIntent(address lp,uint256 positionId,uint256 deadline)");
 
-    /// @dev A distinct type for the relayed collect. The nonce makes each authorization unique,
-    ///      because a collect repeats over a position's life (decision C3, FR-BMFA).
-    bytes32 private constant COLLECT_INTENT_TYPEHASH =
-        keccak256("CollectIntent(address lp,uint256 positionId,uint256 nonce,uint256 deadline)");
-
     uint256 private constant SECP256K1N_HALF = 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0;
 
     /// @dev ERC-1271's success value: `bytes4(keccak256("isValidSignature(bytes32,bytes)"))`.
@@ -382,9 +361,6 @@ contract LPVault {
     // forge-lint: disable-next-line(unsafe-typecast)
     uint256 internal constant USDC_CLAIM_SCALE = uint256(int256(PRICE_TICK_ONE)) * LIQUIDITY_PRECISION;
 
-    /// @dev Q128 = 2^128. Scaling factor for fee accumulator fixed-point math.
-    uint256 internal constant Q128 = 1 << 128;
-
     /// @dev Maximum number of initialized ticks that can be crossed in a single
     ///      updateTick call. Prevents gas griefing on large price moves.
     uint256 internal constant MAX_TICK_CROSSINGS = 256;
@@ -413,7 +389,6 @@ contract LPVault {
     error IntentAlreadyUsed();
     error InvalidSignature();
     error BelowMinimumFirstLiquidity();
-    error NoActiveLiquidity();
     error SafeCastOverflow();
     error TransferFailed();
     error Reentrancy();
@@ -451,30 +426,21 @@ contract LPVault {
     // SC-JXQX: emitted when any address freezes the vault after the silence timelock
     event EmergencyCancelExecuted(address indexed caller);
 
-    // SC-TOGT, SC-TOGU: emitted when Operator distributes fee revenue
-    event FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128);
-
     // SC-TVS2 through SC-TVS4: emitted on every successful tick update
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
 
-    // SC-U07B, SC-U07F, SC-U07G, SC-BMFG, SC-COEZ, SC-COET: emitted by both collect paths whenever
-    // the owed amount is nonzero; amountPaid is amountOwed times the USDC ratio, so a short vault
-    // shows as amountPaid < amountOwed, as PositionBurned does for a burn (decision O2)
-    event FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid);
-
-    // SC-6HC9, SC-BMF1, SC-BMFE: emitted when pairs merge into USDC, by the public call and by a
-    // burn or a collect that merged first; never on a zero merge
+    // SC-6HC9, SC-BMF1: emitted when pairs merge into USDC, by the public call and by a burn
+    // that merged first; never on a zero merge
     event CompleteSetsMerged(address indexed caller, uint256 amount);
 
     // SC-6HCD, SC-6HCE, SC-6HCH, SC-6HCI, SC-CYSC: emitted when the vault's tokens redeem into
-    // USDC, by the Oracle's call and by a burn or a collect after the switch that found a token to
-    // redeem; caller is msg.sender, as in CompleteSetsMerged; never when both balances were zero
+    // USDC, by the Oracle's call and by a burn after the switch that found a token to redeem;
+    // caller is msg.sender, as in CompleteSetsMerged; never when both balances were zero
     event OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount);
 
-    // SC-7G43 through SC-7G46, SC-BMF1 through SC-BMF3, SC-7G4C through SC-7G4E: emitted by both
-    // burn paths. usdcOwed is the claim's USDC leg, feesOwed the accrued fees, usdcPaid the
-    // prorated usdcOwed + feesOwed, tokenId the YES or NO id of the band (zero when the band is
-    // empty), tokenOwed the band's tokens. Before the switch tokenPaid is the tokens transferred
+    // SC-7G43 through SC-7G45, SC-BMF1 through SC-BMF3, SC-7G4C through SC-7G4E: emitted by both
+    // burn paths. usdcOwed is the claim's USDC leg, usdcPaid the prorated usdcOwed, tokenId the
+    // YES or NO id of the band (zero when the band is empty), tokenOwed the band's tokens. Before the switch tokenPaid is the tokens transferred
     // and usdcPaid the one USDC transfer; after the switch (SC-CYS7 through SC-CYS9) tokenPaid is
     // the USDC paid for the token leg and the one USDC transfer carries usdcPaid + tokenPaid. A
     // reader knows the mode from payoutNumerators(). An indexer sees a shortfall as paid < owed
@@ -483,7 +449,6 @@ contract LPVault {
         uint256 indexed positionId,
         address indexed owner,
         uint256 usdcOwed,
-        uint256 feesOwed,
         uint256 usdcPaid,
         uint256 tokenId,
         uint256 tokenOwed,
@@ -570,9 +535,9 @@ contract LPVault {
         _;
     }
 
-    /// @dev Gates trading entry points while the vault is paused. LP exit paths (collect,
-    ///      collectFor, burnPosition, burnPositionFor, reclaimDeposit, reclaimDepositFor) and
-    ///      mergeCompleteSets are NOT gated.
+    /// @dev Gates trading entry points while the vault is paused. LP exit paths (burnPosition,
+    ///      burnPositionFor, reclaimDeposit, reclaimDepositFor) and mergeCompleteSets are NOT
+    ///      gated.
     modifier whenNotPaused() {
         if (paused) revert TradingIsPaused();
         _;
@@ -715,8 +680,8 @@ contract LPVault {
 
     // SC-3WLL, SC-3WLN, SC-6HBY: acknowledge single transfers of this vault's two outcome tokens from its CTF
     /// @notice Accepts a single ERC-1155 transfer of the vault's YES or NO token.
-    /// @dev Stateless by design. The vault's position, tick, and fee accounting is driven
-    ///      by mintPositionFor, collect, and notifyFees — never by observing an inbound
+    /// @dev Stateless by design. The vault's position, tick, and ledger accounting is driven
+    ///      by mintPositionFor, burnPosition, and updateTick — never by observing an inbound
     ///      transfer — so this hook deliberately records nothing. Reconciling raw token
     ///      balances against position accounting is the Operator's off-chain job.
     ///      No nonReentrant guard: the hook mutates nothing and makes no external call, and
@@ -868,9 +833,9 @@ contract LPVault {
     /// @notice Transitions the vault from Active to WindDown phase.
     /// @dev One-way transition — there is no mechanism to revert from WindDown
     ///      back to Active. Once in WindDown, depositForIntent, mintPositionFor, and updateTick
-    ///      revert (phase guard at the top of each), while collect, collectFor, burnPosition,
-    ///      burnPositionFor, reclaimDeposit, reclaimDepositFor, mergeCompleteSets, and
-    ///      redeemOutcomeTokens remain callable so LPs can exit. The Oracle calls this first and
+    ///      revert (phase guard at the top of each), while burnPosition, burnPositionFor,
+    ///      reclaimDeposit, reclaimDepositFor, mergeCompleteSets, and redeemOutcomeTokens remain
+    ///      callable so LPs can exit. The Oracle calls this first and
     ///      redeemOutcomeTokens after the result is reported, because the redemption reverts
     ///      while the vault is Active (ADR-6HCK in FEAT-6HBN).
     ///      ORACLE TRUST ASSUMPTION: The Oracle can freeze minting on any vault
@@ -888,7 +853,7 @@ contract LPVault {
 
     // SC-K1ML, SC-K1MM, SC-K1MN: admin-only circuit breaker
     /// @notice Halts all trading entry points (depositForIntent, mintPositionFor,
-    ///         notifyFees, updateTick, mergePositions) while keeping LP exit paths live.
+    ///         updateTick, mergePositions) while keeping LP exit paths live.
     /// @dev Does not change the vault's phase — pause and phase are orthogonal.
     function pauseTrading() external onlyAdmin {
         paused = true;
@@ -915,8 +880,8 @@ contract LPVault {
     ///      activeLiquidity with checked arithmetic, and the exits value each claim from the records.
     ///      No nonReentrant, because the function makes no external call and moves no token
     ///      (CLAUDE.md checklist item 1), the same as startWindDown and pauseTrading.
-    ///      After the freeze, burnPosition, burnPositionFor, collect, collectFor, reclaimDeposit,
-    ///      reclaimDepositFor, and mergeCompleteSets work and pay what they pay in WindDown at the
+    ///      After the freeze, burnPosition, burnPositionFor, reclaimDeposit, reclaimDepositFor,
+    ///      and mergeCompleteSets work and pay what they pay in WindDown at the
     ///      same tick, so each LP exits in their own transaction and a USDC-blacklisted LP blocks
     ///      only their own exit (audit issue 6.17). The vault approves no new order after the
     ///      freeze, because the order maker accepts an order only while Active and not paused
@@ -1104,16 +1069,13 @@ contract LPVault {
             revert BelowMinimumFirstLiquidity();
         }
 
-        // Update tick state: liquidityGross tracks total references (and initializes the tick on
+        // Update tick state: liquidityGross tracks total references (and sets the bitmap bit on
         // the first one), liquidityNet tracks the directional delta applied when the tick is
         // crossed (FR-T7AV)
         _addTickReference(tickLower, liquidity);
         ticks[tickLower].liquidityNet += _toInt128(liquidity);
         _addTickReference(tickUpper, liquidity);
         ticks[tickUpper].liquidityNet -= _toInt128(liquidity);
-
-        // Snapshot feeGrowthInside at mint time to prevent retroactive fee claims
-        uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(tickLower, tickUpper);
 
         // The mint tick anchors the claim (decision C26). Outside the range it clamps to the
         // nearer bound, so every position minted on one side of its range holds the same mix and
@@ -1124,15 +1086,8 @@ contract LPVault {
 
         // Create the position record
         positionId = nextPositionId++;
-        positions[positionId] = Position({
-            owner: lp,
-            tickLower: tickLower,
-            tickUpper: tickUpper,
-            mintTick: mintTick,
-            liquidity: liquidity,
-            feeGrowthInsideLastX128: feeGrowthInsideX128,
-            tokensOwed: 0
-        });
+        positions[positionId] =
+            Position({owner: lp, tickLower: tickLower, tickUpper: tickUpper, mintTick: mintTick, liquidity: liquidity});
 
         // Update active liquidity if the position is in-range. An in-range mint has
         // mintTick == currentTick, so it enters on the NO side (FEAT-9BQZ FR-A2ZS).
@@ -1154,163 +1109,6 @@ contract LPVault {
     }
 
     // ──────────────────────────────────────────────
-    // Fee collection (FEAT-U079, UC-U07A)
-    // ──────────────────────────────────────────────
-
-    // SC-U07B through SC-U07G, SC-8L1D, SC-8L1E, SC-BMFD, SC-BMFE, SC-BMFF: the Safe collects
-    // its accumulated trading fees
-    /// @notice Withdraws accumulated trading fees from a position without removing it.
-    /// @dev No phase restriction and no pause check (FR-U07O, decision C9): collect works in
-    ///      Active, WindDown, and Cancelled, so LPs have an unbounded claim window. The
-    ///      feeGrowthInsideLastX128 snapshot prevents double-counting: each collect only pays
-    ///      fees that grew since the previous collect (or since mint). The body is shared with
-    ///      collectFor; see _collect for the merge and the ratio.
-    /// @param positionId The ID of the position to collect fees from
-    function collect(uint256 positionId) external nonReentrant {
-        // --- Checks ---
-
-        Position storage p = positions[positionId];
-
-        // Position must exist (owner is never set to address(0) during mint)
-        if (p.owner == address(0)) revert PositionNotFound();
-
-        // Only the position's owner can collect
-        if (p.owner != msg.sender) revert NotPositionOwner();
-
-        _collect(positionId, p);
-    }
-
-    // SC-BMFG through SC-BMFM, SC-BMG6: operator-relayed collect against the owner key's CollectIntent
-    /// @notice Relays the owner key's signed CollectIntent to pay that Safe its accrued fees, with
-    ///         the Operator paying the gas.
-    /// @dev OPERATOR TRUST ASSUMPTION: The Operator can delay a relayed collect and chooses which
-    ///      block it lands in, which changes nothing about the fees owed, because the accumulator
-    ///      only grows and the snapshot only moves forward. The Operator cannot start a collect
-    ///      without the owner key's CollectIntent, cannot replay a spent nonce, cannot replay a
-    ///      mint, reclaim, or burn signature (distinct typehash), cannot redirect the payout (it
-    ///      goes to position.owner, never to msg.sender), and cannot collect for a Safe that does
-    ///      not own the position. A refusal leaves the Safe with the self-service collect.
-    ///
-    ///      MEV analysis: the call moves the vault's USDC to the position's owner and reads no
-    ///      price, so no third party can gain from its ordering.
-    ///
-    ///      Same shape as reclaimDepositFor (R5): the deadline, the signature, the used record,
-    ///      the position, then the record set before any external call (FR-BMFA). The deadline is
-    ///      inclusive, with Polygon's ±15s tolerance (CLAUDE.md checklist item 12).
-    /// @param lp The LP's Safe — must be the position's recorded owner
-    /// @param positionId The position to collect from
-    /// @param nonce A value the owner key never reuses for this position, so each collect is unique
-    /// @param deadline Last block.timestamp at which this collect is accepted
-    /// @param signature EIP-712 signature from the Safe's owner key over the CollectIntent struct
-    function collectFor(address lp, uint256 positionId, uint256 nonce, uint256 deadline, bytes calldata signature)
-        external
-        onlyOperator
-        nonReentrant
-        touchesHeartbeat
-    {
-        // --- Checks ---
-
-        // forge-lint: disable-next-line(block-timestamp)
-        if (block.timestamp > deadline) revert IntentExpired();
-
-        // The owner key must derive the named Safe (FR-BMFA)
-        bytes32 structHash = keccak256(abi.encode(COLLECT_INTENT_TYPEHASH, lp, positionId, nonce, deadline));
-        _verifySafeOwnerSignature(lp, structHash, signature);
-
-        // A spent authorization never pays twice (FR-BMFA, ADR-85DM)
-        if (usedCollectAuthorizations[structHash]) revert IntentAlreadyUsed();
-
-        // Same guards as collect, with the proven Safe in place of msg.sender
-        Position storage p = positions[positionId];
-        if (p.owner == address(0)) revert PositionNotFound();
-        if (p.owner != lp) revert NotPositionOwner();
-
-        // --- Effects ---
-
-        // Check-then-set before any external work (CLAUDE.md checklist item 4)
-        usedCollectAuthorizations[structHash] = true;
-
-        _collect(positionId, p);
-    }
-
-    /// @dev One body for both collect entry points. Reads first (the fees, both token balances,
-    ///      the switch, the free pairs, the USDC balance, the ledger totals, and the amount to
-    ///      pay), effects second (the snapshot, tokensOwed to zero, and the fee total's debit),
-    ///      interactions last (the settlement, then the transfer), per NFR-U07R. The amount to
-    ///      pay is known before the settlement because a merge pays exactly the free pairs this
-    ///      function computed and a redemption exactly balance x numerator / denominator per
-    ///      side. The settlement receives that number, never a fresh read: after the fee debit
-    ///      the ledger has moved (ADR-DFE2 in FEAT-6HBN). A zero-owed collect reads no balance
-    ///      and settles nothing (FR-U07K). The claim settles at the ratio with no remainder: a
-    ///      cut is final, and the LP chose the moment (ADR-COEN in FEAT-9BQZ).
-    function _collect(uint256 positionId, Position storage p) internal {
-        // --- Reads ---
-
-        // Compute current feeGrowthInside for this position's tick range
-        uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
-
-        // Calculate fees accrued since the last collect (or mint).
-        // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 both wrapped
-        // mod 2^256 by the same offset (see _computeFeeGrowthInside), so this
-        // subtraction must wrap too: it cancels the offset to the true small delta,
-        // mirroring Uniswap v3's fee-growth accounting. That subtraction is the
-        // load-bearing part. On a correct delta, liquidity * delta fits in 256 bits
-        // for every reachable value, so _mulDiv would return the same number; on a
-        // wrong delta both forms return a wrong number. The product stays in this
-        // block and never goes through _mulDiv by convention, so every fee site
-        // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
-        uint256 x;
-        unchecked {
-            x = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128);
-        }
-
-        // The truncated fees, plus the fees a merge rolled up, and the scaled fee claim the
-        // ledger carries for this position (FEAT-9BQZ FR-9BRB). tokensOwed x Q128 is not a
-        // wraparound product, so it stays outside the block.
-        uint256 owed = x / Q128 + p.tokensOwed;
-        uint256 owedX128 = x + p.tokensOwed * Q128;
-
-        // Pro-rata (decision O2, FR-U07K): the owed amount times the USDC ratio of the solvency
-        // ledger, read before the debit. Before the switch: the USDC the vault holds above
-        // escrow, counting the free pairs the merge below turns into USDC, over the principal
-        // and the fees it owes (FR-9BRM). After the switch: the same with every token valued at
-        // the stored payout on both sides, one ratio for every leg (FR-CYS5), and no pair to
-        // count, because the redemption replaces the merge.
-        uint256 yes;
-        uint256 no;
-        bool resolved;
-        uint256 pairs;
-        uint256 paid;
-        if (owed > 0) {
-            (yes, no) = _tokenBalances();
-            resolved = _resolved();
-            if (!resolved) pairs = _freePairs(yes, no);
-            (uint256 held, uint256 total) = _usdcRatio(pairs, yes, no, resolved);
-            paid = _prorate(owed, held, total);
-        }
-
-        // --- Effects ---
-
-        // Snapshot update: future collects start from here. Nothing waits in tokensOwed: the
-        // claim is settled at the ratio, paid or not (FR-9BRR).
-        p.feeGrowthInsideLastX128 = feeGrowthInsideX128;
-        p.tokensOwed = 0;
-
-        // The ledger settles the whole scaled fee claim, whatever was paid (FR-9BRB); an LP exit
-        // never reverts on a ledger write (NFR-9BRT)
-        totalFeesOwedX128 = _saturatingSub(totalFeesOwedX128, owedX128);
-
-        // --- Interactions (external calls last, per checks-effects-interactions) ---
-
-        // The merge of the free pairs computed above before the switch, the redemption after it;
-        // nothing when owed was zero
-        _settle(pairs, yes, no, resolved);
-
-        if (paid > 0) _safeTransfer(usdc, p.owner, paid);
-        if (owed > 0) emit FeesCollected(positionId, p.owner, owed, paid);
-    }
-
-    // ──────────────────────────────────────────────
     // Position burn (FEAT-7G40, UC-7G41, UC-7G42)
     // ──────────────────────────────────────────────
 
@@ -1318,7 +1116,7 @@ contract LPVault {
     // with no Operator involvement, in every phase
     /// @notice Closes a position the caller owns and pays what its claim holds: USDC for the
     ///         levels the price never crossed, one outcome token for the band between the mint
-    ///         tick and the current tick, and the accrued fees, after merging the vault's pairs.
+    ///         tick and the current tick, after merging the vault's pairs.
     /// @dev Unconditional by design (ADR-7G5G): this function requires no Operator action, no
     ///      Operator signature, and reads no Operator registry state, and it is gated behind no
     ///      phase, no pause, no declared emergency, and no timelock. That is what makes it the
@@ -1374,8 +1172,8 @@ contract LPVault {
     ///      OPERATOR TRUST ASSUMPTION: The Operator can censor, reorder, or delay a relayed exit,
     ///      and chooses which block it lands in, so which currentTick values the claim, bounded
     ///      by the deadline the LP signed. The Operator cannot start a burn without the owner
-    ///      key's BurnIntent (a struct with its own typehash, ADR-7G5H), cannot replay a mint,
-    ///      reclaim, or collect signature, cannot redirect the payout (every asset goes to
+    ///      key's BurnIntent (a struct with its own typehash, ADR-7G5H), cannot replay a mint
+    ///      or reclaim signature, cannot redirect the payout (every asset goes to
     ///      position.owner, never to msg.sender), and cannot burn a position for another Safe
     ///      (the recorded owner must equal `lp`). The LP's remedy is burnPosition, which needs no
     ///      Operator at all.
@@ -1424,11 +1222,10 @@ contract LPVault {
     }
 
     /// @dev Every amount a burn reads or computes, filled before any effect (NFR-7G59). A memory
-    ///      struct instead of locals, because _burn reads eight values and emits an eight-field
+    ///      struct instead of locals, because _burn reads seven values and emits a seven-field
     ///      event, and the compiler's sixteen-slot stack is the limit without via_ir.
     struct BurnAmounts {
         uint256 usdcOwed;
-        uint256 feesOwed;
         uint256 usdcPaid;
         uint256 tokenId;
         uint256 tokenOwed;
@@ -1442,10 +1239,9 @@ contract LPVault {
         // before the ledger debit so this position's own band never counts as free (ADR-DFE2).
         // Zero after the switch, where the redemption replaces the merge and nothing reads it.
         uint256 pairs;
-        // The same claim and fees in the ledger's pre-division unit (FEAT-9BQZ FR-9BR9, FR-9BRC)
+        // The same claim in the ledger's pre-division unit (FEAT-9BQZ FR-9BR9)
         uint256 usdcScaled;
         uint256 tokenScaled;
-        uint256 feesX128;
     }
 
     /// @dev One body for both burn entry points (FR-7G4L). Order, per NFR-7G59 and CLAUDE.md
@@ -1487,16 +1283,15 @@ contract LPVault {
             if (mintTick <= current) noSideLiquidity -= liquidity;
         }
 
-        // The ledger: debit the full scaled claim and fees, whatever the burn pays, so every
-        // later claimant meets the same ratio (FR-9BR9, FR-9BRC); an LP exit never reverts on a
-        // ledger write (NFR-9BRT)
+        // The ledger: debit the full scaled claim, whatever the burn pays, so every later
+        // claimant meets the same ratio (FR-9BR9); an LP exit never reverts on a ledger write
+        // (NFR-9BRT)
         totalUsdcOwedScaled = _saturatingSub(totalUsdcOwedScaled, a.usdcScaled);
         if (a.tokenId == yesTokenId) {
             totalYesOwedScaled = _saturatingSub(totalYesOwedScaled, a.tokenScaled);
         } else if (a.tokenId != 0) {
             totalNoOwedScaled = _saturatingSub(totalNoOwedScaled, a.tokenScaled);
         }
-        totalFeesOwedX128 = _saturatingSub(totalFeesOwedX128, a.feesX128);
 
         // Delete the whole record (FR-7G4S). nextPositionId is untouched, so the id is retired,
         // never recycled (FR-7G4T): reuse would let a stale reference resolve to another LP's
@@ -1510,8 +1305,8 @@ contract LPVault {
         // after the debit the exiting position's own band would count as free (ADR-DFE2).
         _settle(a.pairs, a.yes, a.no, a.resolved);
 
-        // One transfer covers the claim's USDC and the fees (FR-7G4R), and after the switch the
-        // token leg's USDC too (FR-CYS4)
+        // One transfer covers the claim's USDC, and after the switch the token leg's USDC too
+        // (FR-CYS4)
         uint256 usdcOut = a.resolved ? a.usdcPaid + a.tokenPaid : a.usdcPaid;
         if (usdcOut > 0) {
             _safeTransfer(usdc, owner, usdcOut);
@@ -1523,45 +1318,24 @@ contract LPVault {
             IConditionalTokens(conditionalTokens).safeTransferFrom(address(this), owner, a.tokenId, a.tokenPaid, "");
         }
 
-        emit PositionBurned(positionId, owner, a.usdcOwed, a.feesOwed, a.usdcPaid, a.tokenId, a.tokenOwed, a.tokenPaid);
+        emit PositionBurned(positionId, owner, a.usdcOwed, a.usdcPaid, a.tokenId, a.tokenOwed, a.tokenPaid);
     }
 
-    /// @dev The fees, the claim, both token balances, the switch, the free pairs, the USDC
-    ///      balance, the ledger totals, and the two amounts to pay, from view reads only. The
+    /// @dev The claim, both token balances, the switch, the free pairs, the USDC balance, the
+    ///      ledger totals, and the two amounts to pay, from view reads only. The
     ///      amounts are computable before the settlement because the ConditionalTokens contract
     ///      pays exactly the free pairs computed here for a merge, and exactly balance x
     ///      numerator / denominator per side for a redemption, which _atPayout reproduces
     ///      (NFR-7G59). Pro-rata (decision O2, FR-COEX):
     ///      before the switch each owed amount times its asset's ratio, the smaller of 1 and held
     ///      over the ledger's total, rounded down, and never a revert; after the switch every leg
-    ///      is USDC, so one ratio covers principal, fees, and the token leg valued at the stored
-    ///      payout, and the three are prorated as one sum (FR-CYS4, FR-CYS5). Two separately
+    ///      is USDC, so one ratio covers the principal and the token leg valued at the stored
+    ///      payout, and the two are prorated as one sum (FR-CYS4, FR-CYS5). Two separately
     ///      capped USDC legs could sum to more than the vault holds after a saturated ledger
     ///      debit, and the one transfer would then revert, which decision C6 forbids; one prorate
     ///      of the sum keeps the cap, and paidSum >= usdcPaid always, because the floor of the
     ///      larger product is at least the floor of the smaller one under the same cap.
     function _burnAmounts(Position storage p) internal view returns (BurnAmounts memory a) {
-        // Fees must be computed while both boundary ticks still hold their feeGrowthOutsideX128;
-        // the effects in _burn may delete them.
-        // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 both wrapped
-        // mod 2^256 by the same offset (see _computeFeeGrowthInside), so this
-        // subtraction must wrap too: it cancels the offset to the true small delta,
-        // mirroring Uniswap v3's fee-growth accounting. That subtraction is the
-        // load-bearing part. On a correct delta, liquidity * delta fits in 256 bits
-        // for every reachable value, so _mulDiv would return the same number; on a
-        // wrong delta both forms return a wrong number. The product stays in this
-        // block and never goes through _mulDiv by convention, so every fee site
-        // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
-        uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(p.tickLower, p.tickUpper);
-        uint256 x;
-        unchecked {
-            x = uint256(p.liquidity) * (feeGrowthInsideX128 - p.feeGrowthInsideLastX128);
-        }
-        // The truncated fees plus the fees a merge rolled up, and the scaled fee claim the ledger
-        // carries (FR-9BRC). tokensOwed x Q128 is not a wraparound product, so it stays outside.
-        a.feesOwed = x / Q128 + p.tokensOwed;
-        a.feesX128 = x + p.tokensOwed * Q128;
-
         // One valuation for the payout and for the ledger debit: the scaled claim, truncated here
         (a.usdcScaled, a.tokenId, a.tokenScaled) = _claim(p.tickLower, p.tickUpper, p.mintTick, p.liquidity);
         a.usdcOwed = a.usdcScaled / USDC_CLAIM_SCALE;
@@ -1575,21 +1349,19 @@ contract LPVault {
         // switch the redemption replaces the merge and no pair is counted
         if (!a.resolved) a.pairs = _freePairs(a.yes, a.no);
 
-        // The USDC ratio: principal and fees share it (ADR-9BSI), escrow stays out (FR-9BRM),
-        // and after the switch the token totals join it at the stored payout (FR-CYS5)
+        // The USDC ratio: escrow stays out (FR-9BRM), and after the switch the token totals join
+        // it at the stored payout (FR-CYS5). The USDC leg is prorated once, for both modes.
         (uint256 held, uint256 total) = _usdcRatio(a.pairs, a.yes, a.no, a.resolved);
+        a.usdcPaid = _prorate(a.usdcOwed, held, total);
 
         if (a.resolved) {
             // The token leg in USDC at the stored payout, then one prorate of the sum: tokenPaid
-            // is the part of the sum the principal and the fees did not take (FR-CYS4)
+            // is the part of the sum the principal did not take (FR-CYS4)
             uint256 tokenUsdc = _atPayout(isYes ? a.tokenOwed : 0, isYes ? 0 : a.tokenOwed);
-            uint256 paidSum = _prorate(a.usdcOwed + a.feesOwed + tokenUsdc, held, total);
-            a.usdcPaid = _prorate(a.usdcOwed + a.feesOwed, held, total);
+            uint256 paidSum = _prorate(a.usdcOwed + tokenUsdc, held, total);
             a.tokenPaid = paidSum - a.usdcPaid;
             return a;
         }
-
-        a.usdcPaid = _prorate(a.usdcOwed + a.feesOwed, held, total);
 
         // The merge consumes the free pairs of each token, so the band's token is what is left,
         // never below the smaller of the balance and the total; the band's ratio is independent
@@ -1675,10 +1447,9 @@ contract LPVault {
         return held > escrowed ? held - escrowed : 0;
     }
 
-    /// @dev The two sides of the USDC ratio, read before the debit, for the burn and the collect
-    ///      (FEAT-9BQZ). Before the switch: what the vault holds above escrow counting `pairs`,
+    /// @dev The two sides of the USDC ratio, read before the debit, for the burn (FEAT-9BQZ). Before the switch: what the vault holds above escrow counting `pairs`,
     ///      the free pairs the caller computed from _freePairs before any effect, over the
-    ///      principal and the fees it owes (FR-9BRM). After the switch every asset is USDC: the
+    ///      principal it owes (FR-9BRM). After the switch every asset is USDC: the
     ///      numerator adds what the vault's YES and NO redeem for at the stored payout, and the
     ///      denominator adds what the YES and NO totals redeem for, so one ratio covers every leg
     ///      (FR-CYS5), and `pairs` is not read. The totals themselves stay per asset (ADR-9BSJ).
@@ -1687,7 +1458,7 @@ contract LPVault {
         view
         returns (uint256 held, uint256 total)
     {
-        total = totalUsdcOwed() + totalFeesOwed();
+        total = totalUsdcOwed();
         if (resolved) {
             held = _availableUsdc(_atPayout(yes, no));
             total += _atPayout(totalYesOwed(), totalNoOwed());
@@ -1729,7 +1500,7 @@ contract LPVault {
     ///      a valid signature never proves ownership of an intentId (ADR-45IC).
     ///      A mint and a reclaim of one intentId share usedIntents on purpose, so exactly one of
     ///      them can happen (ADR-JAIY).
-    ///      Escrow seniority (decision C7) binds burns and collects, which read the balance less
+    ///      Escrow seniority (decision C7) binds burns, which read the balance less
     ///      totalEscrowed, and not fills: the exchange holds an unlimited USDC allowance from
     ///      initialize(), so a fill can spend escrowed USDC. The refund therefore merges the
     ///      vault's free pairs before it transfers (FR-DU2U, ADR-DU2V), so a reclaim never waits
@@ -1768,7 +1539,7 @@ contract LPVault {
     ///
     ///      Same deadline rule as depositForIntent: inclusive, with Polygon's ±15s tolerance
     ///      (CLAUDE.md checklist item 12). No phase check and no pause check (FR-9OYO).
-    ///      Escrow seniority (decision C7) binds burns and collects and not fills, because the
+    ///      Escrow seniority (decision C7) binds burns and not fills, because the
     ///      exchange's unlimited USDC allowance can spend escrowed USDC; the shared refund
     ///      merges the vault's free pairs before it transfers (FR-DU2U, ADR-DU2V), so this
     ///      path never waits for a keeper to merge either.
@@ -1829,70 +1600,6 @@ contract LPVault {
     }
 
     // ──────────────────────────────────────────────
-    // Fee notification (FEAT-TOGR, UC-TOGS)
-    // ──────────────────────────────────────────────
-
-    // SC-TOGT, SC-TOGU, SC-TOGV, SC-TOGW, SC-TOGX, SC-TOGY, SC-ASNK: operator-gated fee accumulator
-    // update that takes the USDC it credits from the caller (FR-ASNL, FR-ASNM)
-    /// @notice Increments the global fee accumulator by the Q128-scaled share of new fee revenue,
-    ///         and takes that revenue from the caller in the same call.
-    /// @dev OPERATOR TRUST ASSUMPTION: The Operator funds every report in the same call. The
-    ///      vault takes `amount` USDC from the Operator wallet with transferFrom, so no credit
-    ///      exists without the USDC behind it, and a report the Operator cannot fund reverts
-    ///      `TransferFailed`. The Operator can still under-report: the vault cannot know what
-    ///      the exchange earned off-chain, so a report smaller than the true income, or no
-    ///      report at all, stays inside the trust model. Operational need: each Operator
-    ///      wallet holds a standing USDC approval to each vault it reports to (see
-    ///      DEPLOYMENT.md). No solvency assertion runs here (decision C6): the report is a
-    ///      receipt, not a gate. Decision C19, ADR-ASNR in FEAT-TOGR. Every report also raises
-    ///      the fee total that every payout's USDC ratio divides by (FEAT-9BQZ FR-9BRA), so an
-    ///      over-report lowers the ratio for everyone alike, never for one claimant.
-    ///
-    ///      MEV analysis: a report raises feeGrowthGlobalX128 and the fee total for every
-    ///      in-range claimant alike, in proportion to liquidity, and the Operator already
-    ///      chooses the amount and funds it, so the ordering of the call gives nobody an edge:
-    ///      a position minted in the same block before the report earns its share from its
-    ///      own feeGrowthInsideLastX128 snapshot, and one minted after it earns nothing from
-    ///      it (CLAUDE.md checklist item 13). No price is read and no tick moves.
-    ///
-    ///      Checks-effects-interactions (NFR-ASNN): the phase, amount, and liquidity checks
-    ///      run first, the accumulator write second, and the USDC pull last, under the
-    ///      inline reentrancy guard because the pull is an external call.
-    /// @param amount The amount of USDC fee revenue to distribute across active liquidity
-    function notifyFees(uint256 amount) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
-        // A frozen vault takes no new trading work; its exits stay open (FR-JXQT)
-        if (phase == 3) revert VaultCancelled();
-
-        // Zero-amount guard: notifying zero fees wastes gas and signals a caller bug
-        if (amount == 0) revert ZeroAmount();
-
-        // Safety guard: distributing fees against zero liquidity would lock them
-        // permanently with no LP able to claim (CLAUDE.md security checklist item 9)
-        uint128 activeL = activeLiquidity;
-        if (activeL == 0) revert NoActiveLiquidity();
-
-        // Increment the global fee accumulator using overflow-safe Q128 arithmetic.
-        // mulDiv computes (amount * 2^128) / activeLiquidity with full intermediate
-        // precision, truncating downward. The dust is economically negligible
-        // (< 1/2^128 USDC per unit of liquidity per call).
-        uint256 growth = _mulDiv(amount, Q128, uint256(activeL));
-        feeGrowthGlobalX128 += growth;
-
-        // The ledger: the in-range positions' fee claims grow by exactly growth x activeLiquidity,
-        // so the credit is exact and the mulDiv dust stays outside every total (FR-9BRA). The
-        // checked product bounds a report at 2^128 base units (NFR-COEV).
-        totalFeesOwedX128 += growth * uint256(activeL);
-
-        // --- Interactions (external call last, per checks-effects-interactions) ---
-
-        // Take the USDC that the credit above represents. A failed pull reverts the whole
-        // call, so the accumulator never records income the vault did not receive (C19).
-        _safeTransferFrom(usdc, msg.sender, address(this), amount);
-
-        emit FeesNotified(amount, feeGrowthGlobalX128);
-    }
-
-    // ──────────────────────────────────────────────
     // Operator liveness (FEAT-JXQO, UC-JXQW)
     // ──────────────────────────────────────────────
 
@@ -1907,7 +1614,7 @@ contract LPVault {
     ///      This is the refresh path while the vault is paused or wound down, where
     ///      `updateTick` reverts, and for an Operator with no report to send. On an Active
     ///      market the keeper's `updateTick` with the current tick refreshes the heartbeat
-    ///      itself (ADR-9J43 in FEAT-TVS0); `notifyFees` reverts ZeroAmount on a quiet market.
+    ///      itself (ADR-9J43 in FEAT-TVS0).
     ///
     ///      Deliberately not gated by `whenNotPaused` and not gated to the Active phase: a
     ///      pause is an Admin decision about trading, and a wind-down is an Oracle decision
@@ -1927,10 +1634,11 @@ contract LPVault {
     /// @notice Synchronizes the vault's price tick with the off-chain CLOB mid-price.
     /// @dev OPERATOR TRUST ASSUMPTION: The Operator can report any tick value. LPs
     ///      trust that the Operator reports the CLOB mid-price accurately. A malicious
-    ///      or compromised Operator could report a false tick, causing incorrect fee
-    ///      distribution between positions. This matches the ProphetCTFExchange trust model.
-    ///      Crosses every initialized tick between currentTick and newTick, flipping
-    ///      feeGrowthOutsideX128 and applying liquidityNet to activeLiquidity.
+    ///      or compromised Operator could report a false tick, which misvalues every claim's
+    ///      split between USDC and tokens and misclassifies which positions are in range. This
+    ///      matches the ProphetCTFExchange trust model.
+    ///      Crosses every initialized tick between currentTick and newTick, applying
+    ///      liquidityNet to activeLiquidity.
     ///      A call with the current tick refreshes only the heartbeat and returns; while
     ///      the vault is paused or wound down the keeper calls `heartbeat()` instead.
     ///      The bitmap search reads only the words between currentTick and newTick
@@ -1938,7 +1646,7 @@ contract LPVault {
     ///      where any LP initialized a tick. A large jump across empty words still reads one
     ///      word per 256 ticks, so the Operator chunks a very large jump as it chunks
     ///      crossings (ADR-TVUW).
-    ///      A reported tick also moves the four totals of the solvency ledger (FEAT-9BQZ,
+    ///      A reported tick also moves the three totals of the solvency ledger (FEAT-9BQZ,
     ///      UC-9BR1) for every segment the move traverses, with the liquidity split as it stood
     ///      in that segment, and an interior mint tick is crossed like a boundary (ADR-COEW), so
     ///      those totals set every payout's ratio.
@@ -2013,10 +1721,10 @@ contract LPVault {
     // Position merge (FEAT-K1M2, UC-K1M8)
     // ──────────────────────────────────────────────
 
-    // SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC: operator-gated position merge
+    // SC-K1M9, SC-K1MA, SC-K1MB: operator-gated position merge
     /// @notice Combines two or more positions with identical owner, tickLower, tickUpper,
     ///         and mintTick into a single survivor position (positionIds[0]), preserving
-    ///         total liquidity and rolling up accrued fees. This joins LP position records;
+    ///         total liquidity. This joins LP position records;
     ///         it is not the complete-set merge of outcome tokens into USDC.
     /// @dev OPERATOR TRUST ASSUMPTION: The Operator can merge any positions that share
     ///      the same owner, range, and mint tick, and it can name each position only once:
@@ -2025,23 +1733,20 @@ contract LPVault {
     ///      claim holds under decision C26. LPs must trust that the Operator only merges
     ///      positions for legitimate housekeeping (reducing storage and gas costs for
     ///      overlapping positions).
-    ///      No USDC moves during merge — uncollected fees from consumed positions are
-    ///      rolled into the survivor's tokensOwed. Tick state (liquidityGross,
-    ///      liquidityNet, noLiquidityNet) is unchanged since total liquidity on the range and
-    ///      on the NO sub-range stays the same. The merge writes one total of the solvency
-    ///      ledger, the fee dust its floors drop (FEAT-9BQZ FR-9BRH), and never a principal
-    ///      total: the claim is linear in liquidity and every merged position shares the
-    ///      range and the mint tick.
+    ///      No USDC moves during merge. Tick state (liquidityGross, liquidityNet,
+    ///      noLiquidityNet) is unchanged since total liquidity on the range and on the NO
+    ///      sub-range stays the same. The merge writes no total of the solvency ledger
+    ///      (FEAT-9BQZ FR-9BRH): the claim is linear in liquidity and every merged position
+    ///      shares the range and the mint tick.
     ///      A burned record never merges: the survivor's and every consumed record's owner is
     ///      checked before any liquidity is read, because a deleted record reads owner zero,
     ///      range [0, 0), and mint tick 0, so two of them would pass every equality check
     ///      against each other (FR-DU2X, finding CV-03 of audits/code-validation-round-1.md).
     ///
-    ///      MEV analysis: the merge moves no asset and reads no price. Its one ledger write is
-    ///      the dust debit, at most one unit of the fee total per merged position (FR-9BRH),
+    ///      MEV analysis: the merge moves no asset, reads no price, and writes no ledger total,
     ///      and the Operator controls the timing, so no ordering of this call against a mint,
-    ///      a burn, a collect, or a tick report changes what any claimant is owed beyond that
-    ///      dust (CLAUDE.md checklist item 13).
+    ///      a burn, or a tick report changes what any claimant is owed (CLAUDE.md checklist
+    ///      item 13).
     /// @param positionIds Array of distinct position IDs to merge — must have >= 2 elements,
     ///        all sharing the same owner, tickLower, tickUpper, and mintTick
     function mergePositions(uint256[] calldata positionIds)
@@ -2080,36 +1785,8 @@ contract LPVault {
         int24 tickUpper = survivor.tickUpper;
         int24 mintTick = survivor.mintTick;
 
-        // Compute current feeGrowthInside for this range (same formula as collect)
-        uint256 feeGrowthInsideX128 = _computeFeeGrowthInside(tickLower, tickUpper);
-
-        // Compute uncollected fees for the survivor before updating its snapshot.
-        // unchecked: feeGrowthInsideX128 and feeGrowthInsideLastX128 both wrapped
-        // mod 2^256 by the same offset (see _computeFeeGrowthInside), so this
-        // subtraction must wrap too: it cancels the offset to the true small delta,
-        // mirroring Uniswap v3's fee-growth accounting. That subtraction is the
-        // load-bearing part. On a correct delta, liquidity * delta fits in 256 bits
-        // for every reachable value, so _mulDiv would return the same number; on a
-        // wrong delta both forms return a wrong number. The product stays in this
-        // block and never goes through _mulDiv by convention, so every fee site
-        // keeps one shape (ADR-8L1F in FEAT-T7AF, CLAUDE.md checklist item 3).
-        // The floors below drop feeDustX128 from the positions' scaled fee claims; the ledger
-        // debits it so the fee total still equals the survivor's scaled claim (FR-9BRH). Only the
-        // wraparound product stays in the block; the floor and the remainder are derived outside.
-        uint256 survivorFees;
-        uint256 feeDustX128;
-        {
-            uint256 x;
-            unchecked {
-                x = uint256(survivor.liquidity) * (feeGrowthInsideX128 - survivor.feeGrowthInsideLastX128);
-            }
-            survivorFees = x / Q128;
-            feeDustX128 = x % Q128;
-        }
-
         // Start accumulation from the survivor's current state
         uint128 totalLiquidity = survivor.liquidity;
-        uint256 totalOwed = survivor.tokensOwed + survivorFees;
 
         // Process each consumed position: validate, accumulate, then zero
         for (uint256 i = 1; i < positionIds.length; i++) {
@@ -2125,36 +1802,15 @@ contract LPVault {
             // SC-AFPR, FR-AFPT: two mint ticks hold two asset mixes under the claim model (C26)
             if (consumed.mintTick != mintTick) revert MintTickMismatch();
 
-            // Compute uncollected fees for the consumed position.
-            // unchecked: same wraparound-cancellation as survivorFees above, and the
-            // same one-shape convention keeps this product out of _mulDiv.
-            uint256 consumedFees;
-            {
-                uint256 x;
-                unchecked {
-                    x = uint256(consumed.liquidity) * (feeGrowthInsideX128 - consumed.feeGrowthInsideLastX128);
-                }
-                consumedFees = x / Q128;
-                feeDustX128 += x % Q128;
-            }
-
-            // Accumulate liquidity and fees
+            // Accumulate liquidity
             totalLiquidity += consumed.liquidity;
-            totalOwed += consumed.tokensOwed + consumedFees;
 
-            // Zero the consumed position so it can no longer accrue or claim
+            // Zero the consumed position so it can no longer claim
             consumed.liquidity = 0;
-            consumed.tokensOwed = 0;
-            consumed.feeGrowthInsideLastX128 = 0;
         }
 
-        // Update the survivor with accumulated totals and a fresh fee snapshot
+        // Update the survivor with the accumulated liquidity
         survivor.liquidity = totalLiquidity;
-        survivor.tokensOwed = totalOwed;
-        survivor.feeGrowthInsideLastX128 = feeGrowthInsideX128;
-
-        // Checked: a ledger bug on the Operator path reverts the merge (NFR-9BRT)
-        totalFeesOwedX128 -= feeDustX128;
 
         emit PositionsMerged(positionIds, positionIds[0]);
     }
@@ -2191,8 +1847,8 @@ contract LPVault {
     ///      drift-free fills the free pairs are exactly the round-trip pairs; under drift a pair
     ///      below the owed totals stays unmerged and is paid in kind at each token's ratio. The
     ///      zero-balance guard is correct because a free count is at most the balance, so a zero
-    ///      balance on either side gives zero free pairs; it exists so the no-pair collect skips
-    ///      the two ledger reads and stays under its gas bound (NFR-U07P in FEAT-U079).
+    ///      balance on either side gives zero free pairs; it exists so the public merge and the
+    ///      escrow refund skip the two ledger reads when either balance is zero.
     function _freePairs(uint256 yes, uint256 no) internal view returns (uint256) {
         if (yes == 0 || no == 0) return 0;
         uint256 yesOwed = totalYesOwed();
@@ -2228,7 +1884,7 @@ contract LPVault {
 
     /// @dev Merges `amount` pairs, and returns without a call when there are none, so a payout
     ///      can run it unconditionally (FR-6HC0). The caller passes the free pairs from
-    ///      _freePairs. No modifier: _burn and _collect call it inside their guarded entry
+    ///      _freePairs. No modifier: _burn and _refundEscrow call it inside their guarded entry
     ///      points, as their first interaction. A zero-amount mergePositions would not revert,
     ///      but it costs gas and emits an event.
     function _mergeCompleteSets(uint256 amount) internal {
@@ -2255,7 +1911,7 @@ contract LPVault {
     /// @notice Redeems the vault's whole YES and NO balances through the ConditionalTokens contract
     ///         into USDC held by the vault, after the result of the vault's condition is reported.
     ///         The first successful call copies the payout into the vault, and every later burn
-    ///         and collect pays its token leg in USDC at that payout (the switch, ADR-6HCK).
+    ///         pays its token leg in USDC at that payout (the switch, ADR-6HCK).
     /// @dev Oracle-only, because the switch changes the ratio shape for every LP. Reverts while
     ///      the vault is Active (FR-6HC7): updateTick and mintPositionFor revert in WindDown and
     ///      Cancelled, so once the switch is on no tick report can move value between claims that
@@ -2310,8 +1966,8 @@ contract LPVault {
 
     /// @dev Redeems both balances, and returns without a call when both are zero, so a payout
     ///      can run it unconditionally (FR-6HC7). The caller passes the balances from
-    ///      _tokenBalances. No modifier: redeemOutcomeTokens, _burn, and _collect call it inside
-    ///      their guarded entry points, as their first interaction. The event's usdcAmount is
+    ///      _tokenBalances. No modifier: redeemOutcomeTokens and _burn call it inside their
+    ///      guarded entry points, as their first interaction. The event's usdcAmount is
     ///      what redeemPositions pays, reproduced by _atPayout, so no balance read follows the call.
     function _redeemOutcomeTokens(uint256 yes, uint256 no) internal {
         if (yes == 0 && no == 0) return;
@@ -2359,12 +2015,7 @@ contract LPVault {
         return totalNoOwedScaled / LIQUIDITY_PRECISION;
     }
 
-    /// @notice The fees the vault owes to every live position, in USDC units.
-    function totalFeesOwed() public view returns (uint256) {
-        return totalFeesOwedX128 / Q128;
-    }
-
-    // SC-9BSC through SC-9BSG, SC-COET, SC-COEU: one ratio per asset, applied to every payout
+    // SC-9BSC through SC-9BSG, SC-COEU: one ratio per asset, applied to every payout
     /// @dev owed x min(1, held / totalOwed), rounded down, and never above held (FR-9BRM to
     ///      FR-9BRR, NFR-9BRW). The denominators are the truncated getters read before the
     ///      debit: the sum of every per-position floor never exceeds the floor of the sum, so the
@@ -2376,7 +2027,7 @@ contract LPVault {
         if (paid > held) paid = held;
     }
 
-    /// @dev A ledger debit that saturates at zero, for _burn and _collect only: an LP exit never
+    /// @dev A ledger debit that saturates at zero, for _burn only: an LP exit never
     ///      reverts on a ledger write (NFR-9BRT, ADR-COEN). The Operator paths use checked
     ///      arithmetic instead, so a ledger bug surfaces there.
     function _saturatingSub(uint256 total, uint256 amount) internal pure returns (uint256) {
@@ -2419,7 +2070,7 @@ contract LPVault {
     // ──────────────────────────────────────────────
 
     /// @dev The one check every relayed LP path calls (the deposit, the relayed reclaim, and the
-    ///      later relayed burn and collect). Builds the EIP-712 digest, recovers the signer, and
+    ///      later relayed burn). Builds the EIP-712 digest, recovers the signer, and
     ///      requires that the Safe the Poly Safe factory derives from that signer equals `safe`.
     ///      A Safe has no private key, so ecrecover can never return a Safe address; the owner key
     ///      signs, and the derivation binds it to its Safe, exactly as the exchange checks orders.
@@ -2489,30 +2140,15 @@ contract LPVault {
     // Internal: tick management
     // ──────────────────────────────────────────────
 
-    /// @dev Initializes a tick's feeGrowthOutsideX128 on first use (liquidityGross == 0).
-    ///      Convention: feeGrowthOutside = feeGrowthGlobal if tick <= currentTick, else 0.
-    ///      This ensures that feeGrowthInside for any new position spanning this tick
-    ///      starts at the correct value — the position won't claim retroactive fees.
-    function _initializeTick(int24 tick) internal {
-        if (ticks[tick].liquidityGross == 0) {
-            // Tick below or at currentTick: all past fees are "outside" this tick
-            if (tick <= currentTick) {
-                ticks[tick].feeGrowthOutsideX128 = feeGrowthGlobalX128;
-            }
-            // Tick above currentTick: feeGrowthOutside stays 0 (storage default)
-
-            // Register this tick in the bitmap so updateTick can locate it in O(1)
-            _setTickBitmapBit(tick);
-        }
-    }
-
-    /// @dev Adds one position's liquidity to a tick's reference count, initializing the tick on
-    ///      the first reference. One place for the rule that a set bitmap bit means liquidity
-    ///      behind it (CLAUDE.md checklist item 10), for the boundary ticks and for an interior
-    ///      mint tick alike (ADR-COEW).
+    /// @dev Adds one position's liquidity to a tick's reference count, and sets the tick's bitmap
+    ///      bit on the first reference so updateTick can locate it in O(1). One place for the rule
+    ///      that a set bitmap bit means liquidity behind it (CLAUDE.md checklist item 10), for the
+    ///      boundary ticks and for an interior mint tick alike (ADR-COEW); _removeTickReference is
+    ///      its exact inverse.
     function _addTickReference(int24 tick, uint128 liquidity) internal {
-        _initializeTick(tick);
-        ticks[tick].liquidityGross += liquidity;
+        TickInfo storage info = ticks[tick];
+        if (info.liquidityGross == 0) _setTickBitmapBit(tick);
+        info.liquidityGross += liquidity;
     }
 
     /// @dev The exact inverse of _addTickReference: removes the liquidity and deinitializes the
@@ -2552,58 +2188,15 @@ contract LPVault {
         if (mintTick != tickLower) _removeTickReference(mintTick, liquidity);
     }
 
-    /// @dev Computes the fee growth that occurred inside [tickLower, tickUpper) since
-    ///      the vault's inception. Used to snapshot feeGrowthInsideLastX128 at mint time.
-    ///      Formula: feeGrowthInside = global - below(tickLower) - above(tickUpper)
-    function _computeFeeGrowthInside(int24 tickLower, int24 tickUpper) internal view returns (uint256) {
-        // unchecked: a tick initialized late assumes all past growth sits on one
-        // side of it, so feeGrowthBelow + feeGrowthAbove can exceed
-        // feeGrowthGlobalX128 at the moment of subtraction. The result must wrap mod
-        // 2^256 -- mirroring Uniswap v3's fee-growth accounting -- and a position
-        // stores that wrapped value as its snapshot. A later inside - snapshot
-        // subtraction, also unchecked, cancels the offset to the true delta. This is
-        // the exception to CLAUDE.md checklist item 3 that ADR-8L1F (FEAT-T7AF)
-        // records, not an "overflow is provably impossible" situation.
-        unchecked {
-            // feeGrowthBelow: fees that grew while price was below tickLower
-            uint256 feeGrowthBelow;
-            if (currentTick >= tickLower) {
-                feeGrowthBelow = ticks[tickLower].feeGrowthOutsideX128;
-            } else {
-                feeGrowthBelow = feeGrowthGlobalX128 - ticks[tickLower].feeGrowthOutsideX128;
-            }
-
-            // feeGrowthAbove: fees that grew while price was above tickUpper
-            uint256 feeGrowthAbove;
-            if (currentTick < tickUpper) {
-                feeGrowthAbove = ticks[tickUpper].feeGrowthOutsideX128;
-            } else {
-                feeGrowthAbove = feeGrowthGlobalX128 - ticks[tickUpper].feeGrowthOutsideX128;
-            }
-
-            return feeGrowthGlobalX128 - feeGrowthBelow - feeGrowthAbove;
-        }
-    }
-
     // ──────────────────────────────────────────────
     // Internal: tick crossing (FEAT-TVS0)
     // ──────────────────────────────────────────────
 
-    /// @dev Crosses an initialized tick: flips feeGrowthOutsideX128 and adjusts
-    ///      activeLiquidity by the tick's liquidityNet and noSideLiquidity by its
-    ///      noLiquidityNet. The flip formula is the same in both directions; the net
-    ///      signs depend on direction. A pure mint tick has liquidityNet == 0 and a flip
-    ///      that no position reads, because no position bounds it (ADR-COEW).
+    /// @dev Crosses an initialized tick: adjusts activeLiquidity by the tick's liquidityNet and
+    ///      noSideLiquidity by its noLiquidityNet. The net signs depend on direction. A pure
+    ///      mint tick has liquidityNet == 0, so only its noLiquidityNet moves (ADR-COEW).
     function _crossTick(int24 tick, bool ltr) internal {
         TickInfo storage info = ticks[tick];
-
-        // Flip feeGrowthOutside: the "outside" side swaps relative to currentTick.
-        // unchecked: this subtraction is designed to wrap mod 2^256 -- mirroring
-        // Uniswap v3's audited fee-growth accounting -- not an "overflow is
-        // provably impossible" situation.
-        unchecked {
-            info.feeGrowthOutsideX128 = feeGrowthGlobalX128 - info.feeGrowthOutsideX128;
-        }
 
         // Apply liquidityNet: positive when moving L-to-R, negated when R-to-L
         int128 liquidityDelta = ltr ? info.liquidityNet : -info.liquidityNet;
@@ -2887,15 +2480,15 @@ contract LPVault {
     }
 
     /// @dev Push-direction ERC-20 transfer. Handles both bool-returning and
-    ///      non-bool-returning tokens (USDT semantics). Used by collect to pay
-    ///      out fees to the position owner.
+    ///      non-bool-returning tokens (USDT semantics). Used by the burn and the reclaim
+    ///      to pay USDC.
     function _safeTransfer(address token, address to, uint256 amount) internal {
         (bool success, bytes memory data) = token.call(abi.encodeWithSelector(0xa9059cbb, to, amount));
         if (!success || (data.length > 0 && !abi.decode(data, (bool)))) revert TransferFailed();
     }
 
     // ──────────────────────────────────────────────
-    // Internal: overflow-safe Q128 arithmetic (inlined per pattern policy)
+    // Internal: overflow-safe mulDiv (inlined per pattern policy)
     // ──────────────────────────────────────────────
 
     /// @dev Overflow-safe (a * b) / denominator with full 512-bit intermediate precision.

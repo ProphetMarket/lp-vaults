@@ -407,9 +407,9 @@ contract LPVaultFactory {
     // SC-REQB, SC-REQC: register a new operator with role-separation enforcement
     /// @notice Registers a new operator address.
     /// @dev OPERATOR TRUST ASSUMPTION: Operators can execute transactional functions
-    ///      (depositForIntent, mintPositionFor, reclaimDepositFor, notifyFees, updateTick,
+    ///      (depositForIntent, mintPositionFor, reclaimDepositFor, burnPositionFor, updateTick,
     ///      mergePositions, heartbeat). Users must trust that operators act honestly when
-    ///      escrowing deposits, crediting positions, and reporting fees.
+    ///      escrowing deposits, crediting positions, relaying exits, and reporting the tick.
     /// @param operator_ Address to register as operator — must not be the current oracle
     function addOperator(address operator_) external onlyAdmin {
         // Role separation: oracle and operator must be distinct wallets
