@@ -3,7 +3,7 @@ id: UC-7G41
 name: Burn Position
 feature: FEAT-7G40
 status: implemented
-version: 6
+version: 7
 actor: LP
 ---
 
@@ -469,5 +469,33 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 90000000)` emitted
 - `TransferSingle` from the ConditionalTokens contract as the last external call
 - No `redeemPositions` call, no `OutcomeTokensRedeemed`
+
+---
+
+### SC-DYNJ: Burn inside the report window takes its share of the cut and leaves the fill's tokens
+
+**Given:**
+- Case A: the Safe owns the position of SC-7G44's setup (300 USDC over `[5500, 6500)` minted at 6000), the only live claim
+- Case B: a second Safe also owns 300 USDC over `[5000, 6200)` minted at 6000 (`liquidity = 2.5e23`, 0.25 tokens per tick)
+- In both cases the keeper's orders filled the move from 6000 to 5700 at model prices, so the fill's USDC left the vault through the exchange's allowance and its YES arrived through the receiver hook: 52,645,500 units and 90 YES in case A, 96,516,750 units and 165 YES in case B
+- No `updateTick` was called, so `currentTick` is 6000 and the ledger owes USDC only
+
+**Steps:**
+1. The first Safe reads `totalYesOwed()` (0) against the vault's YES balance: the balance above the owed total is the unreported fill
+2. The first Safe calls `burnPosition` for its position
+3. System values the claim at 6000 (300 USDC, no band), pays 300 USDC times the USDC ratio, debits the full claim, and transfers no token
+4. Case B only: the Operator reports 5700, and the second Safe calls `burnPosition`
+
+**Outcomes:**
+- Case A: the Safe receives 247,354,500 USDC units and no token, the vault holds 90,000,000 YES and no USDC above `totalEscrowed`, and every ledger total reads zero
+- Case B: the first Safe receives 251,741,625 units and no token (its cut of 48,258,375 is less than its own fill's 52,645,500); after the report the second claim is owed 256,128,750 units plus 75 YES; the second Safe receives 251,741,625 units plus 75 YES, so the stayer takes the 4,387,125 units the leaver's cut did not cover; the vault holds 90,000,000 YES and no USDC above escrow, and every total reads zero
+- In both cases the leftover YES belong to no claim and stay until the switch (decision C8, finding CV-08 of `audits/code-validation-round-1.md`, ADR-DYNK)
+
+**Side Effects:**
+- Case A: `PositionBurned(positionId, safe, 300000000, 0, 247354500, 0, 0, 0)` emitted, so an indexer sees `paid < owed`
+- Case A: no `TransferSingle` from the vault, and no `CompleteSetsMerged`, because the vault holds no NO
+- Case B: `PositionBurned(positionA, safeA, 300000000, 0, 251741625, 0, 0, 0)`, then `TickUpdated(6000, 5700, 1)` (the report crosses the second claim's interior mint tick), then `PositionBurned(positionB, safeB, 256128750, 0, 251741625, yesTokenId, 75000000, 75000000)`
+- `totalUsdcOwedScaled` storage: debited by the full scaled claim at each burn
+- No `updateTick` before the first burn in either case
 
 ---
