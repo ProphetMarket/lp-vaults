@@ -528,11 +528,6 @@ contract LPVault {
         _;
     }
 
-    modifier onlyFactory() {
-        if (msg.sender != factory) revert NotFactory();
-        _;
-    }
-
     /// @dev The three role modifiers and nonReentrant call an internal function that holds the
     ///      old modifier body, the OpenZeppelin Ownable._checkOwner and
     ///      ReentrancyGuard._nonReentrantBefore shape, because the compiler copies a modifier's
@@ -637,7 +632,9 @@ contract LPVault {
     /// @notice Initializes a freshly-deployed vault clone with per-market configuration.
     /// @dev Called exactly once by LPVaultFactory.createVault(). The factory_ param
     ///      must match msg.sender — defense-in-depth beyond the one-shot initializer.
-    ///      Role state (operators, oracle, admins) is NOT copied from the factory.
+    ///      The check is inline, not a modifier: `factory` is not yet stored when a clone
+    ///      is initialized, so a modifier that read it would compare against the zero
+    ///      address (CLAUDE.md checklist item 7). Role state (operators, oracle, admins) is NOT copied from the factory.
     ///      The vault reads role state from the factory at call time via ILPVaultFactory.
     ///      No identity check runs here: only the factory can call initialize(), and the
     ///      factory verifies conditionId, yesTokenId, and noTokenId before it deploys the clone.
@@ -673,7 +670,7 @@ contract LPVault {
         // Factory guard: caller must be the factory that deployed this clone
         if (msg.sender != factory_) revert NotFactory();
 
-        // Store factory address for auth delegation and onlyFactory checks
+        // Store factory address for auth delegation
         factory = factory_;
 
         // Store per-vault configuration
@@ -788,12 +785,10 @@ contract LPVault {
     ///      this vault's assets through the exchange. The vault checks WHO signed, never WHAT
     ///      was signed: there is no cap on size, no price band, no side restriction, and no
     ///      per-market policy, so the Operator's order sizes and prices are trusted. LPs are
-    ///      trusting Operators not to sign orders that trade against their interest. The
-    ///      per-market deposit cap in Part 6 of audits/audit-fixes-ranged.md is the economic
-    ///      bound on what a compromised Operator key can trade. This does not widen the blast
-    ///      radius: the exchange already holds the USDC and ERC-1155 approvals over this vault
-    ///      that initialize() granted (CLAUDE.md checklist item 11), and this function is what
-    ///      makes those approvals reachable (NFR-C0E5).
+    ///      trusting Operators not to sign orders that trade against their interest. This does
+    ///      not widen the blast radius: the exchange already holds the USDC and ERC-1155
+    ///      approvals over this vault that initialize() granted (CLAUDE.md checklist item 11),
+    ///      and this function is what makes those approvals reachable (NFR-C0E5).
     ///
     ///      MEV analysis: a view that moves no value and records nothing, so there is no
     ///      ordering advantage to extract from calling it. The recovered signer is the
@@ -1723,6 +1718,12 @@ contract LPVault {
     ///      a valid signature never proves ownership of an intentId (ADR-45IC).
     ///      A mint and a reclaim of one intentId share usedIntents on purpose, so exactly one of
     ///      them can happen (ADR-JAIY).
+    ///      Escrow seniority (decision C7) binds burns and collects, which read the balance less
+    ///      totalEscrowed, and not fills: the exchange holds an unlimited USDC allowance from
+    ///      initialize(), so a fill can spend escrowed USDC. The refund therefore merges the
+    ///      vault's free pairs before it transfers (FR-DU2U, ADR-DU2V), so a reclaim never waits
+    ///      for a keeper to merge; the keeper keeps its quoted size below the vault's USDC
+    ///      balance minus totalEscrowed (finding CV-06 of audits/code-validation-round-1.md).
     /// @param intentId The escrowed intent to refund
     function reclaimDeposit(bytes32 intentId) external nonReentrant {
         // --- Checks ---
@@ -1756,6 +1757,10 @@ contract LPVault {
     ///
     ///      Same deadline rule as depositForIntent: inclusive, with Polygon's ±15s tolerance
     ///      (CLAUDE.md checklist item 12). No phase check and no pause check (FR-9OYO).
+    ///      Escrow seniority (decision C7) binds burns and collects and not fills, because the
+    ///      exchange's unlimited USDC allowance can spend escrowed USDC; the shared refund
+    ///      merges the vault's free pairs before it transfers (FR-DU2U, ADR-DU2V), so this
+    ///      path never waits for a keeper to merge either.
     /// @param lp The LP's Safe — must be the escrow's recorded depositor
     /// @param intentId The escrowed intent to refund
     /// @param deadline Last block.timestamp at which this reclaim is accepted
@@ -1787,7 +1792,18 @@ contract LPVault {
 
     /// @dev One body for both reclaim entry points. Settles the record before the transfer
     ///      (NFR-JAIW), and pays the recorded Safe the recorded amount, never a caller value.
+    ///      Merges the vault's free pairs first (FR-DU2U, ADR-DU2V), the same _freePairs and
+    ///      _mergeCompleteSets every payout runs (FEAT-6HBN ADR-DFE2), because a fill can spend
+    ///      escrowed USDC through the exchange's allowance and the refund must not wait for a
+    ///      keeper to merge (finding CV-06). The pairs are read before the effects, as in every
+    ///      payout; a reclaim changes no owed total, so the number is the same either way. The
+    ///      amount paid is the recorded amount, whatever the merge produced.
     function _refundEscrow(bytes32 intentId, PendingDeposit memory escrow) internal {
+        // --- Reads ---
+
+        (uint256 yes, uint256 no) = _tokenBalances();
+        uint256 pairs = _freePairs(yes, no);
+
         // --- Effects ---
 
         usedIntents[intentId] = true;
@@ -1796,6 +1812,7 @@ contract LPVault {
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
+        _mergeCompleteSets(pairs);
         _safeTransfer(usdc, escrow.lp, escrow.amount);
         emit DepositReclaimed(intentId, escrow.lp, escrow.amount);
     }
@@ -1819,6 +1836,13 @@ contract LPVault {
     ///      receipt, not a gate. Decision C19, ADR-ASNR in FEAT-TOGR. Every report also raises
     ///      the fee total that every payout's USDC ratio divides by (FEAT-9BQZ FR-9BRA), so an
     ///      over-report lowers the ratio for everyone alike, never for one claimant.
+    ///
+    ///      MEV analysis: a report raises feeGrowthGlobalX128 and the fee total for every
+    ///      in-range claimant alike, in proportion to liquidity, and the Operator already
+    ///      chooses the amount and funds it, so the ordering of the call gives nobody an edge:
+    ///      a position minted in the same block before the report earns its share from its
+    ///      own feeGrowthInsideLastX128 snapshot, and one minted after it earns nothing from
+    ///      it (CLAUDE.md checklist item 13). No price is read and no tick moves.
     ///
     ///      Checks-effects-interactions (NFR-ASNN): the phase, amount, and liquidity checks
     ///      run first, the accumulator write second, and the USDC pull last, under the
@@ -1997,6 +2021,16 @@ contract LPVault {
     ///      ledger, the fee dust its floors drop (FEAT-9BQZ FR-9BRH), and never a principal
     ///      total: the claim is linear in liquidity and every merged position shares the
     ///      range and the mint tick.
+    ///      A burned record never merges: the survivor's and every consumed record's owner is
+    ///      checked before any liquidity is read, because a deleted record reads owner zero,
+    ///      range [0, 0), and mint tick 0, so two of them would pass every equality check
+    ///      against each other (FR-DU2X, finding CV-03 of audits/code-validation-round-1.md).
+    ///
+    ///      MEV analysis: the merge moves no asset and reads no price. Its one ledger write is
+    ///      the dust debit, at most one unit of the fee total per merged position (FR-9BRH),
+    ///      and the Operator controls the timing, so no ordering of this call against a mint,
+    ///      a burn, a collect, or a tick report changes what any claimant is owed beyond that
+    ///      dust (CLAUDE.md checklist item 13).
     /// @param positionIds Array of distinct position IDs to merge — must have >= 2 elements,
     ///        all sharing the same owner, tickLower, tickUpper, and mintTick
     function mergePositions(uint256[] calldata positionIds)
@@ -2026,6 +2060,11 @@ contract LPVault {
         // Load the survivor (first position in the array)
         Position storage survivor = positions[positionIds[0]];
         address ownerAddr = survivor.owner;
+
+        // SC-DU2W, FR-DU2X: a burned record reads owner zero and would pass every equality
+        // check against another burned record (finding CV-03)
+        if (ownerAddr == address(0)) revert PositionNotFound();
+
         int24 tickLower = survivor.tickLower;
         int24 tickUpper = survivor.tickUpper;
         int24 mintTick = survivor.mintTick;
@@ -2064,6 +2103,9 @@ contract LPVault {
         // Process each consumed position: validate, accumulate, then zero
         for (uint256 i = 1; i < positionIds.length; i++) {
             Position storage consumed = positions[positionIds[i]];
+
+            // SC-DU2W, FR-DU2X: a burned record never merges (finding CV-03)
+            if (consumed.owner == address(0)) revert PositionNotFound();
 
             // All positions must share the same owner and tick range
             if (consumed.owner != ownerAddr || consumed.tickLower != tickLower || consumed.tickUpper != tickUpper) {

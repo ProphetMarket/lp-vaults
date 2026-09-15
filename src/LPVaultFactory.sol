@@ -107,6 +107,7 @@ contract LPVaultFactory {
     error RoleSeparation();
     error DuplicateMarket();
     error ZeroFloor();
+    error InvalidTickSpacing();
     error CloneDeployFailed();
     error NotPendingAdmin();
     error ZeroAddress();
@@ -226,13 +227,13 @@ contract LPVaultFactory {
     // Vault lifecycle
     // ──────────────────────────────────────────────
 
-    // SC-REQ6, SC-REQ7, SC-REQ8, SC-RG74, SC-6HBV, SC-6HBW, SC-6HBX: create and initialize a new vault clone
+    // SC-REQ6, SC-REQ7, SC-REQ8, SC-RG74, SC-DU2Y, SC-6HBV, SC-6HBW, SC-6HBX: create and initialize a new vault clone
     /// @notice Deploys an EIP-1167 minimal-proxy clone of the LPVault implementation,
     ///         initializes it for the given market, and registers it in vaultForMarket.
     /// @dev The outcome-token identity is verified before the clone exists, because a clone can
     ///      never correct its identity after initialize() (ADR-6HBU).
     /// @param marketId_ Unique market identifier — must not already have a vault
-    /// @param tickSpacing_ Minimum tick increment for concentrated-liquidity positions
+    /// @param tickSpacing_ Minimum tick increment for concentrated-liquidity positions — must be > 0
     /// @param minimumFirstLiquidity_ Floor for the first mint — must be > 0
     /// @param conditionId_ ConditionalTokens condition ID of the market — a prepared 2-outcome condition
     /// @param yesTokenId_ Index set 1 (YES) position ID of (usdc, conditionId_)
@@ -248,6 +249,10 @@ contract LPVaultFactory {
     ) external onlyOracle returns (address vault) {
         // Enforce minimum first liquidity > 0
         if (minimumFirstLiquidity_ == 0) revert ZeroFloor();
+
+        // SC-DU2Y, FR-DU2Z: a zero spacing makes every deposit's alignment check divide by
+        // zero, and a negative one reads wrong in every document (finding CV-12)
+        if (tickSpacing_ <= 0) revert InvalidTickSpacing();
 
         // Prevent duplicate vaults for the same market
         if (vaultForMarket[marketId_] != address(0)) revert DuplicateMarket();

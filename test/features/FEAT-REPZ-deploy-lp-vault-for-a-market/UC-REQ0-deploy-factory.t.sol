@@ -13,7 +13,7 @@ import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
 // Test harnesses — expose modifier-gated entry points so the modifier
-// bodies (onlyAdmin, onlyOperator, onlyOracle, onlyFactory) are exercisable
+// bodies (onlyAdmin, onlyOperator, onlyOracle) are exercisable
 // in isolation. These are test-only; the real gated functions arrive in T-002/T-003.
 // ──────────────────────────────────────────────
 
@@ -48,7 +48,6 @@ contract LPVaultFactoryHarness is LPVaultFactory {
 }
 
 contract LPVaultHarness is LPVault {
-    function guardedByFactory() external onlyFactory {}
     function guardedByAdmin() external onlyAdmin {}
     function guardedByOperator() external onlyOperator {}
     function guardedByOracle() external onlyOracle {}
@@ -392,7 +391,7 @@ contract ImplementationNotInitializableTest is Test {
 
 // ──────────────────────────────────────────────
 // Modifier coverage: verify the exported modifiers (onlyAdmin, onlyOperator,
-// onlyOracle, onlyFactory) revert for unauthorized callers and pass for
+// onlyOracle) revert for unauthorized callers and pass for
 // authorized ones. These modifiers are in the slice's `provides` list.
 // ──────────────────────────────────────────────
 
@@ -459,7 +458,7 @@ contract FactoryModifierTest is LPVaultFixture {
     }
 }
 
-// What: Each Auth modifier on LPVault (plus onlyFactory) reverts with the
+// What: Each Auth modifier on LPVault reverts with the
 //       correct custom error for unauthorized callers. Tests run against
 //       a clone so the vault is in initialized state with a known registry.
 // Why:  The vault's modifiers are also exported (provides). A clone starts
@@ -467,7 +466,6 @@ contract FactoryModifierTest is LPVaultFixture {
 contract VaultModifierTest is LPVaultFixture {
     LPVaultHarness vault;
 
-    address factoryAddr;
     address admin = makeAddr("admin");
     address oracleAddr = makeAddr("oracle");
     address operatorAddr = makeAddr("operator");
@@ -508,18 +506,6 @@ contract VaultModifierTest is LPVaultFixture {
                 yesTokenId,
                 noTokenId
             );
-        factoryAddr = address(realFactory);
-    }
-
-    function test_onlyFactoryRevertsForNonFactory() public {
-        vm.prank(nobody);
-        vm.expectRevert(LPVault.NotFactory.selector);
-        vault.guardedByFactory();
-    }
-
-    function test_onlyFactoryPassesForFactory() public {
-        vm.prank(factoryAddr);
-        vault.guardedByFactory();
     }
 
     function test_onlyOracleRevertsForNonOracle() public {
