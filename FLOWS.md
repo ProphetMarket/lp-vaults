@@ -208,7 +208,7 @@ sequenceDiagram
 
 ### 2.4 Collect Fees (`collect`, `collectFor`)
 
-An LP withdraws their accrued trading fees from a position without removing the position itself. Two entry points: the Safe calls `collect(positionId)` itself, or the owner key signs a `CollectIntent` (with a nonce, because a collect repeats) and the Operator relays it through `collectFor`. Before it pays, the vault merges any YES and NO pairs it holds into USDC, and it pays the fees owed times the USDC ratio of the solvency ledger, the smaller of 1 and the USDC it holds above escrow over the principal and the fees it owes; the claim settles at that ratio, so nothing waits in `tokensOwed`.
+An LP withdraws their accrued trading fees from a position without removing the position itself. Two entry points: the Safe calls `collect(positionId)` itself, or the owner key signs a `CollectIntent` (with a nonce, because a collect repeats) and the Operator relays it through `collectFor`. Before it pays, the vault merges its free pairs, the YES and NO pairs above what the ledger owes in both tokens, into USDC, and it pays the fees owed times the USDC ratio of the solvency ledger, the smaller of 1 and the USDC it holds above escrow over the principal and the fees it owes; the claim settles at that ratio, so nothing waits in `tokensOwed`.
 
 ```mermaid
 sequenceDiagram
@@ -230,7 +230,8 @@ sequenceDiagram
     end
     Note right of Vault: feeGrowthInside = global - below(tL) - above(tU)
     Note right of Vault: owed = liquidity × (feeGrowthInside - feeGrowthInsideLast) ÷ 2^128<br/>+ position.tokensOwed
-    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO) — pairs = min
+    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
+    Note right of Vault: pairs = free pairs, min(YES − min(YES, totalYesOwed), NO − min(NO, totalNoOwed)), read before the debit
     Note right of Vault: paid = owed × min(1, (usdc.balanceOf(vault) + pairs − totalEscrowed) ÷ (totalUsdcOwed + totalFeesOwed))
     Note right of Vault: feeGrowthInsideLastX128 = feeGrowthInside<br/>tokensOwed = 0<br/>totalFeesOwedX128 −= the scaled fee claim
     Vault->>CTF: mergePositions(pairs) if pairs > 0
@@ -303,7 +304,7 @@ sequenceDiagram
 
 ### 2.7 Burn a Position (`burnPosition`, `burnPositionFor`)
 
-An LP closes a position and receives what its claim holds under the claim model (decision C26). Every level of the range starts as USDC. A level below the mint tick bought YES when the price fell through it; a level at or above the mint tick bought NO when the price rose through it. So the claim is USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick, plus the USDC that buying that token at each level's price did not spend, plus the accrued fees. The vault settles its tokens first (the merge of its pairs before the switch, the redemption of every token after the Oracle's `redeemOutcomeTokens`), and pays its share from the solvency ledger. Before the switch: each asset's owed amount times the smaller of 1 and what the vault holds over what it owes on that asset, USDC in one transfer and the token in kind. After the switch: the token leg is worth `tokenOwed × numerator ÷ denominator` USDC at the stored payout, one ratio values every leg, and the burn pays the principal, the fees, and the token leg's USDC as one prorated sum in one USDC transfer, with no ERC-1155 transfer. Rounded down, without a revert, and the full owed amount is debited, so every later claimant meets the same ratio. Two entry points: the Safe calls `burnPosition(positionId)` itself, in every phase and with no Operator, or the owner key signs a `BurnIntent` and the Operator relays it through `burnPositionFor`.
+An LP closes a position and receives what its claim holds under the claim model (decision C26). Every level of the range starts as USDC. A level below the mint tick bought YES when the price fell through it; a level at or above the mint tick bought NO when the price rose through it. So the claim is USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick, plus the USDC that buying that token at each level's price did not spend, plus the accrued fees. The vault settles its tokens first (the merge of its free pairs, the pairs above what the ledger owes in both tokens, before the switch, the redemption of every token after the Oracle's `redeemOutcomeTokens`), and pays its share from the solvency ledger. Before the switch: each asset's owed amount times the smaller of 1 and what the vault holds over what it owes on that asset, USDC in one transfer and the token in kind. After the switch: the token leg is worth `tokenOwed × numerator ÷ denominator` USDC at the stored payout, one ratio values every leg, and the burn pays the principal, the fees, and the token leg's USDC as one prorated sum in one USDC transfer, with no ERC-1155 transfer. Rounded down, without a revert, and the full owed amount is debited, so every later claimant meets the same ratio. Two entry points: the Safe calls `burnPosition(positionId)` itself, in every phase and with no Operator, or the owner key signs a `BurnIntent` and the Operator relays it through `burnPositionFor`.
 
 ```mermaid
 sequenceDiagram
@@ -328,7 +329,7 @@ sequenceDiagram
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
     Note right of Vault: read the stored payout (the switch)
     alt switch off
-        Note right of Vault: usdcPaid = (usdcOwed + fees) × min(1, (balance + pairs − totalEscrowed) ÷ (totalUsdcOwed + totalFeesOwed))<br/>tokenPaid = tokenOwed × min(1, (held − pairs) ÷ tokenTotal)
+        Note right of Vault: pairs = free pairs, min(YES − min(YES, totalYesOwed), NO − min(NO, totalNoOwed)), read before the debit<br/>usdcPaid = (usdcOwed + fees) × min(1, (balance + pairs − totalEscrowed) ÷ (totalUsdcOwed + totalFeesOwed))<br/>tokenPaid = tokenOwed × min(1, (held − pairs) ÷ tokenTotal)
     else switch on
         Note right of Vault: tokenUsdc = tokenOwed × numerator ÷ denominator<br/>ratio = min(1, (balance + tokens at the payout − totalEscrowed) ÷ (totalUsdcOwed + totalFeesOwed + token totals at the payout))<br/>usdcPaid = (usdcOwed + fees) × ratio, tokenPaid = (usdcOwed + fees + tokenUsdc) × ratio − usdcPaid
     end
@@ -352,7 +353,7 @@ sequenceDiagram
 
 ### 2.8 Merge Complete Sets (`mergeCompleteSets`)
 
-Any wallet turns the vault's matched YES and NO pairs into USDC held by the vault. A round trip through a level leaves one YES and one NO per token, worth exactly 1 USDC, and the Conditional Tokens contract turns a pair into USDC with no counterparty. The keeper merges on sight so an LP's exit does not pay for the merge; every burn and every paying collect merges first anyway.
+Any wallet turns the vault's free pairs, the YES and NO pairs above what the ledger owes in both tokens, into USDC held by the vault. A round trip through a level leaves one YES and one NO per token, worth exactly 1 USDC, and the Conditional Tokens contract turns a pair into USDC with no counterparty. A pair below what the ledger owes is a claim's band token and never merges, so one claim's YES is never netted against another claim's NO (finding CV-01 of `audits/code-validation-round-1.md`, R14). The keeper merges on sight so an LP's exit does not pay for the merge; every burn and every paying collect merges first anyway.
 
 ```mermaid
 sequenceDiagram
@@ -364,7 +365,8 @@ sequenceDiagram
     Caller->>Vault: mergeCompleteSets()
     Note right of Vault: No role, pause, phase, or heartbeat check
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
-    alt min(YES, NO) == 0
+    Note right of Vault: amount = min(YES − min(YES, totalYesOwed), NO − min(NO, totalNoOwed))
+    alt free pairs == 0
         Note right of Vault: return, no call, no event
     else amount > 0
         Vault->>CTF: mergePositions(usdc, 0, conditionId, [1, 2], amount)
@@ -373,7 +375,7 @@ sequenceDiagram
     end
 ```
 
-**When to call:** Whenever the vault holds pairs. The caller receives nothing, and a merge moves no value between parties, so the call needs no trusted caller. It never refreshes the Operator heartbeat.
+**When to call:** Whenever the vault holds free pairs. The caller receives nothing, and the merge changes no claim's token leg and no claim's ratio, so the call needs no trusted caller. It never refreshes the Operator heartbeat.
 
 ---
 

@@ -593,7 +593,7 @@ function collect(uint256 positionId) external nonReentrant
 
 **Actor:** LP's Safe (position owner)
 
-Withdraws accrued trading fees from a position without removing it, in every phase and while paused. Computes the fees since the last collect from the per-tick `feeGrowthOutside` accumulators, adds `tokensOwed` (rolled in from `mergePositions`), settles the vault's tokens (before the switch it merges the YES and NO pairs into USDC; after the Oracle's redemption it redeems every token the vault holds), and pays the amount owed times the USDC ratio of the solvency ledger: before the switch the smaller of 1 and the USDC the vault holds above `totalEscrowed` (the pairs counted) over `totalUsdcOwed() + totalFeesOwed()`; after it the same with every token, held and owed, valued at the stored payout on both sides, so one ratio covers every leg. Rounded down. The claim settles at that ratio, paid or not: `tokensOwed` reads zero afterwards and the ledger's fee total falls by the whole claim. A zero-owed collect reads no balance and settles nothing.
+Withdraws accrued trading fees from a position without removing it, in every phase and while paused. Computes the fees since the last collect from the per-tick `feeGrowthOutside` accumulators, adds `tokensOwed` (rolled in from `mergePositions`), settles the vault's tokens (before the switch it merges the free pairs, the YES and NO pairs above what the ledger owes in both tokens, into USDC; after the Oracle's redemption it redeems every token the vault holds), and pays the amount owed times the USDC ratio of the solvency ledger: before the switch the smaller of 1 and the USDC the vault holds above `totalEscrowed` (the free pairs counted) over `totalUsdcOwed() + totalFeesOwed()`; after it the same with every token, held and owed, valued at the stored payout on both sides, so one ratio covers every leg. Rounded down. The claim settles at that ratio, paid or not: `tokensOwed` reads zero afterwards and the ledger's fee total falls by the whole claim. A zero-owed collect reads no balance and settles nothing.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -613,14 +613,14 @@ sequenceDiagram
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
     Note right of Vault: read the stored payout (the switch)
     Vault->>USDC: balanceOf(vault)
-    Note right of Vault: switch off: paid = owed x min(1, (balance + pairs - totalEscrowed) / (totalUsdcOwed + totalFeesOwed))<br/>switch on: paid = owed x min(1, (balance + tokens at the payout - totalEscrowed) / (totalUsdcOwed + totalFeesOwed + token totals at the payout))
+    Note right of Vault: pairs = free pairs, min(YES - min(YES, totalYesOwed), NO - min(NO, totalNoOwed)), read before the debit<br/>switch off: paid = owed x min(1, (balance + pairs - totalEscrowed) / (totalUsdcOwed + totalFeesOwed))<br/>switch on: paid = owed x min(1, (balance + tokens at the payout - totalEscrowed) / (totalUsdcOwed + totalFeesOwed + token totals at the payout))
     Note right of Vault: position.feeGrowthInsideLastX128 = feeGrowthInside<br/>position.tokensOwed = 0<br/>totalFeesOwedX128 -= the scaled fee claim
     Vault->>CTF: mergePositions(pairs) if pairs > 0 (switch off), or redeemPositions if a token is held (switch on)
     Vault->>USDC: transfer(safe, paid) if paid > 0
     Note right of Vault: CompleteSetsMerged or OutcomeTokensRedeemed (if something settled), FeesCollected (if owed > 0)
 ```
 
-**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when pairs merged before the switch; `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` when tokens redeemed after it; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid)` — `amountPaid < amountOwed` marks a ratio below 1
+**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when free pairs merged before the switch; `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` when tokens redeemed after it; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid)` — `amountPaid < amountOwed` marks a ratio below 1
 
 **Reverts:**
 - `PositionNotFound()` — no position exists at `positionId`
@@ -688,7 +688,7 @@ function burnPosition(uint256 positionId) external nonReentrant
 
 **Actor:** LP's Safe (position owner)
 
-Closes a position the Safe owns and pays what its claim holds under the claim model (decision C26): USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick (YES below the mint tick, NO at or above it) plus the USDC that buying that token at each level's price did not spend, and the accrued fees. The vault settles its tokens first (before the switch it merges its YES and NO pairs; after the Oracle's redemption it redeems every token it holds), removes the position's liquidity from both ticks (deleting a tick and clearing its bitmap bit when its `liquidityGross` reaches zero), reduces `activeLiquidity` (and `noSideLiquidity` for a position on the NO side of its mint tick) when the position is in range, removes the position's NO sub-range and its interior mint tick's reference, debits the solvency ledger by the full scaled claim and fees, deletes the record, and pays. Before the switch it pays each asset's owed amount times that asset's ratio (the smaller of 1 and held ÷ owed total), rounded down, USDC in one transfer and the token in kind. After the switch the token leg is worth `tokenOwed × numerator ÷ denominator` USDC at the stored payout, and the burn pays the principal, the fees, and that USDC as one prorated sum in one USDC transfer, with no ERC-1155 transfer. Never a revert on a shortfall. Works in every phase, while paused, and with every Operator removed. Never refreshes the Operator heartbeat.
+Closes a position the Safe owns and pays what its claim holds under the claim model (decision C26): USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick (YES below the mint tick, NO at or above it) plus the USDC that buying that token at each level's price did not spend, and the accrued fees. The vault settles its tokens first (before the switch it merges its free pairs, the YES and NO pairs above what the ledger owes in both tokens, read before its own claim is debited; after the Oracle's redemption it redeems every token it holds), removes the position's liquidity from both ticks (deleting a tick and clearing its bitmap bit when its `liquidityGross` reaches zero), reduces `activeLiquidity` (and `noSideLiquidity` for a position on the NO side of its mint tick) when the position is in range, removes the position's NO sub-range and its interior mint tick's reference, debits the solvency ledger by the full scaled claim and fees, deletes the record, and pays. Before the switch it pays each asset's owed amount times that asset's ratio (the smaller of 1 and held ÷ owed total), rounded down, USDC in one transfer and the token in kind. After the switch the token leg is worth `tokenOwed × numerator ÷ denominator` USDC at the stored payout, and the burn pays the principal, the fees, and that USDC as one prorated sum in one USDC transfer, with no ERC-1155 transfer. Never a revert on a shortfall. Works in every phase, while paused, and with every Operator removed. Never refreshes the Operator heartbeat.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -724,7 +724,7 @@ sequenceDiagram
     Note right of Vault: read the stored payout (the switch)
     Vault->>USDC: balanceOf(vault)
     alt switch off
-        Note right of Vault: usdcPaid = (usdcOwed + fees) x min(1, (balance + pairs - totalEscrowed) / (totalUsdcOwed + totalFeesOwed))<br/>tokenPaid = tokenOwed x min(1, (held - pairs) / tokenTotal)
+        Note right of Vault: pairs = free pairs, min(YES - min(YES, totalYesOwed), NO - min(NO, totalNoOwed)), read before the debit<br/>usdcPaid = (usdcOwed + fees) x min(1, (balance + pairs - totalEscrowed) / (totalUsdcOwed + totalFeesOwed))<br/>tokenPaid = tokenOwed x min(1, (held - pairs) / tokenTotal)
     else switch on
         Note right of Vault: tokenUsdc = tokenOwed x numerator / denominator<br/>ratio = min(1, (balance + tokens at the payout - totalEscrowed) / (totalUsdcOwed + totalFeesOwed + token totals at the payout))<br/>usdcPaid = (usdcOwed + fees) x ratio; tokenPaid = (usdcOwed + fees + tokenUsdc) x ratio - usdcPaid
     end
@@ -740,7 +740,7 @@ sequenceDiagram
     Note right of Vault: PositionBurned event emitted
 ```
 
-**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when pairs merged before the switch; `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` when tokens redeemed after it; `PositionBurned(uint256 indexed positionId, address indexed owner, uint256 usdcOwed, uint256 feesOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid)` — `paid < owed` marks a ratio below 1; before the switch `tokenPaid` is the tokens transferred, after it the USDC paid for the token leg, and the one USDC transfer carries `usdcPaid + tokenPaid`
+**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when free pairs merged before the switch; `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` when tokens redeemed after it; `PositionBurned(uint256 indexed positionId, address indexed owner, uint256 usdcOwed, uint256 feesOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid)` — `paid < owed` marks a ratio below 1; before the switch `tokenPaid` is the tokens transferred, after it the USDC paid for the token leg, and the one USDC transfer carries `usdcPaid + tokenPaid`
 
 **Reverts:**
 - `PositionNotFound()` — never minted, already burned, or consumed by `mergePositions`
@@ -808,7 +808,7 @@ function mergeCompleteSets() external nonReentrant
 
 **Actor:** Any wallet
 
-Merges `min(YES balance, NO balance)` complete sets of the vault's condition into USDC held by the vault, through the Conditional Tokens contract. One YES plus one NO always pays exactly 1 USDC, so the merge moves no value between parties and the caller receives nothing. No role, pause, phase, or heartbeat check. A vault with no pair returns without a call and emits nothing.
+Merges the vault's free pairs, `min(YES − min(YES, totalYesOwed()), NO − min(NO, totalNoOwed()))`, as complete sets of the vault's condition into USDC held by the vault, through the Conditional Tokens contract. A pair below what the ledger owes is a claim's band token and never merges, so the merge changes no claim's token leg and no claim's ratio, and the caller receives nothing (finding CV-01 of `audits/code-validation-round-1.md`, R14). No role, pause, phase, or heartbeat check. A vault with no free pair returns without a call and emits nothing.
 
 ```mermaid
 sequenceDiagram
@@ -819,7 +819,7 @@ sequenceDiagram
 
     Caller->>Vault: mergeCompleteSets()
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
-    Note right of Vault: amount = min; return if 0
+    Note right of Vault: amount = min(YES − min(YES, totalYesOwed), NO − min(NO, totalNoOwed)); return if 0
     Vault->>CTF: mergePositions(usdc, 0, conditionId, [1, 2], amount)
     CTF->>USDC: transfer(vault, amount)
     Note right of Vault: CompleteSetsMerged(caller, amount)
@@ -1035,12 +1035,13 @@ The running totals of what the vault owes to its live positions, per asset, held
 **The ratio.** Per asset, the smaller of 1 and what the vault holds over what it owes:
 
 ```text
-usdcRatio = min(1, (usdc.balanceOf(vault) + pairs − totalEscrowed) / (totalUsdcOwed() + totalFeesOwed()))
-yesRatio  = min(1, (YES balance − pairs) / totalYesOwed())
-noRatio   = min(1, (NO balance − pairs) / totalNoOwed())
+freePairs = min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed()))
+usdcRatio = min(1, (usdc.balanceOf(vault) + freePairs − totalEscrowed) / (totalUsdcOwed() + totalFeesOwed()))
+yesRatio  = min(1, (YES balance − freePairs) / totalYesOwed())
+noRatio   = min(1, (NO balance − freePairs) / totalNoOwed())
 ```
 
-A burn pays `(usdcOwed + feesOwed) × usdcRatio` and `tokenOwed × tokenRatio`, a collect pays `owed × usdcRatio`, each rounded down and never above what is held, and each debits the totals by the full owed amount, so every later claimant meets the same ratio. A zero total is a ratio of 1. The reclaim paths apply no ratio: escrowed USDC is senior.
+The free pairs are the complete sets above what the ledger owes in both tokens, read before the exiting position is debited, so its own band never counts as free. A token balance less the free pairs is never below the smaller of the balance and the total, so a balance that covers the total gives a ratio of 1 whatever the other token's balance is. A burn pays `(usdcOwed + feesOwed) × usdcRatio` and `tokenOwed × tokenRatio`, a collect pays `owed × usdcRatio`, each rounded down and never above what is held, and each debits the totals by the full owed amount, so every later claimant meets the same ratio. A zero total is a ratio of 1. The reclaim paths apply no ratio: escrowed USDC is senior.
 
 **After the switch.** `payoutNumerators()` is non-zero once the Oracle's first successful `redeemOutcomeTokens` stored the payout. Every asset is then USDC, and one ratio covers every leg, with `at(x, y) = floor(x × numYes ÷ den) + floor(y × numNo ÷ den)` and `den = numYes + numNo`:
 
