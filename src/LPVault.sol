@@ -26,6 +26,8 @@ pragma solidity 0.8.20;
 // UC-6HBO: Merge Complete Sets, UC-6HBP: Redeem Outcome Tokens After Resolution
 // FEAT-9BQZ: Vault Solvency Ledger
 // UC-9BR0: Maintain Solvency Totals, UC-9BR1: Accumulate Principal Shift, UC-9BR2: Apply Payout Ratios
+// FEAT-E943: Spread Attribution
+// UC-E944: Credit the Measured Spread
 
 /// @dev Minimal ERC-20 interface — approve for the exchange setup, balanceOf for the payout rule.
 interface IERC20 {
@@ -208,6 +210,10 @@ contract LPVault {
         // into the first slot with owner and the two bounds, so the mint writes no new slot.
         int24 mintTick;
         uint128 liquidity;
+        // FEAT-E943 FR-E94B: the spread growth inside the range at the mint, or at the last
+        // position merge. A claim is liquidity x (inside now - this). Third slot; deleted with
+        // the record, so an exit leaves nothing behind.
+        uint256 spreadGrowthInsideLastX128;
     }
 
     struct TickInfo {
@@ -217,6 +223,10 @@ contract LPVault {
         // this tick, +L at a position's mint tick and -L at its tickUpper (ADR-COEW). Second slot;
         // deleted with the record.
         int128 noLiquidityNet;
+        // FEAT-E943 ADR-E94R: the spread growth on the side of this tick away from currentTick,
+        // flipped at every crossing, Uniswap v3's trick. Only a difference of two snapshots is
+        // meaningful. Third slot; deleted with the record.
+        uint256 spreadGrowthOutsideX128;
     }
 
     /// @dev positionId => Position record
@@ -278,6 +288,22 @@ contract LPVault {
     uint256 public totalYesOwedScaled;
     /// @dev NO tokens, in token units x LIQUIDITY_PRECISION. Never netted against YES (FR-9BR5).
     uint256 public totalNoOwedScaled;
+
+    // ──────────────────────────────────────────────
+    // Spread attribution (FEAT-E943)
+    // ──────────────────────────────────────────────
+
+    /// @dev The fourth ledger total: the spread the vault has credited and not yet paid, in USDC
+    ///      units x 2^128 (FR-9BR3). Exact by construction: it equals the sum over every live
+    ///      position of liquidity x (spreadGrowthInside - spreadGrowthInsideLastX128), mod 2^256
+    ///      (NFR-9BRX). A credit raises it, a burn debits the exiting position's full amount, and
+    ///      a position merge debits the dust its floor drops.
+    uint256 public totalSpreadOwedX128;
+
+    /// @dev Spread credited per unit of in-range liquidity since the vault was created, Q128.
+    ///      Only grows, under checked arithmetic. The per-tick and per-position snapshots are
+    ///      differences against this value, so its absolute size carries no meaning (ADR-E94R).
+    uint256 public spreadGrowthGlobalX128;
 
     // ──────────────────────────────────────────────
     // Resolution (FEAT-6HBN)
@@ -365,6 +391,20 @@ contract LPVault {
     ///      updateTick call. Prevents gas griefing on large price moves.
     uint256 internal constant MAX_TICK_CROSSINGS = 256;
 
+    /// @dev The fixed-point unit of every spread growth value (FEAT-E943 ADR-E94R).
+    uint256 internal constant Q128 = 1 << 128;
+
+    /// @dev The layout of one packed segment word in a report (FEAT-E943 FR-E947): the segment's
+    ///      in-range liquidity in bits 0 to 127, the model spend its levels represent in bits 128
+    ///      to 159, and the tick crossed at its end in bits 160 to 183. The spend is below 2^27,
+    ///      because a segment with liquidity lies inside [0, 10000] and so spans at most 10,000
+    ///      levels of at most 10,000 each. The trailing segment is always the last one recorded,
+    ///      so it needs no flag: its tick field is never read.
+    uint256 internal constant SEG_ACTIVE_MASK = (1 << 128) - 1;
+    uint256 internal constant SEG_SPEND_MASK = (1 << 32) - 1;
+    uint256 internal constant SEG_SPEND_SHIFT = 128;
+    uint256 internal constant SEG_TICK_SHIFT = 160;
+
     // ──────────────────────────────────────────────
     // Reentrancy guard (inlined per pattern policy in CLAUDE.md)
     // ──────────────────────────────────────────────
@@ -438,11 +478,13 @@ contract LPVault {
     // caller is msg.sender, as in CompleteSetsMerged; never when both balances were zero
     event OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount);
 
-    // SC-7G43 through SC-7G45, SC-BMF1 through SC-BMF3, SC-7G4C through SC-7G4E: emitted by both
-    // burn paths. usdcOwed is the claim's USDC leg, usdcPaid the prorated usdcOwed, tokenId the
-    // YES or NO id of the band (zero when the band is empty), tokenOwed the band's tokens. Before the switch tokenPaid is the tokens transferred
-    // and usdcPaid the one USDC transfer; after the switch (SC-CYS7 through SC-CYS9) tokenPaid is
-    // the USDC paid for the token leg and the one USDC transfer carries usdcPaid + tokenPaid. A
+    // SC-7G43 through SC-7G45, SC-BMF1 through SC-BMF3, SC-7G4C through SC-7G4E, SC-E94P,
+    // SC-E94Q: emitted by both burn paths. usdcOwed is the claim's USDC leg, usdcPaid the
+    // prorated usdcOwed, spreadOwed the position's credited spread and spreadPaid its prorated
+    // share (FEAT-E943), tokenId the YES or NO id of the band (zero when the band is empty),
+    // tokenOwed the band's tokens. Before the switch tokenPaid is the tokens transferred and the
+    // one USDC transfer carries usdcPaid + spreadPaid; after the switch (SC-CYS7 through SC-CYS9)
+    // tokenPaid is the USDC paid for the token leg and the one transfer carries all three. A
     // reader knows the mode from payoutNumerators(). An indexer sees a shortfall as paid < owed
     // (decision O2).
     event PositionBurned(
@@ -450,9 +492,25 @@ contract LPVault {
         address indexed owner,
         uint256 usdcOwed,
         uint256 usdcPaid,
+        uint256 spreadOwed,
+        uint256 spreadPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
+    );
+
+    // SC-E94H through SC-E94N: emitted once per segment a credit attributes, at each of the four
+    // credit sites. `amount` is the USDC credited after the floors, with the same meaning
+    // everywhere, and the second field is the global growth after the credit (FEAT-E943 FR-E946).
+    // Never emitted for a zero credit, a short token balance, or an empty in-range set.
+    event SpreadCredited(uint256 amount, uint256 spreadGrowthGlobalX128);
+
+    // SC-E94O: emitted by the burn whose ledger debit takes totalUsdcOwedScaled to zero, which is
+    // the last live position's burn. The three amounts are what that position received beyond its
+    // own claim (FEAT-E943 FR-E94C). Under drift-free fills they are dust; a larger value is a
+    // drift record an indexer can see.
+    event ResidueSwept(
+        uint256 indexed positionId, address indexed owner, uint256 usdcResidue, uint256 yesResidue, uint256 noResidue
     );
 
     // SC-3Z94: emitted on every successful escrow; lp is the Safe that paid
@@ -1009,9 +1067,16 @@ contract LPVault {
     ///      the position enters on: an in-range mint enters on the NO side of its mint tick
     ///      (FEAT-9BQZ).
     ///
+    ///      Since R18 the mint credits the measured surplus before the new position joins the
+    ///      in-range set and records its spread snapshot after both bounds are referenced, so the
+    ///      Operator's order of report and mint cannot give a new position an earlier trade's
+    ///      value: that ordering is enforced on chain rather than trusted (FEAT-E943 FR-E94B).
+    ///      The mint's one external call is the merge of the free pairs it counted.
+    ///
     ///      MEV analysis: the mint tick is set from the vault's own currentTick, which only the
     ///      Operator moves, so no third party can front-run it. A stale or wrong report is
-    ///      Operator behavior, covered by the trust statement above.
+    ///      Operator behavior, covered by the trust statement above. The credit reaches only
+    ///      positions that were already in range, and the merge pays the caller nothing.
     /// @param lp The LP's Safe — must be the escrow's recorded depositor
     /// @param tickLower Lower tick bound — must be < tickUpper and aligned to tickSpacing
     /// @param tickUpper Upper tick bound — must be > tickLower and aligned to tickSpacing
@@ -1049,7 +1114,18 @@ contract LPVault {
             revert IntentMismatch();
         }
 
+        // --- Reads ---
+
+        // The balances and the measurement, before the new position joins the in-range set
+        Holdings memory h = _holdings();
+
         // --- Effects ---
+
+        // The credit runs first, so the surplus reaches the liquidity that was already in range
+        // and the position this call creates starts at a zero spread claim (FEAT-E943 FR-E94A,
+        // SC-E94M). The order is unconditional on chain: the Operator cannot give a new position
+        // an earlier trade's value by choosing when it mints.
+        _creditSpread(h.creditable, activeLiquidity);
 
         // Consume the escrow before any other state, for mutual exclusion with the reclaims (FR-3ZVK)
         usedIntents[intentId] = true;
@@ -1084,10 +1160,17 @@ contract LPVault {
         if (mintTick < tickLower) mintTick = tickLower;
         else if (mintTick > tickUpper) mintTick = tickUpper;
 
-        // Create the position record
+        // Create the position record. The spread snapshot is written after both bounds hold their
+        // outside snapshots, a few lines below (FEAT-E943 FR-E94B).
         positionId = nextPositionId++;
-        positions[positionId] =
-            Position({owner: lp, tickLower: tickLower, tickUpper: tickUpper, mintTick: mintTick, liquidity: liquidity});
+        positions[positionId] = Position({
+            owner: lp,
+            tickLower: tickLower,
+            tickUpper: tickUpper,
+            mintTick: mintTick,
+            liquidity: liquidity,
+            spreadGrowthInsideLastX128: 0
+        });
 
         // Update active liquidity if the position is in-range. An in-range mint has
         // mintTick == currentTick, so it enters on the NO side (FEAT-9BQZ FR-A2ZS).
@@ -1103,7 +1186,16 @@ contract LPVault {
         totalUsdcOwedScaled += uint256(liquidity) * rangeWidth * uint256(int256(PRICE_TICK_ONE));
         _addNoSubRange(tickLower, tickUpper, mintTick, liquidity);
 
-        // No interaction: the USDC entered the vault at depositForIntent
+        // Both bounds are referenced now, so the inside value is readable. Taking it here is what
+        // makes the new position's claim exactly zero: growth earned before this mint is never
+        // claimable (FEAT-E943 FR-E94B).
+        positions[positionId].spreadGrowthInsideLastX128 = _spreadGrowthInside(tickLower, tickUpper);
+
+        // --- Interactions (external calls last, per checks-effects-interactions) ---
+
+        // The USDC entered the vault at depositForIntent. The one external call is the merge of
+        // the free pairs this call counted as USDC in its measurement (NFR-T7B8).
+        _mergeCompleteSets(h.pairs);
 
         emit PositionMinted(positionId, lp, tickLower, tickUpper, mintTick, liquidity, usdcAmount, intentId);
     }
@@ -1178,6 +1270,11 @@ contract LPVault {
     ///      (the recorded owner must equal `lp`). The LP's remedy is burnPosition, which needs no
     ///      Operator at all.
     ///
+    ///      Since R18 the burn credits the measured surplus before it values the claim and pays
+    ///      the position's spread as a fourth leg, so the Operator's choice of block also decides
+    ///      which credit this exit sees, bounded by the same deadline the LP signed (FEAT-E943
+    ///      ADR-E94W). The Operator cannot change what is credited, only when.
+    ///
     ///      MEV analysis: the burn reads a price but places no order and moves no tick, so no
     ///      third party can sandwich it. The one ordering effect is the Operator's own choice of
     ///      block, covered by the trust statement above and bounded by the deadline.
@@ -1227,21 +1324,16 @@ contract LPVault {
     struct BurnAmounts {
         uint256 usdcOwed;
         uint256 usdcPaid;
+        // The position's credited spread and its prorated share (FEAT-E943 FR-E94B)
+        uint256 spreadOwed;
+        uint256 spreadPaid;
         uint256 tokenId;
         uint256 tokenOwed;
         uint256 tokenPaid;
-        // Both balances and the switch, read once: _settle merges the free pairs before the switch
-        // and redeems both balances after it (FEAT-6HBN)
-        uint256 yes;
-        uint256 no;
-        bool resolved;
-        // The free pairs, min(yes - min(yes, totalYesOwed()), no - min(no, totalNoOwed())), read
-        // before the ledger debit so this position's own band never counts as free (ADR-DFE2).
-        // Zero after the switch, where the redemption replaces the merge and nothing reads it.
-        uint256 pairs;
-        // The same claim in the ledger's pre-division unit (FEAT-9BQZ FR-9BR9)
+        // The same amounts in the ledger's pre-division units (FEAT-9BQZ FR-9BR9), spread in X128
         uint256 usdcScaled;
         uint256 tokenScaled;
+        uint256 spreadScaled;
     }
 
     /// @dev One body for both burn entry points (FR-7G4L). Order, per NFR-7G59 and CLAUDE.md
@@ -1256,16 +1348,27 @@ contract LPVault {
     ///      writes only phase, and a re-entry into it is harmless because the burn's effects are
     ///      complete.
     function _burn(uint256 positionId, Position storage p) internal {
-        // --- Reads and computation, all before any state is touched ---
+        // --- Reads, all before any state is touched ---
 
         address owner = p.owner;
         int24 tickLower = p.tickLower;
         int24 tickUpper = p.tickUpper;
         int24 mintTick = p.mintTick;
         uint128 liquidity = p.liquidity;
-        BurnAmounts memory a = _burnAmounts(p);
+        Holdings memory h = _holdings();
 
         // --- Effects ---
+
+        // The credit is the one effect before the valuation (NFR-7G59, ADR-E94W). The exiting
+        // position is still in range, so it takes its share of what its own round trips earned;
+        // a position that leaves while spread is unrealized, unmerged, and uncredited would
+        // otherwise forfeit it. The denominator is re-read because the credit turned that surplus
+        // into an obligation (FR-9BRM).
+        _creditSpread(h.creditable, activeLiquidity);
+        h.total = _owedInUsdc(h.resolved);
+
+        // Every amount the burn pays, from the values already read (NFR-7G59)
+        BurnAmounts memory a = _burnAmounts(p, h);
 
         // The NO sub-range leaves first, so a boundary tick that deinitializes below already
         // holds a zero noLiquidityNet (FR-7G4O, ADR-COEW)
@@ -1287,15 +1390,21 @@ contract LPVault {
         // claimant meets the same ratio (FR-9BR9); an LP exit never reverts on a ledger write
         // (NFR-9BRT)
         totalUsdcOwedScaled = _saturatingSub(totalUsdcOwedScaled, a.usdcScaled);
+        totalSpreadOwedX128 = _saturatingSub(totalSpreadOwedX128, a.spreadScaled);
         if (a.tokenId == yesTokenId) {
             totalYesOwedScaled = _saturatingSub(totalYesOwedScaled, a.tokenScaled);
         } else if (a.tokenId != 0) {
             totalNoOwedScaled = _saturatingSub(totalNoOwedScaled, a.tokenScaled);
         }
 
-        // Delete the whole record (FR-7G4S). nextPositionId is untouched, so the id is retired,
-        // never recycled (FR-7G4T): reuse would let a stale reference resolve to another LP's
-        // position.
+        // A live position always has a USDC claim above zero and a record a merge consumed has
+        // none, so the debit reaches zero on exactly one burn: the last live position's
+        // (FEAT-E943 FR-E94C, ADR-E94U). Read here, while the other effects are still in scope.
+        bool lastPosition = totalUsdcOwedScaled == 0;
+
+        // Delete the whole record (FR-7G4S), the spread snapshot with it, so a later credit can
+        // never reach this id. nextPositionId is untouched, so the id is retired, never recycled
+        // (FR-7G4T): reuse would let a stale reference resolve to another LP's position.
         delete positions[positionId];
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
@@ -1303,22 +1412,73 @@ contract LPVault {
         // The free pairs computed before the debit, or after the switch every token, become the
         // USDC that _usdcRatio already counted (decision C26, FEAT-6HBN). Never a fresh read here:
         // after the debit the exiting position's own band would count as free (ADR-DFE2).
-        _settle(a.pairs, a.yes, a.no, a.resolved);
+        _settle(h.pairs, h.yes, h.no, h.resolved);
 
-        // One transfer covers the claim's USDC, and after the switch the token leg's USDC too
-        // (FR-CYS4)
-        uint256 usdcOut = a.resolved ? a.usdcPaid + a.tokenPaid : a.usdcPaid;
-        if (usdcOut > 0) {
-            _safeTransfer(usdc, owner, usdcOut);
+        // One transfer covers the claim's USDC and the position's spread, and after the switch the
+        // token leg's USDC too (FR-CYS4, FR-9BRR)
+        uint256 usdcOut = a.usdcPaid + a.spreadPaid + (h.resolved ? a.tokenPaid : 0);
+
+        if (lastPosition) {
+            // The closing sweep pays everything instead, so the vault ends at its escrow total
+            _sweepResidue(positionId, owner, usdcOut, a, h);
+        } else {
+            if (usdcOut > 0) {
+                _safeTransfer(usdc, owner, usdcOut);
+            }
+
+            // Before the switch, the one outcome token of the band, delivered as is: no order, no
+            // conversion (FR-7G4N). Last, because the receiver hook hands control to the recipient.
+            if (!h.resolved && a.tokenPaid > 0) {
+                IConditionalTokens(conditionalTokens).safeTransferFrom(address(this), owner, a.tokenId, a.tokenPaid, "");
+            }
         }
 
-        // Before the switch, the one outcome token of the band, delivered as is: no order, no
-        // conversion (FR-7G4N). Last, because the receiver hook hands control to the recipient.
-        if (!a.resolved && a.tokenPaid > 0) {
-            IConditionalTokens(conditionalTokens).safeTransferFrom(address(this), owner, a.tokenId, a.tokenPaid, "");
+        emit PositionBurned(
+            positionId, owner, a.usdcOwed, a.usdcPaid, a.spreadOwed, a.spreadPaid, a.tokenId, a.tokenOwed, a.tokenPaid
+        );
+    }
+
+    /// @dev The closing sweep (FEAT-E943 FR-E94C, ADR-E94U): the burn whose ledger debit took
+    ///      `totalUsdcOwedScaled` to zero belongs to the last live position, so it pays its owner
+    ///      every USDC the vault holds above `totalEscrowed` and, before the switch, every outcome
+    ///      token the vault still holds, and reports what went beyond that position's own claim.
+    ///      Rounding leaves dust: below one unit for the measurement's last remainder, plus one
+    ///      per leg of this burn's own floors. Drift leaves more, and that residue is exactly what
+    ///      no credit could attribute, so it reaches the position that stayed instead of stranding.
+    ///      It runs inside the burn, as its whole interaction block, never as a function anyone
+    ///      could time. It needs no fresh balance read: after `_settle`, the vault's available
+    ///      USDC is exactly what `_holdings` measured, because a merge pays one USDC per pair and
+    ///      a redemption pays exactly `_atPayout`, and its token balances are the free pairs less
+    ///      what the merge consumed.
+    function _sweepResidue(uint256 positionId, address owner, uint256 usdcOut, BurnAmounts memory a, Holdings memory h)
+        internal
+    {
+        // What the vault still holds of each token once the merge has consumed the free pairs.
+        // After the switch the redemption emptied both balances and `tokenPaid` is USDC, already
+        // inside `usdcOut`, so both legs are zero.
+        uint256 yesHeld;
+        uint256 noHeld;
+        if (!h.resolved) {
+            yesHeld = h.yes - h.pairs;
+            noHeld = h.no - h.pairs;
         }
 
-        emit PositionBurned(positionId, owner, a.usdcOwed, a.usdcPaid, a.tokenId, a.tokenOwed, a.tokenPaid);
+        // The event carries only what goes beyond this position's own claim
+        emit ResidueSwept(
+            positionId,
+            owner,
+            h.held - usdcOut,
+            yesHeld - (!h.resolved && a.tokenId == yesTokenId ? a.tokenPaid : 0),
+            noHeld - (!h.resolved && a.tokenId == noTokenId ? a.tokenPaid : 0)
+        );
+
+        if (h.held > 0) _safeTransfer(usdc, owner, h.held);
+        if (yesHeld > 0) {
+            IConditionalTokens(conditionalTokens).safeTransferFrom(address(this), owner, yesTokenId, yesHeld, "");
+        }
+        if (noHeld > 0) {
+            IConditionalTokens(conditionalTokens).safeTransferFrom(address(this), owner, noTokenId, noHeld, "");
+        }
     }
 
     /// @dev The claim, both token balances, the switch, the free pairs, the USDC balance, the
@@ -1335,38 +1495,40 @@ contract LPVault {
     ///      debit, and the one transfer would then revert, which decision C6 forbids; one prorate
     ///      of the sum keeps the cap, and paidSum >= usdcPaid always, because the floor of the
     ///      larger product is at least the floor of the smaller one under the same cap.
-    function _burnAmounts(Position storage p) internal view returns (BurnAmounts memory a) {
+    function _burnAmounts(Position storage p, Holdings memory h) internal view returns (BurnAmounts memory a) {
         // One valuation for the payout and for the ledger debit: the scaled claim, truncated here
         (a.usdcScaled, a.tokenId, a.tokenScaled) = _claim(p.tickLower, p.tickUpper, p.mintTick, p.liquidity);
         a.usdcOwed = a.usdcScaled / USDC_CLAIM_SCALE;
         a.tokenOwed = a.tokenScaled / LIQUIDITY_PRECISION;
 
-        (a.yes, a.no) = _tokenBalances();
-        a.resolved = _resolved();
+        // The position's spread, while both bounds still hold their outside snapshots
+        // (FEAT-E943 FR-E94B)
+        a.spreadScaled = _spreadClaimX128(p.tickLower, p.tickUpper, p.liquidity, p.spreadGrowthInsideLastX128);
+        a.spreadOwed = a.spreadScaled >> 128;
+
         bool isYes = a.tokenId == yesTokenId;
 
-        // The free pairs, once, before any effect (FR-9BRM to FR-9BRO, ADR-DFE2); after the
-        // switch the redemption replaces the merge and no pair is counted
-        if (!a.resolved) a.pairs = _freePairs(a.yes, a.no);
+        // The USDC ratio: escrow stays out (FR-9BRM), the credited spread is in the denominator,
+        // and after the switch the token totals join it at the stored payout (FR-CYS5). The
+        // principal is prorated once, for both modes, then the principal and the spread as one
+        // sum, so the two USDC legs share a single floor and their sum can never exceed what the
+        // vault holds after a saturated ledger debit (FR-9BRR).
+        a.usdcPaid = _prorate(a.usdcOwed, h.held, h.total);
+        uint256 pairSum = _prorate(a.usdcOwed + a.spreadOwed, h.held, h.total);
+        a.spreadPaid = pairSum - a.usdcPaid;
 
-        // The USDC ratio: escrow stays out (FR-9BRM), and after the switch the token totals join
-        // it at the stored payout (FR-CYS5). The USDC leg is prorated once, for both modes.
-        (uint256 held, uint256 total) = _usdcRatio(a.pairs, a.yes, a.no, a.resolved);
-        a.usdcPaid = _prorate(a.usdcOwed, held, total);
-
-        if (a.resolved) {
-            // The token leg in USDC at the stored payout, then one prorate of the sum: tokenPaid
-            // is the part of the sum the principal did not take (FR-CYS4)
+        if (h.resolved) {
+            // The token leg in USDC at the stored payout, then one prorate of the whole sum:
+            // tokenPaid is the part the principal and the spread did not take (FR-CYS4)
             uint256 tokenUsdc = _atPayout(isYes ? a.tokenOwed : 0, isYes ? 0 : a.tokenOwed);
-            uint256 paidSum = _prorate(a.usdcOwed + tokenUsdc, held, total);
-            a.tokenPaid = paidSum - a.usdcPaid;
+            a.tokenPaid = _prorate(a.usdcOwed + a.spreadOwed + tokenUsdc, h.held, h.total) - pairSum;
             return a;
         }
 
         // The merge consumes the free pairs of each token, so the band's token is what is left,
         // never below the smaller of the balance and the total; the band's ratio is independent
         // of the USDC ratio (FR-9BRN to FR-9BRQ)
-        uint256 tokenHeld = (isYes ? a.yes : a.no) - a.pairs;
+        uint256 tokenHeld = (isYes ? h.yes : h.no) - h.pairs;
         a.tokenPaid = _prorate(a.tokenOwed, tokenHeld, isYes ? totalYesOwed() : totalNoOwed());
     }
 
@@ -1458,13 +1620,18 @@ contract LPVault {
         view
         returns (uint256 held, uint256 total)
     {
-        total = totalUsdcOwed();
-        if (resolved) {
-            held = _availableUsdc(_atPayout(yes, no));
-            total += _atPayout(totalYesOwed(), totalNoOwed());
-        } else {
-            held = _availableUsdc(pairs);
-        }
+        total = _owedInUsdc(resolved);
+        held = resolved ? _availableUsdc(_atPayout(yes, no)) : _availableUsdc(pairs);
+    }
+
+    /// @dev Everything the ledger owes, valued in USDC: the principal, the credited spread
+    ///      (FEAT-E943 FR-E945), and, after the switch, the two token totals at the stored
+    ///      payout. This is the USDC ratio's denominator (FR-9BRM, FR-CYS5) and the line the
+    ///      measurement compares the vault's holdings against. A credit site reads it again after
+    ///      it credits, because the credit turned that surplus into an obligation.
+    function _owedInUsdc(bool resolved) internal view returns (uint256 total) {
+        total = totalUsdcOwed() + totalSpreadOwed();
+        if (resolved) total += _atPayout(totalYesOwed(), totalNoOwed());
     }
 
     /// @dev Removes a burned position's liquidity from one boundary tick, the exact inverse of
@@ -1651,10 +1818,21 @@ contract LPVault {
     ///      in that segment, and an interior mint tick is crossed like a boundary (ADR-COEW), so
     ///      those totals set every payout's ratio.
     ///
+    ///      Since R18 a moving report also measures the vault's surplus after the ledger shift and
+    ///      credits it per segment to the liquidity that was in range there, then merges the free
+    ///      pairs as its one external call (FEAT-E943 FR-TVS9). The Operator's reported path
+    ///      therefore decides which segments receive the credit: a false report can redirect
+    ///      measured surplus between positions, and it can never create surplus, because the
+    ///      source is the vault's own balances and this function takes no amount. The unchanged
+    ///      path reads no balance and credits nothing (ADR-E94V).
+    ///
     ///      MEV analysis: the ratio denominators move with the reported tick, which the Operator
     ///      already controls under the trust assumption above. No third party can order a move
     ///      around a payout, because every payout reads the totals in the same transaction it
-    ///      pays, and the move itself places no order and moves no token.
+    ///      pays, and the move itself places no order and takes no token from anyone: its one
+    ///      external call turns the vault's own pairs into the vault's own USDC. The credit moves
+    ///      no value to the caller either; it only decides which live positions the surplus the
+    ///      vault already holds belongs to.
     /// @param newTick The new price tick to set
     function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat {
         // Phase check: only Active vaults accept tick updates
@@ -1676,6 +1854,8 @@ contract LPVault {
         // and written once (FR-9BRI to FR-9BRL). segmentEdge is the segment's start when moving
         // up and its end when moving down.
         Shift memory shift;
+        // The same segments, recorded for the spread credit (FEAT-E943 FR-E947)
+        Report memory rep;
         int24 segmentEdge = oldTick;
 
         if (movingRight) {
@@ -1687,12 +1867,14 @@ contract LPVault {
                 crossCount++;
                 if (crossCount > MAX_TICK_CROSSINGS) revert TooManyTicksCrossed();
                 // The segment that ends at the tick, with the split before the crossing (FR-9BRI)
+                _recordSegment(rep, segmentEdge, next, true, next);
                 _accrueSegment(shift, segmentEdge, next, true);
                 _crossTick(next, true);
                 segmentEdge = next;
                 tick = next;
             }
             // The trailing segment, or the whole move when nothing was crossed (FR-9BRJ, FR-9BRK)
+            _recordSegment(rep, segmentEdge, newTick, true, 0);
             _accrueSegment(shift, segmentEdge, newTick, true);
         } else {
             // Cross every initialized tick in (newTick, oldTick]
@@ -1703,18 +1885,112 @@ contract LPVault {
                 crossCount++;
                 if (crossCount > MAX_TICK_CROSSINGS) revert TooManyTicksCrossed();
                 // The segment that starts at the tick, with the split before the crossing (FR-9BRI)
+                _recordSegment(rep, next, segmentEdge, false, next);
                 _accrueSegment(shift, next, segmentEdge, false);
                 _crossTick(next, false);
                 segmentEdge = next;
                 tick = next - 1;
             }
+            _recordSegment(rep, newTick, segmentEdge, false, 0);
             _accrueSegment(shift, newTick, segmentEdge, false);
         }
 
         _applyShift(shift);
         currentTick = newTick;
 
+        // The measurement, the per-segment credit, and the merge, after the ledger shift
+        // (FEAT-E943 FR-TVS9). The report's one external call is inside it.
+        _settleReport(rep);
+
         emit TickUpdated(oldTick, newTick, crossCount);
+    }
+
+    /// @dev One report's segments, recorded during the crossing loop and consumed by
+    ///      `_settleReport` (FEAT-E943 FR-E947). A memory struct, because `updateTick`'s stack is
+    ///      at the compiler's limit without via_ir. `segs` is allocated on the first crossing
+    ///      only: a move that crosses nothing has one segment, and the trailing entry is kept in
+    ///      `trailing` instead, so the common report pays for no array.
+    struct Report {
+        uint256[] segs;
+        uint256 count;
+        uint256 trailing;
+        bool started;
+        uint256 weightSum;
+    }
+
+    /// @dev Records the segment of levels `[from, to)`: its in-range liquidity and the model spend
+    ///      its levels represent, packed with the tick crossed at its end. `crossedTick` is
+    ///      meaningless on the trailing segment, which is always the last one recorded.
+    ///      The spend is the sum of `t` over the segment's levels on a fall and of `10000 - t` on
+    ///      a rise, which is what the keeper's board spends per token there, so a split by
+    ///      `active x spend` credits each segment what its own fills earned (NFR-E94D). A segment
+    ///      with nothing in range weighs nothing, and its levels can lie outside the price scale,
+    ///      which is why the casts sit behind the `active != 0` guard, as in `_accrueSegment`.
+    function _recordSegment(Report memory rep, int24 from, int24 to, bool up, int24 crossedTick) internal view {
+        uint256 active = activeLiquidity;
+        uint256 spend;
+        if (active != 0 && from != to) {
+            // casting to uint256 is safe because active > 0 puts the segment inside a position's
+            // range, and every range lies inside [0, 10000] (FEAT-T7AF FR-T7B2)
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint256 s = uint256(int256(from));
+            // forge-lint: disable-next-line(unsafe-typecast)
+            uint256 e = uint256(int256(to));
+            uint256 k = e - s;
+            uint256 sumTicks = k * (s + e - 1) / 2;
+            spend = up ? k * (USDC_CLAIM_SCALE / LIQUIDITY_PRECISION) - sumTicks : sumTicks;
+            rep.weightSum += active * spend;
+        } else {
+            active = 0;
+        }
+
+        // casting to uint24 keeps the tick's bit pattern, which is all the reader needs
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint256 word = active | (spend << SEG_SPEND_SHIFT) | (uint256(uint24(crossedTick)) << SEG_TICK_SHIFT);
+
+        // The newest segment is held back in `trailing`, so the array is allocated only once a
+        // second segment exists, which is only once the move has crossed a tick
+        if (rep.started) {
+            if (rep.segs.length == 0) rep.segs = new uint256[](MAX_TICK_CROSSINGS);
+            rep.segs[rep.count++] = rep.trailing;
+        }
+        rep.trailing = word;
+        rep.started = true;
+    }
+
+    /// @dev The report's tail (FEAT-E943 FR-E947): measure the vault's surplus once, give each
+    ///      segment the share its model spend earned, add to each crossed tick's outside snapshot
+    ///      the growth credited before that tick was crossed, and merge the free pairs as the
+    ///      report's one external call. Lives in its own function so `updateTick` stays readable.
+    ///      The post-hoc adjustment writes what the in-loop form would, because the crossing's
+    ///      flip is affine in the global. Rounding leaves below one unit per segment uncredited;
+    ///      the next credit takes it (FR-E949).
+    function _settleReport(Report memory rep) internal {
+        Holdings memory h = _holdings();
+
+        if (h.creditable != 0 && rep.weightSum != 0) {
+            uint256 cumulative;
+            for (uint256 i = 0; i <= rep.count; i++) {
+                uint256 word = i == rep.count ? rep.trailing : rep.segs[i];
+                uint256 active = word & SEG_ACTIVE_MASK;
+                if (active != 0) {
+                    uint256 weight = active * ((word >> SEG_SPEND_SHIFT) & SEG_SPEND_MASK);
+                    cumulative += _creditSpread(_mulDiv(h.creditable, weight, rep.weightSum), active);
+                }
+                // Every entry but the last ends at a tick this call crossed
+                if (i != rep.count && cumulative != 0) {
+                    // casting back to int24 restores the tick the loop packed
+                    // forge-lint: disable-next-line(unsafe-typecast)
+                    int24 crossed = int24(uint24(word >> SEG_TICK_SHIFT));
+                    // unchecked for the reason ADR-E94R gives: a snapshot is modular
+                    unchecked {
+                        ticks[crossed].spreadGrowthOutsideX128 += cumulative;
+                    }
+                }
+            }
+        }
+
+        _mergeCompleteSets(h.pairs);
     }
 
     // ──────────────────────────────────────────────
@@ -1785,8 +2061,15 @@ contract LPVault {
         int24 tickUpper = survivor.tickUpper;
         int24 mintTick = survivor.mintTick;
 
-        // Start accumulation from the survivor's current state
+        // Start accumulation from the survivor's current state. The spread claims are summed
+        // beside the liquidity, because a consumed record's claim is unreadable once its
+        // liquidity is zeroed (FEAT-9BQZ FR-9BRH).
         uint128 totalLiquidity = survivor.liquidity;
+        uint256 inside = _spreadGrowthInside(tickLower, tickUpper);
+        uint256 spreadSum;
+        unchecked {
+            spreadSum = uint256(totalLiquidity) * (inside - survivor.spreadGrowthInsideLastX128);
+        }
 
         // Process each consumed position: validate, accumulate, then zero
         for (uint256 i = 1; i < positionIds.length; i++) {
@@ -1802,14 +2085,35 @@ contract LPVault {
             // SC-AFPR, FR-AFPT: two mint ticks hold two asset mixes under the claim model (C26)
             if (consumed.mintTick != mintTick) revert MintTickMismatch();
 
-            // Accumulate liquidity
+            // Accumulate liquidity and the spread claim. unchecked for the reason ADR-8L1F gives
+            // in FEAT-T7AF, reinstated for the spread by ADR-E94R: the snapshot difference is
+            // modular, and the product stays inside the block so the wraparound holds exactly one
+            // expression. Never routed through _mulDiv.
+            unchecked {
+                spreadSum += uint256(consumed.liquidity) * (inside - consumed.spreadGrowthInsideLastX128);
+            }
             totalLiquidity += consumed.liquidity;
 
             // Zero the consumed position so it can no longer claim
             consumed.liquidity = 0;
+            consumed.spreadGrowthInsideLastX128 = 0;
         }
 
-        // Update the survivor with the accumulated liquidity
+        // Update the survivor with the accumulated liquidity and one rolled-up snapshot. One
+        // snapshot cannot represent two claims exactly, so the floor drops below totalLiquidity
+        // X128 units, far below one USDC unit, and the ledger is debited by exactly that dust so
+        // the fourth total stays equal to the sum of live claims (FEAT-9BQZ FR-9BRH). Checked, so
+        // a ledger bug reverts this Operator call rather than a payout (NFR-9BRT).
+        // A merge of records a previous merge already consumed has no liquidity at all, and so no
+        // spread claim either (FR-DU2X keeps such a record mergeable). There is nothing to roll
+        // up, and the division would be by zero.
+        if (totalLiquidity != 0) {
+            uint256 perUnit = spreadSum / totalLiquidity;
+            unchecked {
+                survivor.spreadGrowthInsideLastX128 = inside - perUnit;
+            }
+            totalSpreadOwedX128 -= spreadSum - perUnit * totalLiquidity;
+        }
         survivor.liquidity = totalLiquidity;
 
         emit PositionsMerged(positionIds, positionIds[0]);
@@ -1826,17 +2130,34 @@ contract LPVault {
     ///      ADR-6HCL, ADR-6HCM): a refresh from any wallet would let anyone postpone
     ///      emergencyCancelAll, and a frozen vault's payouts still need the merge first
     ///      (decision C9).
+    ///      Since R18 the call credits the vault's measured spread to the liquidity in range
+    ///      before it merges (FEAT-E943 FR-6HBZ, ADR-E94V). This is where a round trip that ends
+    ///      where it began is attributed, because the unchanged-tick report reads no balance.
+    ///
     ///      MEV analysis: the merge takes only pairs no claim is owed (ADR-DFE2), so it changes
     ///      no claim's token leg and no claim's ratio: a free pair is worth exactly 1 USDC to the
     ///      vault before and after. The caller receives nothing, and front-running, back-running,
     ///      or repeating the call changes no one's position. A wallet that sends the
     ///      complementary token cannot force a merge of another claim's token (finding CV-01 of
-    ///      audits/code-validation-round-1.md). Keeper rule: anyone can merge at any time, so
-    ///      every order that names the vault as maker must be a BUY order, and no resting order
-    ///      may depend on the vault's YES or NO balance.
+    ///      audits/code-validation-round-1.md). The credit adds one residual, and it is bounded:
+    ///      a caller who is an LP in range can time this call ahead of a report that would move
+    ///      the tick, or ahead of a mint that would join the in-range set. Crediting before a
+    ///      mint is what the attribution rule asks for. Crediting before a tick move assigns a
+    ///      round trip that ended at the current tick to the set in range there, which is the
+    ///      right set whenever the trip stayed inside one segment. Both are approximations of the
+    ///      same fills, the caller still receives nothing, and the value at stake is only the
+    ///      surplus pending at the moment of the call. Keeper rule: anyone can merge at any time,
+    ///      so every order that names the vault as maker must be a BUY order, and no resting
+    ///      order may depend on the vault's YES or NO balance.
     function mergeCompleteSets() external nonReentrant {
-        (uint256 yes, uint256 no) = _tokenBalances();
-        _mergeCompleteSets(_freePairs(yes, no));
+        Holdings memory h = _holdings();
+
+        // The credit before the merge (FEAT-E943 FR-6HBZ, ADR-E94V). This is where a round trip
+        // that ends where it began is attributed: the unchanged-tick report reads no balance, so
+        // the keeper's merge call is the moment the vault sees that trip's second leg as USDC.
+        _creditSpread(h.creditable, activeLiquidity);
+
+        _mergeCompleteSets(h.pairs);
     }
 
     /// @dev The free pairs the vault holds: min(yes - min(yes, totalYesOwed()), no - min(no,
@@ -2015,6 +2336,112 @@ contract LPVault {
         return totalNoOwedScaled / LIQUIDITY_PRECISION;
     }
 
+    /// @notice The spread the vault owes to every live position, in USDC units (FEAT-E943).
+    function totalSpreadOwed() public view returns (uint256) {
+        return totalSpreadOwedX128 >> 128;
+    }
+
+    // ──────────────────────────────────────────────
+    // Spread attribution (FEAT-E943, UC-E944)
+    // ──────────────────────────────────────────────
+
+    /// @dev Everything a credit site reads, in one place (FR-E94A): both outcome-token balances,
+    ///      the switch, the free pairs, the USDC the vault may draw on, what the ledger owes in
+    ///      USDC, and how much of the first is surplus. The four sites share this one copy, so the
+    ///      token-cover check and the measurement exist once and `SpreadCredited.amount` means the
+    ///      same thing everywhere. The burn reuses every field for its own valuation, so no
+    ///      balance is read twice in one call (NFR-7G59).
+    struct Holdings {
+        uint256 yes;
+        uint256 no;
+        bool resolved;
+        uint256 pairs;
+        uint256 held;
+        uint256 total;
+        uint256 creditable;
+    }
+
+    /// @dev Reads the vault's position against its ledger and measures the creditable surplus
+    ///      (FR-E945). The vault never sees a fill, so this is the only way it learns what the
+    ///      keeper's round trips left behind: what it holds, less what it owes.
+    function _holdings() internal view returns (Holdings memory h) {
+        (h.yes, h.no) = _tokenBalances();
+        h.resolved = _resolved();
+
+        // After the switch the redemption replaces the merge, so no pair is counted (ADR-DFE2)
+        if (!h.resolved) h.pairs = _freePairs(h.yes, h.no);
+
+        (h.held, h.total) = _usdcRatio(h.pairs, h.yes, h.no, h.resolved);
+
+        // Before the switch, a token balance below its owed total means the ledger booked a spend
+        // the vault kept: a reported fill that never arrived. That USDC is unspent principal and
+        // not spread, so nothing is creditable until the fill lands or the switch values the
+        // missing token (FR-E948, ADR-E94T). After the switch every asset is USDC and the
+        // comparison above already covers it.
+        if (!h.resolved && (h.yes < totalYesOwed() || h.no < totalNoOwed())) return h;
+
+        if (h.held > h.total) h.creditable = h.held - h.total;
+    }
+
+    /// @dev Credits `amount` USDC of measured surplus to `active` units of in-range liquidity, as
+    ///      growth per unit (FR-E946). Returns the growth added, which the report's settlement
+    ///      carries forward to the crossed ticks' snapshots.
+    ///      Writes nothing when there is nothing to credit or nobody to credit it to: the surplus
+    ///      stays measurable and the next credit that finds liquidity takes it (FR-E949).
+    ///      Checked arithmetic on both totals, so a bug here reverts the Operator's call rather
+    ///      than a payout (NFR-9BRT). The products stay well inside 256 bits: `growth x active` is
+    ///      about `amount x 2^128`, and a USDC amount is far below 2^96.
+    function _creditSpread(uint256 amount, uint256 active) internal returns (uint256 growth) {
+        if (amount == 0 || active == 0) return 0;
+
+        growth = _mulDiv(amount, Q128, active);
+        if (growth == 0) return 0;
+
+        uint256 scaled = growth * active;
+        spreadGrowthGlobalX128 += growth;
+        totalSpreadOwedX128 += scaled;
+
+        // The credited USDC after the floors, so the event means the same at every site
+        emit SpreadCredited(scaled >> 128, spreadGrowthGlobalX128);
+    }
+
+    /// @dev The spread growth accumulated inside `[tickLower, tickUpper)`, Uniswap v3's formula
+    ///      over the two bounds' outside snapshots (ADR-E94R). An interior mint tick's snapshot is
+    ///      written and flipped but never read, because a position is bounded by its own two ticks
+    ///      alone, which is why the flip on such a tick stays harmless (ADR-COEW).
+    ///      unchecked: a tick referenced after the vault has already credited assumes all past
+    ///      growth sits on its outside, so `below + above` can exceed the global and the
+    ///      subtraction must wrap modulo 2^256. Only the difference against a position's own
+    ///      snapshot is meaningful, and both values wrapped by the same offset, so it cancels
+    ///      (ADR-8L1F in FEAT-T7AF, reinstated for the spread by ADR-E94R).
+    function _spreadGrowthInside(int24 tickLower, int24 tickUpper) internal view returns (uint256) {
+        uint256 global = spreadGrowthGlobalX128;
+        uint256 lowerOutside = ticks[tickLower].spreadGrowthOutsideX128;
+        uint256 upperOutside = ticks[tickUpper].spreadGrowthOutsideX128;
+        int24 current = currentTick;
+        unchecked {
+            uint256 below = current >= tickLower ? lowerOutside : global - lowerOutside;
+            uint256 above = current < tickUpper ? upperOutside : global - upperOutside;
+            return global - below - above;
+        }
+    }
+
+    /// @dev One position's spread claim in X128 units: `liquidity x (inside now - the snapshot)`.
+    ///      unchecked for the same reason as `_spreadGrowthInside`, and the product stays inside
+    ///      the `unchecked` block so the wraparound holds exactly one expression, the shape
+    ///      ADR-8L1F requires. Never routed through `_mulDiv`, which would read a wrapped value as
+    ///      a literal near-2^256 product.
+    function _spreadClaimX128(int24 tickLower, int24 tickUpper, uint128 liquidity, uint256 last)
+        internal
+        view
+        returns (uint256 claim)
+    {
+        uint256 inside = _spreadGrowthInside(tickLower, tickUpper);
+        unchecked {
+            claim = uint256(liquidity) * (inside - last);
+        }
+    }
+
     // SC-9BSC through SC-9BSG, SC-COEU: one ratio per asset, applied to every payout
     /// @dev owed x min(1, held / totalOwed), rounded down, and never above held (FR-9BRM to
     ///      FR-9BRR, NFR-9BRW). The denominators are the truncated getters read before the
@@ -2147,7 +2574,16 @@ contract LPVault {
     ///      its exact inverse.
     function _addTickReference(int24 tick, uint128 liquidity) internal {
         TickInfo storage info = ticks[tick];
-        if (info.liquidityGross == 0) _setTickBitmapBit(tick);
+        if (info.liquidityGross == 0) {
+            _setTickBitmapBit(tick);
+            // Uniswap v3's convention (FEAT-E943 ADR-E94R): a tick at or below the price starts
+            // its snapshot at the global, so every credit written before it existed counts as
+            // being on its outside. A tick above the price starts at zero, which the default
+            // already gives. The value means nothing alone; only a difference of two snapshots
+            // does. This is also why the mint credits before it references a tick: the snapshot
+            // must include the credit the new position is not entitled to.
+            if (tick <= currentTick) info.spreadGrowthOutsideX128 = spreadGrowthGlobalX128;
+        }
         info.liquidityGross += liquidity;
     }
 
@@ -2205,6 +2641,15 @@ contract LPVault {
         // The NO sub-ranges cross the same way (FEAT-9BQZ FR-A2ZS)
         int128 noNet = info.noLiquidityNet;
         if (noNet != 0) noSideLiquidity = _addDelta(noSideLiquidity, ltr ? noNet : -noNet);
+
+        // The price moved to the other side of this tick, so what was outside is now inside and
+        // the reverse (FEAT-E943 ADR-E94R). unchecked: the flip is modular by construction, and
+        // only a difference of two snapshots is ever read (ADR-8L1F in FEAT-T7AF). The report's
+        // settlement adds this tick's share of the credit afterwards, which writes the same value
+        // the in-loop form would, because the flip is affine in the global.
+        unchecked {
+            info.spreadGrowthOutsideX128 = spreadGrowthGlobalX128 - info.spreadGrowthOutsideX128;
+        }
     }
 
     /// @dev The ledger shift of one tick move, in the totals' scaled units, accrued per segment

@@ -17,11 +17,12 @@ fs_permissions = [
     { access = "read", path = "./test/artifacts" },
 ]
 
-# The optimizer is on for contract size, not for gas. See the compiler optimizer
-# decision (ADR-9FOM) in
+# The optimizer is on for contract size, not for gas, and it runs at 100 since the
+# spread attribution (R18). See the compiler optimizer
+# decision (ADR-9FOM) and the runs decision (ADR-E94X) in
 # specs/features/contracts/FEAT-J92H-deploy-contracts/ARCHITECTURE.md.
 optimizer = true
-optimizer_runs = 200
+optimizer_runs = 100
 
 # forge's own defaults (runs=256, depth=500 -> 128k calls/run) are sized for
 # large multi-contract protocols. This vault's invariant handler is a single
