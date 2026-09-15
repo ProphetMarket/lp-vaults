@@ -206,6 +206,8 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         int256 lo = bound(lowerSeed, c - 600, c + 600);
         if (lo < 0) lo = 0;
         if (lo > 9000) lo = 9000;
+        // casting to 'int24' is safe because lo is clamped to [0, 9000]
+        // forge-lint: disable-next-line(unsafe-typecast)
         tickLower = int24(lo / 10 * 10);
         tickUpper = tickLower + int24(uint24(bound(widthSeed, 1, 60) * 10));
         if (tickUpper > 10000) tickUpper = 10000;
@@ -227,9 +229,13 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         if (target < -300) target = -300;
         if (target > 10300) target = 10300;
         vm.prank(operatorAddr);
+        // casting to 'int24' is safe because target is clamped to [-300, 10300]
+        // forge-lint: disable-next-line(unsafe-typecast)
         try vault.updateTick(int24(target)) {
             completedMoves++;
         } catch (bytes memory reason) {
+            // casting to 'bytes4' is safe because the length check guarantees four bytes, the error selector
+            // forge-lint: disable-next-line(unsafe-typecast)
             bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0xffffffff);
             if (undocumentedMoveRevert == bytes4(0) && selector != LPVault.TooManyTicksCrossed.selector) {
                 undocumentedMoveRevert = selector;
@@ -317,6 +323,8 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         try vault.redeemOutcomeTokens() {
             completedRedemptions++;
         } catch (bytes memory reason) {
+            // casting to 'bytes4' is safe because the length check guarantees four bytes, the error selector
+            // forge-lint: disable-next-line(unsafe-typecast)
             bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0xffffffff);
             if (
                 undocumentedExitRevert == bytes4(0) && selector != LPVault.MarketNotResolved.selector
@@ -534,6 +542,8 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     }
 
     function _recordExitRevert(bytes memory reason) internal {
+        // casting to 'bytes4' is safe because the length check guarantees four bytes, the error selector
+        // forge-lint: disable-next-line(unsafe-typecast)
         bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0xffffffff);
         if (undocumentedExitRevert == bytes4(0) && selector != LPVault.PositionNotFound.selector) {
             undocumentedExitRevert = selector;
@@ -583,6 +593,8 @@ contract DriftFreeLedgerHandler is SolvencyLedgerHandler, KeeperFillFixture {
         int256 lo = bound(lowerSeed, c - 600, c + 600);
         if (lo < 100) lo = 100;
         if (lo > 9300) lo = 9300;
+        // casting to 'int24' is safe because lo is clamped to [100, 9300]
+        // forge-lint: disable-next-line(unsafe-typecast)
         tickLower = int24(lo / 10 * 10);
         tickUpper = tickLower + int24(uint24(bound(widthSeed, 1, 60) * 10));
         if (tickUpper > 9900) tickUpper = 9900;
@@ -591,6 +603,8 @@ contract DriftFreeLedgerHandler is SolvencyLedgerHandler, KeeperFillFixture {
     /// @dev A deposit that is a multiple of the width, so every level holds a whole number of
     ///      token units and only the USDC spend rounds, once per move.
     function _deposit(uint256 usdcSeed, int24 tickLower, int24 tickUpper) internal pure override returns (uint256) {
+        // casting to 'uint256' is safe because a live position and a _range output both hold tickUpper above tickLower
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint256 width = uint256(int256(tickUpper - tickLower));
         return bound(usdcSeed, 1e4, 1e9) * width;
     }
@@ -779,6 +793,8 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
     {
         int24 c = vault.currentTick();
         for (int24 t = lo; t < hi; t++) {
+            // casting to 'uint256' is safe because t starts at a live position's tickLower, which is never below 0
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint256 tt = uint256(int256(t));
             if (t < m && c <= t) {
                 yes += l;

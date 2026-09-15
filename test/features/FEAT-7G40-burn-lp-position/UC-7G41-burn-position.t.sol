@@ -158,7 +158,11 @@ contract BurnPositionTestBase is LPVaultFixture {
     }
 
     function _bitIsSet(int24 tick) internal view returns (bool) {
+        // casting to 'int16' is safe because an int24 shifted right by 8 fits in 16 bits
+        // forge-lint: disable-next-line(unsafe-typecast)
         int16 wordPos = int16(tick >> 8);
+        // casting to 'uint24' then 'uint8' is safe because the mask keeps eight bits
+        // forge-lint: disable-next-line(unsafe-typecast)
         uint8 bitPos = uint8(uint24(tick) & 0xff);
         return (vault.tickBitmap(wordPos) >> bitPos) & 1 == 1;
     }
@@ -415,6 +419,8 @@ contract BurnDeinitializesTickTest is BurnPositionTestBase {
 
         (uint128 gross, int128 net,,) = vault.ticks(LOWER);
         assertEq(gross, grossBefore - LIQUIDITY, "tick 5500 liquidityGross decreased by the example's liquidity");
+        // casting to 'int128' is safe because LIQUIDITY is 3e23, far below the int128 maximum of about 1.7e38
+        // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(net, netBefore - int128(LIQUIDITY), "tick 5500 liquidityNet decreased by the example's liquidity");
         assertTrue(_bitIsSet(LOWER), "tick 5500 bit must stay set");
     }
@@ -1075,6 +1081,8 @@ contract BurnClaimFuzzTest is BurnPositionTestBase {
         uint256 usdcTimes = 0;
         uint256 tokenTimes = 0;
         for (int24 t = lower; t < upper; t++) {
+            // casting to 'uint256' is safe because the one caller bounds lower to [0, 9900], so t is never negative
+            // forge-lint: disable-next-line(unsafe-typecast)
             uint256 tick = uint256(int256(t));
             if (c < m && t >= c && t < m) {
                 usdcTimes += l * (ONE - tick);
@@ -1115,6 +1123,9 @@ contract ReentrantSafe {
         try vault.burnPosition(target) {
             recorded = bytes4(0xffffffff);
         } catch (bytes memory reason) {
+            // casting to 'bytes4' is safe because the cast keeps the first four bytes, the error selector.
+            // A shorter reason pads with zeros, so the test's selector check fails.
+            // forge-lint: disable-next-line(unsafe-typecast)
             recorded = bytes4(reason);
         }
         return 0xf23a6e61;

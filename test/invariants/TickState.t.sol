@@ -158,7 +158,11 @@ contract TickStateHandler is LPVaultFixture {
             }
             // Pick in units of SPACING so the result is aligned. The hard edges are exact
             // multiples of SPACING; the soft near-mode edges may round by less than one unit.
+            // casting to 'int256' is safe because bound maps every int256, a negative one too, into the range
+            // forge-lint: disable-next-line(unsafe-typecast)
             int256 unit = bound(int256(placementSeed), low / SPACING, high / SPACING);
+            // casting to 'int24' is safe because unit lies inside [0, SCALE / SPACING]
+            // forge-lint: disable-next-line(unsafe-typecast)
             tickLower = int24(unit) * SPACING;
             tickUpper = tickLower + width;
         }
@@ -211,6 +215,8 @@ contract TickStateHandler is LPVaultFixture {
     }
 
     function _recordBurnRevert(bytes memory reason) internal {
+        // casting to 'bytes4' is safe because the length check guarantees four bytes, the error selector
+        // forge-lint: disable-next-line(unsafe-typecast)
         bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0xffffffff);
         bool documented = selector == LPVault.PositionNotFound.selector || selector == LPVault.NotPositionOwner.selector
             || selector == LPVault.IntentAlreadyUsed.selector;
@@ -228,6 +234,8 @@ contract TickStateHandler is LPVaultFixture {
         if (target > type(int24).max) target = type(int24).max;
         if (target < type(int24).min) target = type(int24).min;
         int24 from = vault.currentTick();
+        // casting to 'int24' is safe because target is clamped to the int24 range above
+        // forge-lint: disable-next-line(unsafe-typecast)
         int24 to = int24(target);
         if (from == to) return;
 
@@ -247,6 +255,8 @@ contract TickStateHandler is LPVaultFixture {
                 worstMoveCrossings = crossings;
             }
         } catch (bytes memory reason) {
+            // casting to 'bytes4' is safe because the length check guarantees four bytes, the error selector
+            // forge-lint: disable-next-line(unsafe-typecast)
             bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0xffffffff);
             if (undocumentedRevert == bytes4(0) && !_isDocumentedRejection(selector)) {
                 undocumentedRevert = selector;
@@ -301,6 +311,8 @@ contract TickStateHandler is LPVaultFixture {
         try vault.mergePositions(ids) {
             if (undocumentedDuplicateMergeRevert == bytes4(0)) undocumentedDuplicateMergeRevert = bytes4(0xffffffff);
         } catch (bytes memory reason) {
+            // casting to 'bytes4' is safe because the length check guarantees four bytes, the error selector
+            // forge-lint: disable-next-line(unsafe-typecast)
             bytes4 selector = reason.length >= 4 ? bytes4(reason) : bytes4(0xffffffff);
             if (undocumentedDuplicateMergeRevert == bytes4(0) && selector != LPVault.DuplicatePositionId.selector) {
                 undocumentedDuplicateMergeRevert = selector;

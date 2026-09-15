@@ -552,9 +552,10 @@ contract MintPositionFirstMintFloorTest is MintPositionTestBase {
         // The failed mint left the escrow in place, so the same intent mints now
         uint256 posId = _mint(int24(0), int24(10), usdcAmount, intentId);
         (,,,, uint128 liquidity,) = vault.positions(posId);
-        assertEq(
-            liquidity, uint128(usdcAmount * LIQUIDITY_PRECISION / 10), "the small mint must succeed after the first"
-        );
+        // casting to 'uint128' is safe because usdcAmount is at most 99, so the value is at most 9.9e18
+        // forge-lint: disable-next-line(unsafe-typecast)
+        uint128 expected = uint128(usdcAmount * LIQUIDITY_PRECISION / 10);
+        assertEq(liquidity, expected, "the small mint must succeed after the first");
     }
 }
 

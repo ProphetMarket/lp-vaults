@@ -266,8 +266,11 @@ contract MintTickCrossingTest is PrincipalShiftTestBase {
         (uint128 gross, int128 net, int128 noNet,) = vault.ticks(MINT_TICK);
         assertEq(gross, LIQUIDITY_A, "liquidityGross counts the position");
         assertEq(net, 0, "no liquidityNet: no position bounds the tick");
+        // casting to 'int128' is safe because LIQUIDITY_A is 3e23, far below the int128 maximum of about 1.7e38
+        // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(noNet, int128(LIQUIDITY_A), "the NO sub-range starts here");
         (,, int128 noNetUpper,) = vault.ticks(UPPER);
+        // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(noNetUpper, -int128(LIQUIDITY_A), "the NO sub-range ends at tickUpper");
     }
 
@@ -310,7 +313,10 @@ contract ClampedMintEntryTest is PrincipalShiftTestBase {
         (uint128 grossLower,, int128 noNetLower,) = vault.ticks(LOWER);
         (,, int128 noNetUpper,) = vault.ticks(UPPER);
         (uint128 grossInterior,,,) = vault.ticks(MINT_TICK);
+        // casting to 'int128' is safe because LIQUIDITY_A is 3e23, far below the int128 maximum of about 1.7e38
+        // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(noNetLower, int128(LIQUIDITY_A), "the NO sub-range starts at tickLower");
+        // forge-lint: disable-next-line(unsafe-typecast)
         assertEq(noNetUpper, -int128(LIQUIDITY_A), "the NO sub-range ends at tickUpper");
         assertEq(grossLower, LIQUIDITY_A, "the bound holds the one reference");
         assertEq(grossInterior, 0, "no interior mint tick");
