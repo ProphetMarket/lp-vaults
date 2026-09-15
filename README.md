@@ -38,9 +38,9 @@ Full specs are under `specs/features/`. Feature index: [specs/FEATURES.md](specs
 
 | Role | Authority | Notes |
 |------|-----------|-------|
-| **Admin** | Registry-only: add/remove operators, set oracle, pause trading, schedule/apply/cancel implementation upgrades, two-step admin transfer | Cannot call user-facing vault functions |
+| **Admin** | Registry-only: `addOperator`, `removeOperator`, `setOracle`, `pauseTrading`, `unpauseTrading`, `scheduleImplementation`, `applyImplementation`, `cancelScheduledImplementation`, `transferAdmin`, `acceptAdmin`, `addAdmin`, `removeAdmin`, `renounceAdminRole`, `setDefaultEmergencyCancelTimelock` | Cannot call user-facing vault functions |
 | **Operator** | Transactional: `depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `burnPositionFor`, `collectFor`, `notifyFees`, `updateTick`, `mergePositions`, `heartbeat` | Multiple addresses allowed; must be separate from Oracle |
-| **Oracle** | Lifecycle: `createVault` (factory), `startWindDown` (vault) | Single wallet; must be separate from Operator |
+| **Oracle** | Lifecycle: `createVault` (factory), `startWindDown`, `redeemOutcomeTokens`, and `setMinimumFirstLiquidity` (vault) | Single wallet; must be separate from Operator |
 | **LP** | A Safe wallet; the owner key signs `MintIntent`, `ReclaimIntent`, `BurnIntent`, and `CollectIntent`, and the Safe calls `reclaimDeposit`, `collect`, `burnPosition` on its own escrows and positions, in every phase | The vault accepts an owner key only when the Safe it derives equals the named Safe |
 | **Keeper** | Off-chain bot holding an Operator key — no on-chain role | Not a contract concept; merges the vault's free pairs through `mergeCompleteSets`, which any wallet may call |
 
@@ -99,7 +99,7 @@ forge test -vvv          # with call traces
 forge coverage           # coverage report
 ```
 
-The test suite includes 300+ integration tests, one file per use case at `test/features/FEAT-*/UC-*.t.sol`, plus fuzz tests on Q128 math and invariant tests on tick state.
+The test suite includes 800+ integration tests, one file per use case at `test/features/FEAT-*/UC-*.t.sol`, plus fuzz tests on Q128 math and invariant tests on tick state, the solvency ledger, the escrow, and fee accounting under `test/invariants/`.
 
 ### Format
 
@@ -117,7 +117,10 @@ lp-vaults/
 ├── script/
 │   └── Deploy.s.sol        # Foundry deploy script (address-env-var driven)
 ├── test/
-│   └── features/           # Integration tests, mirroring specs/features/ layout
+│   ├── features/           # Integration tests, mirroring specs/features/ layout
+│   ├── invariants/         # Invariant suites (tick state, solvency ledger, escrow, fee accounting)
+│   ├── fixtures/           # Shared fixtures: the real ConditionalTokens and exchange deployers, the ERC-20 mock, storage helpers, the keeper fill simulator
+│   └── artifacts/          # Vendored build artifacts this repo cannot compile (ProphetCTFExchange.json)
 ├── specs/                  # Molcajete spec tree (features, use cases, architecture, actors)
 ├── lib/                    # Foundry submodule dependencies (forge-std, ctf-exchange)
 ├── CLAUDE.md               # Repository rules — PR-blocking (security, patterns, roles)

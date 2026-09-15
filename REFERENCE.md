@@ -133,6 +133,7 @@ sequenceDiagram
 **Reverts:**
 - `NotOracle()` — caller is not the oracle
 - `ZeroFloor()` — `minimumFirstLiquidity_` is 0
+- `InvalidTickSpacing()` — `tickSpacing_` is 0 or negative
 - `DuplicateMarket()` — a vault already exists for `marketId_`
 - `ZeroConditionId()` — `conditionId_` is 0
 - `ZeroTokenId()` — `yesTokenId_` or `noTokenId_` is 0
@@ -161,7 +162,7 @@ function initialize(
 ) external initializer
 ```
 
-**Actor:** Factory only (enforced by `onlyFactory` check inside the function)
+**Actor:** Factory only (enforced by an inline `msg.sender == factory_` check against the argument, because `factory` is not yet stored when a clone is initialized; there is no `onlyFactory` modifier)
 
 Called once by the factory immediately after cloning. Stores all per-vault configuration, including the outcome-token identity, reads the factory's `defaultEmergencyCancelTimelock()` once into `emergencyCancelTimelock`, sets the vault phase to Active, pre-approves the exchange for USDC and outcome tokens, and snapshots the EIP-712 domain separator. It makes no identity check of its own: only the factory can call it, and `createVault` verifies the identity before it deploys the clone.
 
@@ -246,7 +247,7 @@ function isValidSignature(bytes32 hash, bytes calldata signature) external view 
 
 The vault has no private key, so this is the one way an order can name it as maker: a registered Operator key signs the exchange's `hashOrder(order)`, and the vault vouches for that signature to the exchange (EIP-1271, decision C22). The method returns `0x1626ba7e` when every one of these holds, and `0xffffffff` otherwise: the caller is the vault's `exchange`; the vault is in the Active phase and not paused; the signature is 65 bytes with `s` in the lower half of the curve order and `v` in {27, 28}; `ecrecover` returns a non-zero address; and that address is a registered Operator on the factory at the moment of the call. The registry is read at call time, so one `removeOperator` invalidates every unfilled order that key signed. A paused, wound-down, or frozen vault takes no new fill: a resting order fails its signature check at match time, and the keeper cancels its orders when it sees `TradingPaused`, `VaultWindDownStarted`, or `EmergencyCancelExecuted`. The caller check exists because USDC `FiatTokenV2_2` routes a bytes signature in `permit` and `transferWithAuthorization` to the payer's `isValidSignature` (ERC-7598), so an open vouch would let an Operator key move vault USDC around the exchange.
 
-**OPERATOR TRUST ASSUMPTION:** any registered Operator can author orders that spend vault assets through the exchange. The vault checks who signed, never what was signed: the Operator's order sizes and prices are trusted, and the per-market deposit cap in Part 6 of the audit plan is the economic bound. The approvals `initialize` granted the exchange become reachable through this method; it adds no transfer path.
+**OPERATOR TRUST ASSUMPTION:** any registered Operator can author orders that spend vault assets through the exchange. The vault checks who signed, never what was signed: the Operator's order sizes and prices are trusted. The approvals `initialize` granted the exchange become reachable through this method; it adds no transfer path.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -901,11 +902,11 @@ sequenceDiagram
     Operator->>Vault: mergePositions([posA, posB, posC])
     Note right of Vault: Checks:<br/>not paused<br/>positionIds.length >= 2<br/>no repeated ID (pairwise, before any read)
 
-    Note right of Vault: Load survivor = positions[posA]
+    Note right of Vault: Load survivor = positions[posA]<br/>Check: survivor.owner != 0 (a burned record never merges)
     Note right of Vault: feeGrowthInside = current value for range
 
     loop for each consumed position (posB, posC, ...)
-        Note right of Vault: Check: same owner, same tickLower, same tickUpper<br/>Check: same mintTick
+        Note right of Vault: Check: consumed.owner != 0<br/>Check: same owner, same tickLower, same tickUpper<br/>Check: same mintTick
         Note right of Vault: consumedFees = consumed.liquidity<br/>    x (feeGrowthInside - consumed.feeGrowthInsideLastX128)<br/>    / 2^128
         Note right of Vault: totalLiquidity += consumed.liquidity<br/>totalOwed += consumed.tokensOwed + consumedFees
         Note right of Vault: consumed.liquidity = 0<br/>consumed.tokensOwed = 0<br/>consumed.feeGrowthInsideLastX128 = 0
@@ -920,8 +921,10 @@ sequenceDiagram
 **Reverts:**
 - `NotOperator()` — caller is not an operator
 - `TradingIsPaused()` — vault is paused
+- `VaultCancelled()` — vault is in terminal Cancelled phase
 - `InsufficientPositions()` — fewer than 2 position IDs provided
 - `DuplicatePositionId()` — an ID appears twice in `positionIds`
+- `PositionNotFound()` — the survivor or a consumed position was burned, so its owner reads zero
 - `RangeMismatch()` — any consumed position has a different owner, `tickLower`, or `tickUpper` than the survivor
 - `MintTickMismatch()` — any consumed position has a different `mintTick` than the survivor
 
@@ -935,7 +938,7 @@ function reclaimDeposit(bytes32 intentId) external nonReentrant
 
 **Actor:** LP's Safe (through a Safe transaction the owner key signs)
 
-One-call escape hatch: refunds the USDC escrowed against `intentId` to the Safe that paid it. The escrow record proves the deposit, so the call needs no signature, no Operator co-signature, no timelock, no phase check, and no pause check. It works with every Operator removed and in every phase, including Cancelled.
+One-call escape hatch: refunds the USDC escrowed against `intentId` to the Safe that paid it. The escrow record proves the deposit, so the call needs no signature, no Operator co-signature, no timelock, no phase check, and no pause check. It works with every Operator removed and in every phase, including Cancelled. Escrow seniority (decision C7) binds burns and collects, which read the balance less `totalEscrowed`, and not fills: the exchange's unlimited USDC allowance can spend escrowed USDC. So the refund merges the vault's free pairs (the pairs above what the ledger owes in both tokens) into USDC before it transfers, and a reclaim never waits for a keeper to merge; the amount paid is the recorded amount, whatever the merge produced. The keeper keeps its quoted size below the vault's USDC balance minus `totalEscrowed`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -945,16 +948,20 @@ One-call escape hatch: refunds the USDC escrowed against `intentId` to the Safe 
 sequenceDiagram
     actor Safe as LP's Safe
     participant Vault as LPVault
+    participant CT as ConditionalTokens
     participant USDC
 
     Safe->>Vault: reclaimDeposit(intentId)
     Note right of Vault: Checks:<br/>intentId not already used<br/>escrow exists<br/>recorded Safe == msg.sender
+    Vault->>CT: balanceOf(YES), balanceOf(NO)
+    Note right of Vault: pairs = free pairs, read before the effects
     Note right of Vault: usedIntents[intentId] = true<br/>delete pendingDeposits[intentId]<br/>totalEscrowed -= amount
+    Vault->>CT: mergePositions(pairs), only when pairs > 0
     Vault->>USDC: transfer(recorded Safe, recorded amount)
     Note right of Vault: DepositReclaimed event emitted
 ```
 
-**Events:** `DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)` — the recorded Safe and the recorded amount
+**Events:** `DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)` — the recorded Safe and the recorded amount; `CompleteSetsMerged(caller, amount)` first, when the vault held free pairs
 
 **Reverts:**
 - `IntentAlreadyUsed()` — `intentId` was already consumed by `mintPositionFor` or a prior reclaim
@@ -977,7 +984,7 @@ function reclaimDepositFor(
 
 **Actor:** Operator
 
-Relays the owner key's signed `ReclaimIntent` to refund that Safe's escrow — the same refund as `reclaimDeposit`, with the Operator paying the gas. The USDC goes to the recorded Safe, never to the caller. The `ReclaimIntent` type is distinct from `MintIntent`, so a mint authorization never doubles as a cancellation. No phase check and no pause check.
+Relays the owner key's signed `ReclaimIntent` to refund that Safe's escrow — the same refund as `reclaimDeposit`, with the Operator paying the gas. The USDC goes to the recorded Safe, never to the caller. The `ReclaimIntent` type is distinct from `MintIntent`, so a mint authorization never doubles as a cancellation. No phase check and no pause check. As on the direct path, the shared refund merges the vault's free pairs before it transfers, because escrow seniority binds burns and collects and not fills.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -990,16 +997,20 @@ Relays the owner key's signed `ReclaimIntent` to refund that Safe's escrow — t
 sequenceDiagram
     actor Operator
     participant Vault as LPVault
+    participant CT as ConditionalTokens
     participant USDC
 
     Operator->>Vault: reclaimDepositFor(lp, intentId, deadline, sig)
     Note right of Vault: Checks:<br/>block.timestamp <= deadline<br/>derived Safe of the signer == lp<br/>intentId not already used<br/>escrow exists<br/>recorded Safe == lp
+    Vault->>CT: balanceOf(YES), balanceOf(NO)
+    Note right of Vault: pairs = free pairs, read before the effects
     Note right of Vault: usedIntents[intentId] = true<br/>delete pendingDeposits[intentId]<br/>totalEscrowed -= amount
+    Vault->>CT: mergePositions(pairs), only when pairs > 0
     Vault->>USDC: transfer(lp, recorded amount)
     Note right of Vault: DepositReclaimed event emitted
 ```
 
-**Events:** `DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)`
+**Events:** `DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)`; `CompleteSetsMerged(caller, amount)` first, when the vault held free pairs
 
 **Reverts:**
 - `NotOperator()` — caller is not an operator
@@ -1063,7 +1074,7 @@ function emergencyCancelAll() external
 
 **Actor:** Any address (after the vault's operator-silence timelock)
 
-Freezes the vault: sets the phase to Cancelled and changes nothing else. Callable by any address, with or without a position, once the vault's `emergencyCancelTimelock()` (7 days by default) has passed without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `burnPositionFor`, `collectFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`). `activeLiquidity`, every tick, every position, every escrow, and every balance stay as they are, so each LP exits alone afterwards through `burnPosition`, `burnPositionFor`, `collect`, `collectFor`, `reclaimDeposit`, or `reclaimDepositFor`, which pay in full at the frozen tick, and `mergeCompleteSets` keeps working. The call costs the same gas for any number of positions and carries no reentrancy guard, because it makes no external call and moves no token.
+Freezes the vault: sets the phase to Cancelled and changes nothing else. Callable by any address, with or without a position, once the vault's `emergencyCancelTimelock()` (7 days by default) has passed without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `burnPositionFor`, `collectFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`). `activeLiquidity`, every tick, every position, every escrow, and every balance stay as they are, so each LP exits alone afterwards through `burnPosition`, `burnPositionFor`, `collect`, `collectFor`, `reclaimDeposit`, or `reclaimDepositFor`, which value the claim at the frozen tick and pay it at the ledger's ratio per asset (1 when the vault is whole), and `mergeCompleteSets` keeps working. The call costs the same gas for any number of positions and carries no reentrancy guard, because it makes no external call and moves no token.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|

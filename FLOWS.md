@@ -12,7 +12,7 @@ This guide explains the main interaction patterns for the LP Vaults contracts us
 | Symbol | Role | Description |
 |--------|------|-------------|
 | `Admin` | Admin | Registry-only authority — manages roles, pauses, schedules upgrades |
-| `Oracle` | Oracle | Lifecycle authority — creates vaults, triggers wind-down |
+| `Oracle` | Oracle | Lifecycle authority — creates vaults, sets a vault's first-mint floor (`setMinimumFirstLiquidity`), triggers wind-down, redeems outcome tokens after resolution (`redeemOutcomeTokens`) |
 | `Operator` | Operator | Transactional authority — credits positions, distributes fees, updates tick |
 | `LP` | LP | Liquidity provider — a Safe that owns positions, collects fees, burns positions, and reclaims deposits, itself or through the owner key's signed intents that the Operator relays |
 | `Factory` | LPVaultFactory | Deploys vault clones and holds the role registry |
@@ -49,7 +49,7 @@ sequenceDiagram
     participant Vault as LPVault (clone)
 
     Note over Admin,Factory: ── STEP 1: Deploy the factory ──────────────────────────────
-    Admin->>Factory: deploy(impl, usdc, exchange, ctf,<br/>admin, oracle, operator)
+    Admin->>Factory: deploy(impl, usdc, exchange, ctf,<br/>admin, oracle, operator,<br/>safeFactory, safeProxyBytecodeHash)
     Factory-->>Admin: factory address
 
     Note over Oracle,Vault: ── STEP 2: Create a vault for a market ─────────────────────
@@ -451,7 +451,7 @@ sequenceDiagram
 
 ### 3.1 Emergency Cancel All (`emergencyCancelAll`)
 
-Any address can freeze the vault after the Operator has been silent for the vault's emergency-cancel timelock (7 days by default, 30 days at most). The freeze sets the phase to Cancelled and changes nothing else: every position, every tick, every escrow, and every total stay as they are. Each LP then exits alone, in their own transaction, through the burn, the collect, or the reclaim, which pay in full at the frozen tick. This is the last resort when the Operator is unresponsive.
+Any address can freeze the vault after the Operator has been silent for the vault's emergency-cancel timelock (7 days by default, 30 days at most). The freeze sets the phase to Cancelled and changes nothing else: every position, every tick, every escrow, and every total stay as they are. Each LP then exits alone, in their own transaction, through the burn, the collect, or the reclaim: the claim is valued at the frozen tick and paid at the ledger's ratio per asset, which is 1 when the vault is whole. This is the last resort when the Operator is unresponsive.
 
 ```mermaid
 sequenceDiagram
@@ -526,7 +526,7 @@ sequenceDiagram
 
 **When to pause:** A bug is discovered, a market anomaly is detected, or an emergency audit is needed. Pause is immediate and does not affect the vault's phase state machine.
 
-**Pause vs. emergencyCancelAll:** Pause is reversible and keeps positions intact. Emergency cancel is irreversible and freezes trading; every exit stays open and pays in full.
+**Pause vs. emergencyCancelAll:** Pause is reversible and keeps positions intact. Emergency cancel is irreversible and freezes trading; every exit stays open and pays at the ledger's ratio, which is 1 when the vault is whole.
 
 ---
 
@@ -617,6 +617,7 @@ sequenceDiagram
 |----------|-------|-------|-------|
 | `createVault` | Oracle | — | On factory |
 | `startWindDown` | Oracle | Active | One-way; enables exit-only |
+| `setMinimumFirstLiquidity` | Oracle | Any | On vault; matters only before the first mint |
 | `depositForIntent` | Operator | Active | Not paused; owner-key signature checked against the derived Safe |
 | `mintPositionFor` | Operator | Active | Not paused; escrow required, no signature, no USDC |
 | `notifyFees` | Operator | Active / WindDown | Not paused; activeLiquidity > 0; takes `amount` USDC from the Operator wallet |
