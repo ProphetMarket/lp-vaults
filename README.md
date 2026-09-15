@@ -61,14 +61,14 @@ Per-feature architecture diagrams (C4 L1/L2, data model, event topology, code ma
 
 See [DEPLOYMENT.md](DEPLOYMENT.md) for the full step-by-step guide covering:
 
-- Foundry installation and dependency setup
-- Building the sources
-- Environment variables (with the mandatory `ETHERSCAN_API_KEY` for contract verification)
-- Setting up a Foundry keystore account (`cast wallet import --account`, not `--sender`)
-- Deploying to Polygon Amoy testnet
-- Deploying to Polygon mainnet
-- Manual verification and post-deployment steps
-- Troubleshooting
+- The contract addresses and Safe derivation values per chain, read from Polygon and Amoy
+- Foundry installation, the build, the tests, and the size check
+- Environment variables and Foundry keystore accounts
+- Pre-flight checks against the live exchange before every deployment
+- Deploying to Polygon Amoy testnet and to Polygon mainnet, with a dry run first
+- Checks of the deployed factory, creating a market vault, and an end-to-end smoke test on Amoy
+- Operations (roles, pause, heartbeat, end of market) and implementation upgrades
+- Manual explorer verification, troubleshooting, and a deployment record
 
 ## Development
 
