@@ -750,3 +750,44 @@ contract MergeRefreshesOperatorSilenceTimerTest is MergePositionsTestBase {
         assertEq(vault.lastOperatorActivityTimestamp(), timerBefore, "a reverted merge must not count as proof of life");
     }
 }
+
+// ──────────────────────────────────────────────
+// SC-DU2W: Revert when a merged record was burned
+// What: The Safe burns both positions of the base, and the Operator's merge of
+//       them reverts PositionNotFound at the survivor's owner check, before any
+//       liquidity is read. A merge of the live position with a burned one
+//       reverts the same way at the consumed record's owner check.
+// Why:  Finding CV-03: a deleted record reads owner zero, range [0, 0), and
+//       mint tick 0, so two of them passed every equality check against each
+//       other and the merge emitted PositionsMerged for two positions that no
+//       longer existed (FR-DU2X).
+// Example: burn posA and posB -> mergePositions([posA, posB]) reverts.
+// ──────────────────────────────────────────────
+contract MergePositionsBurnedRecordsTest is MergePositionsTestBase {
+    // SC-DU2W: two burned records do not merge
+    function test_whenBothRecordsWereBurnedThenMergeReverts() public {
+        vm.startPrank(lp);
+        vault.burnPosition(posA);
+        vault.burnPosition(posB);
+        vm.stopPrank();
+        (address ownerA,,,,,,) = vault.positions(posA);
+        assertEq(ownerA, address(0), "precondition: posA is deleted");
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.PositionNotFound.selector);
+        vault.mergePositions(_buildIds(posA, posB));
+    }
+
+    // SC-DU2W: a live survivor does not merge a burned record
+    function test_whenAConsumedRecordWasBurnedThenMergeReverts() public {
+        vm.prank(lp);
+        vault.burnPosition(posB);
+
+        vm.prank(operatorAddr);
+        vm.expectRevert(LPVault.PositionNotFound.selector);
+        vault.mergePositions(_buildIds(posA, posB));
+
+        (,,,, uint128 liqA,,) = vault.positions(posA);
+        assertEq(liqA, 5e18, "posA keeps its liquidity");
+    }
+}

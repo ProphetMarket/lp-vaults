@@ -98,7 +98,7 @@ contract PayoutRatioTestBase is LPVaultFixture {
     ///      would (decision C8). This is how a test makes the vault short of USDC.
     function _drainThroughExchange(uint256 amount) internal {
         vm.prank(exchangeAddr);
-        mockUsdc.transferFrom(address(vault), exchangeAddr, amount);
+        assertTrue(mockUsdc.transferFrom(address(vault), exchangeAddr, amount), "the fill should spend");
     }
 
     /// @dev Drains the vault to exactly `held` USDC above escrow.

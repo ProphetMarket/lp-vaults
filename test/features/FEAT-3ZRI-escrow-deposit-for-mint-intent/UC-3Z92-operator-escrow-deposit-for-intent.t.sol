@@ -708,7 +708,7 @@ contract EscrowPlainTransferTest is EscrowDepositTestBase {
         super.setUp();
         // The Safe sends its 600 straight to the vault instead of through the Operator
         vm.prank(lp);
-        mockUsdc.transfer(address(vault), usdcAmount);
+        assertTrue(mockUsdc.transfer(address(vault), usdcAmount), "the plain transfer should succeed");
         assertEq(mockUsdc.balanceOf(address(vault)), usdcAmount, "precondition: the vault holds the plain transfer");
     }
 

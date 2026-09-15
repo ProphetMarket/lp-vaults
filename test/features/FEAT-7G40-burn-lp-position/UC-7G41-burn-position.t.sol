@@ -120,7 +120,7 @@ contract BurnPositionTestBase is LPVaultFixture {
     ///      would (decision C8). This is how a test makes the vault short.
     function _drainThroughExchange(uint256 amount) internal {
         vm.prank(exchangeAddr);
-        mockUsdc.transferFrom(address(vault), exchangeAddr, amount);
+        assertTrue(mockUsdc.transferFrom(address(vault), exchangeAddr, amount), "the fill should spend");
     }
 
     function _yesOf(address who) internal view returns (uint256) {

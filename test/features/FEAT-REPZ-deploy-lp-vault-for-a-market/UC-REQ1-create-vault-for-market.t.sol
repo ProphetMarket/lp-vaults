@@ -420,6 +420,53 @@ contract CreateVaultZeroFloorTest is LPVaultFixture {
 }
 
 // ──────────────────────────────────────────────
+// SC-DU2Y: createVault reverts when tickSpacing is zero or negative
+// What: With tickSpacing 0 or -10 the Oracle's createVault reverts
+//       InvalidTickSpacing beside the zero-floor check, and no vault is
+//       registered for the market.
+// Why:  Finding CV-12: a zero spacing made every depositForIntent revert with
+//       a division-by-zero panic in the alignment check, so the vault took no
+//       deposit and the market needed a new ID; a negative spacing read wrong
+//       in every document (FR-DU2Z).
+// Example: createVault(marketId, 0, 10e18, ...) -> revert InvalidTickSpacing.
+// ──────────────────────────────────────────────
+contract CreateVaultInvalidTickSpacingTest is LPVaultFixture {
+    LPVaultFactory factory;
+
+    address admin = makeAddr("admin");
+    address oracleAddr = makeAddr("oracle");
+    address operatorAddr = makeAddr("operator");
+
+    function setUp() public {
+        LPVault impl = new LPVault();
+        MockERC20 mockUsdc = new MockERC20();
+        _deployConditionalTokens();
+        factory = _deployFactory(
+            address(impl), address(mockUsdc), makeAddr("exchange"), address(ctf), admin, oracleAddr, operatorAddr
+        );
+    }
+
+    function _createWithSpacing(int24 spacing) internal {
+        (bytes32 conditionId, uint256 yesTokenId, uint256 noTokenId) =
+            _prepareBinaryCondition(bytes32(uint256(1)), factory.usdc());
+        vm.prank(oracleAddr);
+        vm.expectRevert(LPVaultFactory.InvalidTickSpacing.selector);
+        factory.createVault(bytes32(uint256(1)), spacing, uint128(10e18), conditionId, yesTokenId, noTokenId);
+        assertEq(factory.vaultForMarket(bytes32(uint256(1))), address(0), "no vault registered");
+    }
+
+    // SC-DU2Y: a zero spacing reverts
+    function test_revertsOnZeroTickSpacing() public {
+        _createWithSpacing(int24(0));
+    }
+
+    // SC-DU2Y: a negative spacing reverts
+    function test_revertsOnNegativeTickSpacing() public {
+        _createWithSpacing(int24(-10));
+    }
+}
+
+// ──────────────────────────────────────────────
 // Shared setup for the outcome-token identity scenarios: a factory over the real
 // ConditionalTokens contract, and helpers that prepare conditions and call createVault
 // as the Oracle with an explicit identity.

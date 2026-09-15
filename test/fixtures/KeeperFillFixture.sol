@@ -73,7 +73,7 @@ abstract contract KeeperFillFixture is LPVaultFixture {
         if (spend > 0) {
             MockERC20 usdc = MockERC20(vault.usdc());
             vm.prank(exchange);
-            usdc.transferFrom(address(vault), exchange, spend);
+            assertTrue(usdc.transferFrom(address(vault), exchange, spend), "the fill should spend");
         }
 
         // The tokens arrive through the receiver hook

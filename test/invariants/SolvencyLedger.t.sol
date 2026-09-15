@@ -225,7 +225,7 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         if (balance <= escrowed) return;
         uint256 amount = bound(seed, 1, balance - escrowed);
         vm.prank(exchangeAddr);
-        mockUsdc.transferFrom(address(vault), exchangeAddr, amount);
+        assertTrue(mockUsdc.transferFrom(address(vault), exchangeAddr, amount), "the drain should spend");
     }
 
     /// @dev Gives the vault outcome tokens, as the keeper's fills would, one pick in four, so a

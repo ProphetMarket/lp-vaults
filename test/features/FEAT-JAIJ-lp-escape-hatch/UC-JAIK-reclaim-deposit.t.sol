@@ -437,3 +437,48 @@ contract ReclaimReentrancyTest is LPVaultFixture {
         assertEq(vault.totalEscrowed(), 0, "the escrow should be settled once");
     }
 }
+
+// ──────────────────────────────────────────────
+// SC-DU2T: Reclaim merges the vault's free pairs before it pays
+// What: The vault holds 200 USDC against a 600 escrow, because the exchange's
+//       standing allowance spent 400 on a fill, and it holds 500 YES and 500 NO
+//       that no claim is owed. The Safe's reclaim merges the 500 free pairs,
+//       receives the full 600, and leaves 100 USDC and no token in the vault.
+// Why:  Escrow seniority (decision C7) binds burns and collects and not fills,
+//       so a fill can spend escrowed USDC (finding CV-06). Before R15 this
+//       reclaim reverted TransferFailed until a keeper merged; the merge inside
+//       _refundEscrow (FR-DU2U, ADR-DU2V) removes the wait.
+// Example: escrow 600, balance 200, 500 free pairs -> merge 500, pay 600, 100 left.
+// ──────────────────────────────────────────────
+contract ReclaimMergesFreePairsTest is ReclaimDepositTestBase {
+    event CompleteSetsMerged(address indexed caller, uint256 amount);
+
+    // SC-DU2T: the reclaim merges the free pairs and pays the recorded amount in full
+    function test_reclaimMergesTheFreePairsAndPaysInFull() public {
+        // The fill: the exchange spends 400 of the vault's USDC through the allowance initialize granted
+        vm.prank(exchangeAddr);
+        assertTrue(mockUsdc.transferFrom(address(vault), exchangeAddr, 400), "the fill should spend");
+        assertEq(mockUsdc.balanceOf(address(vault)), 200, "precondition: the balance is below the escrow");
+        assertEq(vault.totalEscrowed(), escrowAmount, "precondition: 600 escrowed");
+
+        // The free pairs: 500 YES and 500 NO with no live position, so nothing is owed
+        _giveOutcomeTokens(address(vault), vault.conditionId(), 500, 500);
+        assertEq(vault.totalYesOwed(), 0, "precondition: no YES owed");
+        assertEq(vault.totalNoOwed(), 0, "precondition: no NO owed");
+
+        uint256 before_ = mockUsdc.balanceOf(lp);
+
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit CompleteSetsMerged(lp, 500);
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit DepositReclaimed(intentId, lp, escrowAmount);
+        vm.prank(lp);
+        vault.reclaimDeposit(intentId);
+
+        assertEq(mockUsdc.balanceOf(lp) - before_, escrowAmount, "the Safe should receive its full escrow");
+        assertEq(mockUsdc.balanceOf(address(vault)), 100, "the vault keeps the merge's remainder");
+        assertEq(ctf.balanceOf(address(vault), vault.yesTokenId()), 0, "every YES merged");
+        assertEq(ctf.balanceOf(address(vault), vault.noTokenId()), 0, "every NO merged");
+        assertEq(vault.totalEscrowed(), 0, "the escrow is settled");
+    }
+}

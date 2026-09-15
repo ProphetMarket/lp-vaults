@@ -762,7 +762,7 @@ contract CollectPaysItsShareTest is CollectFeesTestBase {
 
     function _drainThroughExchange(uint256 amount) internal {
         vm.prank(exchangeAddr);
-        mockUsdc.transferFrom(address(vault), exchangeAddr, amount);
+        assertTrue(mockUsdc.transferFrom(address(vault), exchangeAddr, amount), "the fill should spend");
     }
 
     // SC-COEZ: case A — pays its share at the USDC ratio and settles
@@ -907,7 +907,7 @@ contract CollectAfterSwitchTest is CollectFeesTestBase {
 
         uint256 above = mockUsdc.balanceOf(address(vault)) - vault.totalEscrowed();
         vm.prank(exchangeAddr);
-        mockUsdc.transferFrom(address(vault), exchangeAddr, above - HELD);
+        assertTrue(mockUsdc.transferFrom(address(vault), exchangeAddr, above - HELD), "the fill should spend");
 
         assertEq(vault.totalFeesOwed(), FEES_OWED, "precondition: the fees owed after the Q128 floor");
         assertEq(vault.totalUsdcOwed() + vault.totalFeesOwed() + vault.totalYesOwed(), POOLED_TOTAL, "precondition");
