@@ -1,6 +1,6 @@
 # Method Reference
 
-Per-method documentation for `LPVault` and `LPVaultFactory`, organized in the same four sections as [FLOWS.md](FLOWS.md). Each entry includes the function signature, actor, parameters, sequence diagram, events emitted, and revert conditions.
+Per-method documentation for `LPVault` and `LPVaultFactory`, organized in the same four sections as [FLOWS.md](specs/FLOWS.md). Each entry includes the function signature, actor, parameters, sequence diagram, events emitted, and revert conditions.
 
 **Sections:**
 
@@ -75,7 +75,7 @@ salt = keccak256(abi.encode(ownerKey))
 safe = address(uint160(uint256(keccak256(0xff ++ safeFactory ++ salt ++ safeProxyBytecodeHash))))
 ```
 
-Both inputs are `immutable` on the factory, and every vault reads them from the factory at call time (`_deriveSafe`), so no Admin can change them. One internal `_verifySafeOwnerSignature(safe, structHash, signature)` runs the check for `depositForIntent`, `reclaimDepositFor`, and the later relayed burn and collect. Every LP-signed type carries a `deadline`, checked inclusively against `block.timestamp`.
+Both inputs are `immutable` on the factory, and every vault reads them from the factory at call time (`_deriveSafe`), so no Admin can change them. One internal `_verifySafeOwnerSignature(safe, structHash, signature)` runs the check for `depositForIntent`, `reclaimDepositFor`, and the later relayed burn. Every LP-signed type carries a `deadline`, checked inclusively against `block.timestamp`.
 
 Known property: a Safe owner who swaps the owner key leaves the old key able to derive the same Safe, so the old key keeps the relayed paths until the vault holds nothing for that Safe. The exchange has the same property for orders. A valid signature never proves ownership of an `intentId`: the recorded Safe in `pendingDeposits` does, and every path that spends an escrow checks it.
 
@@ -285,7 +285,7 @@ function startWindDown() external onlyOracle
 
 **Actor:** Oracle
 
-Transitions the vault from Active (phase 1) to WindDown (phase 2). One-way — there is no mechanism to revert to Active. After this call, `depositForIntent`, `mintPositionFor`, and `updateTick` revert; `collect`, `collectFor`, `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, `mergeCompleteSets`, `redeemOutcomeTokens`, and `emergencyCancelAll` remain open. The Oracle calls this first, then `redeemOutcomeTokens` once the Conditional Tokens contract holds the result, because the redemption reverts while the vault is Active.
+Transitions the vault from Active (phase 1) to WindDown (phase 2). One-way — there is no mechanism to revert to Active. After this call, `depositForIntent`, `mintPositionFor`, and `updateTick` revert; `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, `mergeCompleteSets`, `redeemOutcomeTokens`, and `emergencyCancelAll` remain open. The Oracle calls this first, then `redeemOutcomeTokens` once the Conditional Tokens contract holds the result, because the redemption reverts while the vault is Active.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -443,14 +443,13 @@ sequenceDiagram
     Note right of Vault: Mark intentId as used<br/>delete pendingDeposits[intentId]<br/>totalEscrowed -= amount
     Note right of Vault: Compute liquidity = usdcAmount * PRECISION / rangeWidth
     Note right of Vault: Init ticks if new; update liquidityGross / liquidityNet
-    Note right of Vault: Snapshot feeGrowthInsideLastX128 at mint time
     Note right of Vault: Create positions[positionId] with owner = lp,<br/>mintTick = currentTick clamped into [tL, tU]
     Note right of Vault: Increment activeLiquidity if position is in-range
     Note right of Vault: PositionMinted event emitted (no USDC moves)
     Vault-->>Operator: positionId
 ```
 
-**Events:** `PositionMinted(uint256 indexed positionId, address indexed owner, int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity, uint256 usdcAmount, bytes32 intentId)`. The `positions(uint256)` getter returns `(owner, tickLower, tickUpper, mintTick, liquidity, feeGrowthInsideLastX128, tokensOwed)`, seven words. `mintTick` is `currentTick` at the mint, clamped to `tickLower` when the price was below the range and to `tickUpper` when it was at or above it (FR-AFPO).
+**Events:** `PositionMinted(uint256 indexed positionId, address indexed owner, int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity, uint256 usdcAmount, bytes32 intentId)`. The `positions(uint256)` getter returns `(owner, tickLower, tickUpper, mintTick, liquidity)`, five words. `mintTick` is `currentTick` at the mint, clamped to `tickLower` when the price was below the range and to `tickUpper` when it was at or above it (FR-AFPO).
 
 **Reverts:**
 - `NotOperator()` — caller is not an operator
@@ -464,48 +463,6 @@ sequenceDiagram
 - `NotIntentOwner()` — the escrow's recorded Safe is not `lp`
 - `IntentMismatch()` — the recomputed struct hash differs from the recorded one (range, amount, or deadline changed)
 - `BelowMinimumFirstLiquidity()` — first mint liquidity below floor
-
----
-
-### `LPVault.notifyFees`
-
-```solidity
-function notifyFees(uint256 amount) external onlyOperator whenNotPaused nonReentrant touchesHeartbeat
-```
-
-**Actor:** Operator
-
-Increments the global Q128 fee accumulator by the per-unit share of `amount` distributed across `activeLiquidity`, credits the solvency ledger's fee total by that increment times `activeLiquidity` (which bounds a report at 2^128 base units, about 3.4 × 10^32 USDC), then takes `amount` USDC from the caller with `transferFrom` in the same call, so no fee credit exists without the USDC behind it. The Operator wallet must hold the swept USDC and a standing USDC approval to the vault (see `DEPLOYMENT.md`, "Operator USDC approval per vault"). The vault performs no balance check beyond the pull: the Operator can still under-report.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `amount` | `uint256` | USDC fee revenue to distribute; must be > 0 |
-
-```mermaid
-sequenceDiagram
-    actor Operator
-    participant Vault as LPVault
-    participant USDC
-
-    Operator->>Vault: notifyFees(amount)
-    Note right of Vault: Checks:<br/>not paused<br/>phase != Cancelled<br/>amount > 0<br/>activeLiquidity > 0
-    Note right of Vault: growth = mulDiv(amount, 2^128, activeLiquidity)<br/>feeGrowthGlobalX128 += growth<br/>totalFeesOwedX128 += growth x activeLiquidity
-    Vault->>USDC: transferFrom(operator, vault, amount)
-    Note right of Vault: a rejected transfer reverts<br/>the whole call (TransferFailed)
-    Note right of Vault: lastOperatorActivityTimestamp = now
-    Note right of Vault: FeesNotified event emitted
-```
-
-**Events:** `FeesNotified(uint256 amount, uint256 feeGrowthGlobalX128)`, preceded in the same transaction by the USDC contract's `Transfer(operator, vault, amount)`
-
-**Reverts:**
-- `NotOperator()` — caller is not an operator
-- `TradingIsPaused()` — vault is paused
-- `VaultCancelled()` — vault is in terminal Cancelled phase
-- `ZeroAmount()` — `amount` is 0
-- `NoActiveLiquidity()` — `activeLiquidity` is 0
-- `TransferFailed()` — the USDC `transferFrom` from the caller failed (no balance, or no approval); the accumulator increment rolls back
-- an arithmetic panic — `amount` above 2^128 base units, because the fee total's credit no longer fits in 256 bits
 
 ---
 
@@ -545,7 +502,7 @@ function updateTick(int24 newTick) external onlyOperator whenNotPaused nonReentr
 
 **Actor:** Operator
 
-Synchronises the vault's price tick with the off-chain CLOB mid-price. Crosses every initialised tick between `currentTick` and `newTick`, flipping per-tick fee accumulators and adjusting `activeLiquidity` and `noSideLiquidity`. An interior mint tick is an initialised tick too: it counts its positions' liquidity and holds their NO sub-range's net, so a move crosses it and `ticksCrossed` counts it. For every segment the move traverses, the trailing one included, the vault shifts the four totals of the solvency ledger with the liquidity split as it stood in that segment: moving up, each NO-side level buys NO at `1 − t / 10000` and each YES-side level's YES returns to USDC; moving down, the mirror. The search for the next initialised tick reads only the bitmap words between `currentTick` and `newTick`, so the cost of a call follows the reported move and not where any LP initialised a tick. A call with the current tick refreshes only `lastOperatorActivityTimestamp` and returns: no crossing, no bitmap read, no event. The keeper reports every 60 seconds and after fills, so this is the normal case.
+Synchronises the vault's price tick with the off-chain CLOB mid-price. Crosses every initialised tick between `currentTick` and `newTick`, adjusting `activeLiquidity` and `noSideLiquidity`. An interior mint tick is an initialised tick too: it counts its positions' liquidity and holds their NO sub-range's net, so a move crosses it and `ticksCrossed` counts it. For every segment the move traverses, the trailing one included, the vault shifts the three totals of the solvency ledger with the liquidity split as it stood in that segment: moving up, each NO-side level buys NO at `1 − t / 10000` and each YES-side level's YES returns to USDC; moving down, the mirror. The search for the next initialised tick reads only the bitmap words between `currentTick` and `newTick`, so the cost of a call follows the reported move and not where any LP initialised a tick. A call with the current tick refreshes only `lastOperatorActivityTimestamp` and returns: no crossing, no bitmap read, no event. The keeper reports every 60 seconds and after fills, so this is the normal case.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -565,11 +522,11 @@ sequenceDiagram
     else newTick != currentTick
         loop for each initialised tick between currentTick and newTick (a boundary or a mint tick)
             Note right of Vault: accrueSegment(up to the tick) with the current split
-            Note right of Vault: crossTick(tick):<br/>feeGrowthOutside = global - outside<br/>activeLiquidity += liquidityNet (or -net)<br/>noSideLiquidity += noLiquidityNet (or -net)
+            Note right of Vault: crossTick(tick):<br/>activeLiquidity += liquidityNet (or -net)<br/>noSideLiquidity += noLiquidityNet (or -net)
             Note right of Vault: Stops and reverts if crossCount > 256
         end
         Note right of Vault: accrueSegment(the trailing segment to newTick)
-        Note right of Vault: write the shift to the four ledger totals
+        Note right of Vault: write the shift to the three ledger totals
 
         Note right of Vault: currentTick = newTick
         Note right of Vault: TickUpdated event emitted
@@ -586,101 +543,6 @@ sequenceDiagram
 
 ---
 
-### `LPVault.collect`
-
-```solidity
-function collect(uint256 positionId) external nonReentrant
-```
-
-**Actor:** LP's Safe (position owner)
-
-Withdraws accrued trading fees from a position without removing it, in every phase and while paused. Computes the fees since the last collect from the per-tick `feeGrowthOutside` accumulators, adds `tokensOwed` (rolled in from `mergePositions`), settles the vault's tokens (before the switch it merges the free pairs, the YES and NO pairs above what the ledger owes in both tokens, into USDC; after the Oracle's redemption it redeems every token the vault holds), and pays the amount owed times the USDC ratio of the solvency ledger: before the switch the smaller of 1 and the USDC the vault holds above `totalEscrowed` (the free pairs counted) over `totalUsdcOwed() + totalFeesOwed()`; after it the same with every token, held and owed, valued at the stored payout on both sides, so one ratio covers every leg. Rounded down. The claim settles at that ratio, paid or not: `tokensOwed` reads zero afterwards and the ledger's fee total falls by the whole claim. A zero-owed collect reads no balance and settles nothing.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `positionId` | `uint256` | ID of the position to collect from |
-
-```mermaid
-sequenceDiagram
-    actor Safe as LP's Safe
-    participant Vault as LPVault
-    participant CTF as ConditionalTokens
-    participant USDC
-
-    Safe->>Vault: collect(positionId)
-    Note right of Vault: Checks:<br/>position.owner != 0 (exists)<br/>position.owner == msg.sender
-    Note right of Vault: feeGrowthInside = global - below(tL) - above(tU)
-    Note right of Vault: owed = position.liquidity<br/>    x (feeGrowthInside - feeGrowthInsideLastX128)<br/>    / 2^128 + position.tokensOwed
-    Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
-    Note right of Vault: read the stored payout (the switch)
-    Vault->>USDC: balanceOf(vault)
-    Note right of Vault: pairs = free pairs, min(YES - min(YES, totalYesOwed), NO - min(NO, totalNoOwed)), read before the debit<br/>switch off: paid = owed x min(1, (balance + pairs - totalEscrowed) / (totalUsdcOwed + totalFeesOwed))<br/>switch on: paid = owed x min(1, (balance + tokens at the payout - totalEscrowed) / (totalUsdcOwed + totalFeesOwed + token totals at the payout))
-    Note right of Vault: position.feeGrowthInsideLastX128 = feeGrowthInside<br/>position.tokensOwed = 0<br/>totalFeesOwedX128 -= the scaled fee claim
-    Vault->>CTF: mergePositions(pairs) if pairs > 0 (switch off), or redeemPositions if a token is held (switch on)
-    Vault->>USDC: transfer(safe, paid) if paid > 0
-    Note right of Vault: CompleteSetsMerged or OutcomeTokensRedeemed (if something settled), FeesCollected (if owed > 0)
-```
-
-**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when free pairs merged before the switch; `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` when tokens redeemed after it; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid)` — `amountPaid < amountOwed` marks a ratio below 1
-
-**Reverts:**
-- `PositionNotFound()` — no position exists at `positionId`
-- `NotPositionOwner()` — caller does not own this position
-- `TransferFailed()` — USDC transfer failed
-
----
-
-### `LPVault.collectFor`
-
-```solidity
-function collectFor(
-    address  lp,
-    uint256  positionId,
-    uint256  nonce,
-    uint256  deadline,
-    bytes calldata signature
-) external onlyOperator nonReentrant touchesHeartbeat
-```
-
-**Actor:** Operator
-
-Relays the owner key's signed `CollectIntent` to pay that Safe its fees — the same collect as `collect`, with the Operator paying the gas. The USDC goes to `position.owner`, never to the caller. The type carries a `nonce` because a collect repeats over a position's life, and each struct hash is consumed once in its own record.
-
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `lp` | `address` | The LP's Safe — must be the position's recorded owner |
-| `positionId` | `uint256` | The position to collect from |
-| `nonce` | `uint256` | A value the owner key never reuses for this position |
-| `deadline` | `uint256` | Last `block.timestamp` at which the relayed collect is accepted (inclusive) |
-| `signature` | `bytes` | 65-byte EIP-712 signature from the Safe's owner key over `CollectIntent(address lp,uint256 positionId,uint256 nonce,uint256 deadline)` |
-
-```mermaid
-sequenceDiagram
-    actor Operator
-    participant Vault as LPVault
-    participant USDC
-
-    Operator->>Vault: collectFor(lp, positionId, nonce, deadline, sig)
-    Note right of Vault: Checks:<br/>block.timestamp <= deadline<br/>derived Safe of the signer == lp<br/>struct hash not used<br/>position exists, position.owner == lp
-    Note right of Vault: usedCollectAuthorizations[structHash] = true
-    Note right of Vault: the same body as collect
-    Vault->>USDC: transfer(lp, paid) if paid > 0
-    Note right of Vault: FeesCollected event emitted (if owed > 0)
-```
-
-**Events:** `CompleteSetsMerged` when pairs merged; `FeesCollected(uint256 indexed positionId, address indexed owner, uint256 amountOwed, uint256 amountPaid)`
-
-**Reverts:**
-- `NotOperator()` — caller is not an operator
-- `IntentExpired()` — `block.timestamp > deadline`
-- `InvalidSignature()` — signature is malformed, malleable, produced over another type, or from a key whose derived Safe is not `lp`
-- `IntentAlreadyUsed()` — this `CollectIntent` was already consumed
-- `PositionNotFound()` — no position exists at `positionId`
-- `NotPositionOwner()` — `lp` does not own this position
-- `TransferFailed()` — USDC transfer failed
-
----
-
 ### `LPVault.burnPosition`
 
 ```solidity
@@ -689,7 +551,7 @@ function burnPosition(uint256 positionId) external nonReentrant
 
 **Actor:** LP's Safe (position owner)
 
-Closes a position the Safe owns and pays what its claim holds under the claim model (decision C26): USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick (YES below the mint tick, NO at or above it) plus the USDC that buying that token at each level's price did not spend, and the accrued fees. The vault settles its tokens first (before the switch it merges its free pairs, the YES and NO pairs above what the ledger owes in both tokens, read before its own claim is debited; after the Oracle's redemption it redeems every token it holds), removes the position's liquidity from both ticks (deleting a tick and clearing its bitmap bit when its `liquidityGross` reaches zero), reduces `activeLiquidity` (and `noSideLiquidity` for a position on the NO side of its mint tick) when the position is in range, removes the position's NO sub-range and its interior mint tick's reference, debits the solvency ledger by the full scaled claim and fees, deletes the record, and pays. Before the switch it pays each asset's owed amount times that asset's ratio (the smaller of 1 and held ÷ owed total), rounded down, USDC in one transfer and the token in kind. After the switch the token leg is worth `tokenOwed × numerator ÷ denominator` USDC at the stored payout, and the burn pays the principal, the fees, and that USDC as one prorated sum in one USDC transfer, with no ERC-1155 transfer. Never a revert on a shortfall. Works in every phase, while paused, and with every Operator removed. Never refreshes the Operator heartbeat. A burn is valued at the last reported tick, so a burn between a fill and the keeper's report of it takes its share of that fill's spend as a final cut; see `specs/FLOWS.md` 6.2 and ADR-DYNK in FEAT-7G40 (finding CV-08).
+Closes a position the Safe owns and pays what its claim holds under the claim model (decision C26): USDC for every level the price never crossed, one outcome token for the band between the mint tick and the current tick (YES below the mint tick, NO at or above it) plus the USDC that buying that token at each level's price did not spend. The vault settles its tokens first (before the switch it merges its free pairs, the YES and NO pairs above what the ledger owes in both tokens, read before its own claim is debited; after the Oracle's redemption it redeems every token it holds), removes the position's liquidity from both ticks (deleting a tick and clearing its bitmap bit when its `liquidityGross` reaches zero), reduces `activeLiquidity` (and `noSideLiquidity` for a position on the NO side of its mint tick) when the position is in range, removes the position's NO sub-range and its interior mint tick's reference, debits the solvency ledger by the full scaled claim, deletes the record, and pays. Before the switch it pays each asset's owed amount times that asset's ratio (the smaller of 1 and held ÷ owed total), rounded down, USDC in one transfer and the token in kind. After the switch the token leg is worth `tokenOwed × numerator ÷ denominator` USDC at the stored payout, and the burn pays the principal and that USDC as one prorated sum in one USDC transfer, with no ERC-1155 transfer. Never a revert on a shortfall. Works in every phase, while paused, and with every Operator removed. Never refreshes the Operator heartbeat. A burn is valued at the last reported tick, so a burn between a fill and the keeper's report of it takes its share of that fill's spend as a final cut; see `specs/FLOWS.md` 6.1 and ADR-DYNK in FEAT-7G40 (finding CV-08).
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -720,16 +582,16 @@ sequenceDiagram
 
     Safe->>Vault: burnPosition(positionId)
     Note right of Vault: Checks:<br/>owner != 0 and liquidity > 0<br/>position.owner == msg.sender
-    Note right of Vault: fees from feeGrowthInside; the claim from<br/>(liquidity, range, mintTick, currentTick)
+    Note right of Vault: the claim from<br/>(liquidity, range, mintTick, currentTick)
     Vault->>CTF: balanceOf(vault, YES), balanceOf(vault, NO)
     Note right of Vault: read the stored payout (the switch)
     Vault->>USDC: balanceOf(vault)
     alt switch off
-        Note right of Vault: pairs = free pairs, min(YES - min(YES, totalYesOwed), NO - min(NO, totalNoOwed)), read before the debit<br/>usdcPaid = (usdcOwed + fees) x min(1, (balance + pairs - totalEscrowed) / (totalUsdcOwed + totalFeesOwed))<br/>tokenPaid = tokenOwed x min(1, (held - pairs) / tokenTotal)
+        Note right of Vault: pairs = free pairs, min(YES - min(YES, totalYesOwed), NO - min(NO, totalNoOwed)), read before the debit<br/>usdcPaid = usdcOwed x min(1, (balance + pairs - totalEscrowed) / totalUsdcOwed)<br/>tokenPaid = tokenOwed x min(1, (held - pairs) / tokenTotal)
     else switch on
-        Note right of Vault: tokenUsdc = tokenOwed x numerator / denominator<br/>ratio = min(1, (balance + tokens at the payout - totalEscrowed) / (totalUsdcOwed + totalFeesOwed + token totals at the payout))<br/>usdcPaid = (usdcOwed + fees) x ratio; tokenPaid = (usdcOwed + fees + tokenUsdc) x ratio - usdcPaid
+        Note right of Vault: tokenUsdc = tokenOwed x numerator / denominator<br/>ratio = min(1, (balance + tokens at the payout - totalEscrowed) / (totalUsdcOwed + token totals at the payout))<br/>usdcPaid = usdcOwed x ratio; tokenPaid = (usdcOwed + tokenUsdc) x ratio - usdcPaid
     end
-    Note right of Vault: remove the NO sub-range, then the liquidity from both ticks (clear a bit at zero)<br/>activeLiquidity -= liquidity if in range, noSideLiquidity too on the NO side<br/>debit the four ledger totals by the scaled claim and fees<br/>delete positions[positionId]
+    Note right of Vault: remove the NO sub-range, then the liquidity from both ticks (clear a bit at zero)<br/>activeLiquidity -= liquidity if in range, noSideLiquidity too on the NO side<br/>debit the three ledger totals by the scaled claim<br/>delete positions[positionId]
     alt switch off
         Vault->>CTF: mergePositions(pairs) if pairs > 0
         Vault->>USDC: transfer(safe, usdcPaid)
@@ -741,7 +603,7 @@ sequenceDiagram
     Note right of Vault: PositionBurned event emitted
 ```
 
-**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when free pairs merged before the switch; `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` when tokens redeemed after it; `PositionBurned(uint256 indexed positionId, address indexed owner, uint256 usdcOwed, uint256 feesOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid)` — `paid < owed` marks a ratio below 1; before the switch `tokenPaid` is the tokens transferred, after it the USDC paid for the token leg, and the one USDC transfer carries `usdcPaid + tokenPaid`
+**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when free pairs merged before the switch; `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` when tokens redeemed after it; `PositionBurned(uint256 indexed positionId, address indexed owner, uint256 usdcOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid)` — `paid < owed` marks a ratio below 1; before the switch `tokenPaid` is the tokens transferred, after it the USDC paid for the token leg, and the one USDC transfer carries `usdcPaid + tokenPaid`
 
 **Reverts:**
 - `PositionNotFound()` — never minted, already burned, or consumed by `mergePositions`
@@ -842,7 +704,7 @@ function payoutNumerators() external view returns (uint128 numYes, uint128 numNo
 
 **Actor:** Oracle
 
-Redeems the vault's whole YES and NO balances through the Conditional Tokens contract into USDC held by the vault, after the result of the vault's condition is reported (`payoutDenominator(conditionId) != 0`). The first successful call is the switch: it copies the two payout numerators from the Conditional Tokens contract into vault storage, and every later burn and collect values its token leg at that payout in USDC, redeems the vault's tokens first, and pays one USDC transfer at one ratio. The numerators never come from an argument, so the Oracle cannot set a payout. Reverts while the vault is Active: the Oracle calls `startWindDown` first, because `updateTick` and `mintPositionFor` revert in WindDown and Cancelled, so no tick report can move value between claims that are now fixed USDC. Works in WindDown and Cancelled, paused or not, runs again for tokens that arrive later, changes no phase, and refreshes no heartbeat. A call with nothing to redeem makes no call and emits nothing. Before the switch an exit pays the winning token in kind, and the LP redeems it at the Conditional Tokens contract from the Safe for the same USDC, so no LP waits on the Oracle.
+Redeems the vault's whole YES and NO balances through the Conditional Tokens contract into USDC held by the vault, after the result of the vault's condition is reported (`payoutDenominator(conditionId) != 0`). The first successful call is the switch: it copies the two payout numerators from the Conditional Tokens contract into vault storage, and every later burn values its token leg at that payout in USDC, redeems the vault's tokens first, and pays one USDC transfer at one ratio. The numerators never come from an argument, so the Oracle cannot set a payout. Reverts while the vault is Active: the Oracle calls `startWindDown` first, because `updateTick` and `mintPositionFor` revert in WindDown and Cancelled, so no tick report can move value between claims that are now fixed USDC. Works in WindDown and Cancelled, paused or not, runs again for tokens that arrive later, changes no phase, and refreshes no heartbeat. A call with nothing to redeem makes no call and emits nothing. Before the switch an exit pays the winning token in kind, and the LP redeems it at the Conditional Tokens contract from the Safe for the same USDC, so no LP waits on the Oracle.
 
 ```mermaid
 sequenceDiagram
@@ -888,7 +750,7 @@ function mergePositions(uint256[] calldata positionIds)
 
 **Actor:** Operator
 
-Combines two or more distinct positions with the same owner, range, and mint tick into the first entry (`positionIds[0]`). Rolls up uncollected fees into the survivor's `tokensOwed`, sums liquidity, and zeroes consumed positions. Tick state is unchanged (net liquidity on the range and on the NO sub-range is the same). The solvency ledger's fee total falls by the dust the per-position floors drop, `Σ (liquidity × delta) mod 2^128`, so it still equals the survivor's scaled fee claim; no principal total moves. This joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC, which audit-fix step R9 adds as `mergeCompleteSets()`.
+Combines two or more distinct positions with the same owner, range, and mint tick into the first entry (`positionIds[0]`). Sums liquidity into the survivor and zeroes the liquidity of every consumed record. Tick state is unchanged (net liquidity on the range and on the NO sub-range is the same). The merge writes no total of the solvency ledger: the claim is linear in liquidity, and every merged position shares the range and the mint tick. This joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC, which audit-fix step R9 adds as `mergeCompleteSets()`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -903,16 +765,14 @@ sequenceDiagram
     Note right of Vault: Checks:<br/>not paused<br/>positionIds.length >= 2<br/>no repeated ID (pairwise, before any read)
 
     Note right of Vault: Load survivor = positions[posA]<br/>Check: survivor.owner != 0 (a burned record never merges)
-    Note right of Vault: feeGrowthInside = current value for range
 
     loop for each consumed position (posB, posC, ...)
         Note right of Vault: Check: consumed.owner != 0<br/>Check: same owner, same tickLower, same tickUpper<br/>Check: same mintTick
-        Note right of Vault: consumedFees = consumed.liquidity<br/>    x (feeGrowthInside - consumed.feeGrowthInsideLastX128)<br/>    / 2^128
-        Note right of Vault: totalLiquidity += consumed.liquidity<br/>totalOwed += consumed.tokensOwed + consumedFees
-        Note right of Vault: consumed.liquidity = 0<br/>consumed.tokensOwed = 0<br/>consumed.feeGrowthInsideLastX128 = 0
+        Note right of Vault: totalLiquidity += consumed.liquidity
+        Note right of Vault: consumed.liquidity = 0
     end
 
-    Note right of Vault: survivor.liquidity = totalLiquidity<br/>survivor.tokensOwed = totalOwed<br/>survivor.feeGrowthInsideLastX128 = feeGrowthInside
+    Note right of Vault: survivor.liquidity = totalLiquidity
     Note right of Vault: PositionsMerged event emitted
 ```
 
@@ -938,7 +798,7 @@ function reclaimDeposit(bytes32 intentId) external nonReentrant
 
 **Actor:** LP's Safe (through a Safe transaction the owner key signs)
 
-One-call escape hatch: refunds the USDC escrowed against `intentId` to the Safe that paid it. The escrow record proves the deposit, so the call needs no signature, no Operator co-signature, no timelock, no phase check, and no pause check. It works with every Operator removed and in every phase, including Cancelled. Escrow seniority (decision C7) binds burns and collects, which read the balance less `totalEscrowed`, and not fills: the exchange's unlimited USDC allowance can spend escrowed USDC. So the refund merges the vault's free pairs (the pairs above what the ledger owes in both tokens) into USDC before it transfers, and a reclaim never waits for a keeper to merge; the amount paid is the recorded amount, whatever the merge produced. The keeper keeps its quoted size below the vault's USDC balance minus `totalEscrowed`.
+One-call escape hatch: refunds the USDC escrowed against `intentId` to the Safe that paid it. The escrow record proves the deposit, so the call needs no signature, no Operator co-signature, no timelock, no phase check, and no pause check. It works with every Operator removed and in every phase, including Cancelled. Escrow seniority (decision C7) binds burns, which read the balance less `totalEscrowed`, and not fills: the exchange's unlimited USDC allowance can spend escrowed USDC. So the refund merges the vault's free pairs (the pairs above what the ledger owes in both tokens) into USDC before it transfers, and a reclaim never waits for a keeper to merge; the amount paid is the recorded amount, whatever the merge produced. The keeper keeps its quoted size below the vault's USDC balance minus `totalEscrowed`.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -984,7 +844,7 @@ function reclaimDepositFor(
 
 **Actor:** Operator
 
-Relays the owner key's signed `ReclaimIntent` to refund that Safe's escrow — the same refund as `reclaimDeposit`, with the Operator paying the gas. The USDC goes to the recorded Safe, never to the caller. The `ReclaimIntent` type is distinct from `MintIntent`, so a mint authorization never doubles as a cancellation. No phase check and no pause check. As on the direct path, the shared refund merges the vault's free pairs before it transfers, because escrow seniority binds burns and collects and not fills.
+Relays the owner key's signed `ReclaimIntent` to refund that Safe's escrow — the same refund as `reclaimDeposit`, with the Operator paying the gas. The USDC goes to the recorded Safe, never to the caller. The `ReclaimIntent` type is distinct from `MintIntent`, so a mint authorization never doubles as a cancellation. No phase check and no pause check. As on the direct path, the shared refund merges the vault's free pairs before it transfers, because escrow seniority binds burns and not fills.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -1029,38 +889,36 @@ sequenceDiagram
 function totalUsdcOwedScaled() external view returns (uint256)   // USDC units x 10000 x 1e18
 function totalYesOwedScaled()  external view returns (uint256)   // token units x 1e18
 function totalNoOwedScaled()   external view returns (uint256)   // token units x 1e18
-function totalFeesOwedX128()   external view returns (uint256)   // USDC units x 2^128
-function totalUsdcOwed() public view returns (uint256)           // the four truncated totals
+function totalUsdcOwed() public view returns (uint256)           // the three truncated totals
 function totalYesOwed()  public view returns (uint256)
 function totalNoOwed()   public view returns (uint256)
-function totalFeesOwed() public view returns (uint256)
 function noSideLiquidity() external view returns (uint128)
-function ticks(int24) external view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutsideX128, int128 noLiquidityNet)
+function ticks(int24) external view returns (uint128 liquidityGross, int128 liquidityNet, int128 noLiquidityNet)
 function payoutNumerators() external view returns (uint128 numYes, uint128 numNo)  // (0, 0) until the switch
 ```
 
 **Actor:** any reader
 
-The running totals of what the vault owes to its live positions, per asset, held in the claim's pre-division unit so that a mint and its burn cancel exactly, and truncated only in the four getters. Every mint, burn, collect, fee report, merge, and segment of a tick move writes them in the same call; the freeze writes none. They are the ratio denominators every burn and collect reads before its debit, and the monitoring surface for a shortfall, which no on-chain path reports otherwise. `noSideLiquidity` is the in-range liquidity whose mint tick is at or below `currentTick`, and `ticks()` returns a fourth value, the net of the NO sub-ranges `[mintTick, tickUpper)` at that tick.
+The running totals of what the vault owes to its live positions, per asset, held in the claim's pre-division unit so that a mint and its burn cancel exactly, and truncated only in the three getters. Every mint, burn, and segment of a tick move writes them in the same call; the merge and the freeze write none. They are the ratio denominators every burn reads before its debit, and the monitoring surface for a shortfall, which no on-chain path reports otherwise. `noSideLiquidity` is the in-range liquidity whose mint tick is at or below `currentTick`, and `ticks()` returns a third value, the net of the NO sub-ranges `[mintTick, tickUpper)` at that tick.
 
 **The ratio.** Per asset, the smaller of 1 and what the vault holds over what it owes:
 
 ```text
 freePairs = min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed()))
-usdcRatio = min(1, (usdc.balanceOf(vault) + freePairs − totalEscrowed) / (totalUsdcOwed() + totalFeesOwed()))
+usdcRatio = min(1, (usdc.balanceOf(vault) + freePairs − totalEscrowed) / totalUsdcOwed())
 yesRatio  = min(1, (YES balance − freePairs) / totalYesOwed())
 noRatio   = min(1, (NO balance − freePairs) / totalNoOwed())
 ```
 
-The free pairs are the complete sets above what the ledger owes in both tokens, read before the exiting position is debited, so its own band never counts as free. A token balance less the free pairs is never below the smaller of the balance and the total, so a balance that covers the total gives a ratio of 1 whatever the other token's balance is. A burn pays `(usdcOwed + feesOwed) × usdcRatio` and `tokenOwed × tokenRatio`, a collect pays `owed × usdcRatio`, each rounded down and never above what is held, and each debits the totals by the full owed amount, so every later claimant meets the same ratio. A zero total is a ratio of 1. The reclaim paths apply no ratio: escrowed USDC is senior.
+The free pairs are the complete sets above what the ledger owes in both tokens, read before the exiting position is debited, so its own band never counts as free. A token balance less the free pairs is never below the smaller of the balance and the total, so a balance that covers the total gives a ratio of 1 whatever the other token's balance is. A burn pays `usdcOwed × usdcRatio` and `tokenOwed × tokenRatio`, each rounded down and never above what is held, and debits the totals by the full owed amount, so every later claimant meets the same ratio. A zero total is a ratio of 1. The reclaim paths apply no ratio: escrowed USDC is senior.
 
 **After the switch.** `payoutNumerators()` is non-zero once the Oracle's first successful `redeemOutcomeTokens` stored the payout. Every asset is then USDC, and one ratio covers every leg, with `at(x, y) = floor(x × numYes ÷ den) + floor(y × numNo ÷ den)` and `den = numYes + numNo`:
 
 ```text
-usdcRatio = min(1, (usdc.balanceOf(vault) + at(YES balance, NO balance) − totalEscrowed) / (totalUsdcOwed() + totalFeesOwed() + at(totalYesOwed(), totalNoOwed())))
+usdcRatio = min(1, (usdc.balanceOf(vault) + at(YES balance, NO balance) − totalEscrowed) / (totalUsdcOwed() + at(totalYesOwed(), totalNoOwed())))
 ```
 
-A burn pays `(usdcOwed + feesOwed + tokenUsdc) × usdcRatio` as one USDC transfer, where `tokenUsdc = at(tokenOwed, 0)` for a YES band and `at(0, tokenOwed)` for a NO band, and reports `tokenPaid` as the part the principal and the fees did not take. A collect pays `owed × usdcRatio`. The four totals stay per asset; only the ratio values them at the payout.
+A burn pays `(usdcOwed + tokenUsdc) × usdcRatio` as one USDC transfer, where `tokenUsdc = at(tokenOwed, 0)` for a YES band and `at(0, tokenOwed)` for a NO band, and reports `tokenPaid` as the part the principal did not take. The three totals stay per asset; only the ratio values them at the payout.
 
 ---
 
@@ -1074,7 +932,7 @@ function emergencyCancelAll() external
 
 **Actor:** Any address (after the vault's operator-silence timelock)
 
-Freezes the vault: sets the phase to Cancelled and changes nothing else. Callable by any address, with or without a position, once the vault's `emergencyCancelTimelock()` (7 days by default) has passed without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `burnPositionFor`, `collectFor`, `notifyFees`, `updateTick`, `mergePositions`, or `heartbeat`). `activeLiquidity`, every tick, every position, every escrow, and every balance stay as they are, so each LP exits alone afterwards through `burnPosition`, `burnPositionFor`, `collect`, `collectFor`, `reclaimDeposit`, or `reclaimDepositFor`, which value the claim at the frozen tick and pay it at the ledger's ratio per asset (1 when the vault is whole), and `mergeCompleteSets` keeps working. The call costs the same gas for any number of positions and carries no reentrancy guard, because it makes no external call and moves no token.
+Freezes the vault: sets the phase to Cancelled and changes nothing else. Callable by any address, with or without a position, once the vault's `emergencyCancelTimelock()` (7 days by default) has passed without any successful Operator call (`depositForIntent`, `mintPositionFor`, `reclaimDepositFor`, `burnPositionFor`, `updateTick`, `mergePositions`, or `heartbeat`). `activeLiquidity`, every tick, every position, every escrow, and every balance stay as they are, so each LP exits alone afterwards through `burnPosition`, `burnPositionFor`, `reclaimDeposit`, or `reclaimDepositFor`, which value the claim at the frozen tick and pay it at the ledger's ratio per asset (1 when the vault is whole), and `mergeCompleteSets` keeps working. The call costs the same gas for any number of positions and carries no reentrancy guard, because it makes no external call and moves no token.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
@@ -1107,7 +965,7 @@ function pauseTrading() external onlyAdmin
 
 **Actor:** Admin
 
-Sets `paused = true`, immediately blocking `depositForIntent`, `mintPositionFor`, `notifyFees`, `updateTick`, and `mergePositions`. LP exit paths (`collect`, `collectFor`, `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, `mergeCompleteSets`, `emergencyCancelAll`) are unaffected. Does not change the vault's phase.
+Sets `paused = true`, immediately blocking `depositForIntent`, `mintPositionFor`, `updateTick`, and `mergePositions`. LP exit paths (`burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, `mergeCompleteSets`, `emergencyCancelAll`) are unaffected. Does not change the vault's phase.
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
