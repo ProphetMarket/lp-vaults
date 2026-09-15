@@ -26,3 +26,6 @@ plans/
 
 # Audit working documents stay local
 audits/*.md
+
+# Local temporal files
+tmp/
