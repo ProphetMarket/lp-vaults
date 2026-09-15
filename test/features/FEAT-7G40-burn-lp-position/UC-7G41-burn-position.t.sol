@@ -8,7 +8,8 @@ pragma solidity 0.8.20;
 // decision O2 (FEAT-9BQZ), the tick deinitialization that closes audit issue 6.15, and the
 // resolved branch after the Oracle's redemption (FEAT-6HBN, the switch).
 // Covers: SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B,
-//         SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6, SC-CYS7, SC-CYS8, SC-CYS9, SC-CYSA, SC-DFDX
+//         SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6, SC-CYS7, SC-CYS8, SC-CYS9, SC-CYSA, SC-DFDX,
+//         SC-DYNJ
 
 import {Vm, VmSafe} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
@@ -817,6 +818,117 @@ contract TwoClaimsPaidInFullTest is BurnPositionTestBase, KeeperFillFixture {
         }
         assertEq(merges, 1, "exactly one merge across both burns");
         assertLt(mergedAt, firstBurnAt, "the merge precedes A's burn event");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-DYNJ: Burn inside the report window takes its share of the cut and leaves the fill's tokens
+// What: The keeper filled the move from 6000 to 5700 and has not reported it, so the ledger
+//       still values the claim at the mint tick: 300 USDC and no band. Case A, one claim:
+//       the fill spent 52,645,500 units and left 90 YES; the burn pays 300 USDC times the
+//       USDC ratio, 247,354,500 units and no token, debits the full 300, and leaves the 90
+//       YES with every total at zero. Case B, two claims: Safe B holds 300 USDC over
+//       [5000, 6200) minted at 6000; the fill spent 96,516,750 units and left 165 YES; A's
+//       burn pays 251,741,625 units; the report of 5700 re-values B at 256,128,750 units
+//       plus 75 YES; B's burn pays 251,741,625 units plus 75 YES, and 90 YES stay with no
+//       claim.
+// Why:  Finding CV-08 of audits/code-validation-round-1.md, kept by decision on 2026-09-14
+//       (C8, O2, ADR-DYNK): a burn is valued at the last reported tick, and the pooled ratio
+//       spreads every unreported fill over every claim. SC-BMF2 case A already models a short
+//       vault with a drained balance; this one shows what it does not: the ledger still at
+//       the mint tick with 90 YES held, no merge, and the tokens left with every total at
+//       zero.
+// Setup: KeeperFillFixture._fillMove models the fill, after B's mint in case B, and
+//        _moveTick is never called before the first burn.
+// ──────────────────────────────────────────────
+contract BurnInsideReportWindowTest is BurnPositionTestBase, KeeperFillFixture {
+    // Case B: Safe B's range and liquidity, what the fill spent on both claims' levels, the
+    // pooled payout both burns receive, and B's claim once the report lands
+    int24 constant B_LOWER = 5000;
+    int24 constant B_UPPER = 6200;
+    uint256 constant B_TOKENS = 75e6;
+    uint256 constant TWO_CLAIM_SPENT = 96_516_750;
+    uint256 constant POOLED_PAID = 251_741_625;
+    uint256 constant B_USDC_AFTER_REPORT = 256_128_750;
+
+    // SC-DYNJ: case A — the read, the pooled payout, no token, and the tokens left with no claim
+    function test_whenFillIsUnreportedThenBurnPaysItsShareAndLeavesTheTokens() public {
+        _fillMove(vault, exchangeAddr, MINT_TICK, 5700, 0);
+        assertEq(mockUsdc.balanceOf(address(vault)), FELL_USDC, "the fill spent 52,645,500 units");
+        // The read the NatSpec names: a balance above the owed total is an unreported fill
+        assertEq(vault.totalYesOwed(), 0, "the ledger owes no YES before the report");
+        assertEq(_yesOf(address(vault)), BAND_TOKENS, "the vault holds the 90 YES the fill bought");
+        assertEq(vault.totalUsdcOwed(), PRINCIPAL, "the claim is still valued at the mint tick");
+
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(positionId, safe, PRINCIPAL, 0, FELL_USDC, 0, 0, 0);
+        vm.recordLogs();
+        _burn(positionId);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "300 USDC times the USDC ratio");
+        assertEq(_yesOf(safe), 0, "no token: the claim holds no band at the mint tick");
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter == address(ctf)) {
+                assertTrue(logs[i].topics[0] != TransferSingle.selector, "no ERC-1155 transfer from the vault");
+            }
+        }
+        assertEq(_countLogs(logs, address(vault), CompleteSetsMerged.selector), 0, "no merge: the vault holds no NO");
+        assertEq(_yesOf(address(vault)), BAND_TOKENS, "the 90 YES stay with no claim");
+        assertEq(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "nothing above escrow");
+        assertEq(
+            vault.totalUsdcOwed() + vault.totalYesOwed() + vault.totalNoOwed() + vault.totalFeesOwed(),
+            0,
+            "every total is zero"
+        );
+        _assertDeleted(positionId);
+    }
+
+    // SC-DYNJ: case B — the leaver's pooled cut, the report, and the stayer's cut after it
+    function test_whenTwoClaimsShareTheUnreportedFillThenTheStayerTakesTheRest() public {
+        uint256 positionB = _escrowAndMint(vault, operatorAddr, LP_B_PK, B_LOWER, B_UPPER, PRINCIPAL, keccak256("B"));
+        _fillMove(vault, exchangeAddr, MINT_TICK, 5700, 0);
+        assertEq(mockUsdc.balanceOf(address(vault)), 2 * PRINCIPAL - TWO_CLAIM_SPENT, "the fill spent 96,516,750 units");
+        assertEq(_yesOf(address(vault)), BAND_TOKENS + B_TOKENS, "165 YES bought on both claims' levels");
+        assertEq(vault.totalUsdcOwed(), 2 * PRINCIPAL, "both claims still valued at their mint tick");
+
+        // The leaver: 300 USDC times the pooled ratio, a cut smaller than its own fill's spend
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(positionId, safe, PRINCIPAL, 0, POOLED_PAID, 0, 0, 0);
+        _burn(positionId);
+        assertEq(mockUsdc.balanceOf(safe), POOLED_PAID, "A's pooled cut");
+        assertEq(_yesOf(safe), 0, "A receives no token");
+        assertLt(PRINCIPAL - POOLED_PAID, BAND_SPENT, "A's cut is less than A's own fill");
+
+        // The report crosses B's interior mint tick and re-values B: the YES band [5700, 6000)
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit TickUpdated(MINT_TICK, 5700, 1);
+        _moveTick(5700);
+        assertEq(vault.totalUsdcOwed(), B_USDC_AFTER_REPORT, "B's USDC after the report");
+        assertEq(vault.totalYesOwed(), B_TOKENS, "B's 75 YES after the report");
+
+        // The stayer: its USDC at the ratio A's cut left, and its YES in full
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(
+            positionB, safeB, B_USDC_AFTER_REPORT, 0, POOLED_PAID, vault.yesTokenId(), B_TOKENS, B_TOKENS
+        );
+        vm.prank(safeB);
+        vault.burnPosition(positionB);
+        assertEq(mockUsdc.balanceOf(safeB), POOLED_PAID, "B receives what A's cut left");
+        assertEq(
+            B_USDC_AFTER_REPORT - POOLED_PAID,
+            BAND_SPENT - (PRINCIPAL - POOLED_PAID),
+            "B's cut is the part of A's fill that A's cut did not cover"
+        );
+        assertEq(_yesOf(safeB), B_TOKENS, "B receives its 75 YES");
+
+        assertEq(_yesOf(address(vault)), BAND_TOKENS, "90 YES stay with no claim");
+        assertEq(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "nothing above escrow");
+        assertEq(
+            vault.totalUsdcOwed() + vault.totalYesOwed() + vault.totalNoOwed() + vault.totalFeesOwed(),
+            0,
+            "every total is zero"
+        );
     }
 }
 
