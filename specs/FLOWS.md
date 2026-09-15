@@ -523,6 +523,8 @@ The claim (`_claim`), with `m` the mint tick, `c` the current tick, `L` the liqu
 
 `Σ ticks of the band` is the arithmetic series `band × (first + last) ÷ 2` over the band's tick indices, exact because `band × (a + m − 1)` is always even.
 
+A burn is valued at the last reported tick (decision C8). A fill the keeper has not reported yet has already spent the vault's USDC. The ledger's ratio spreads that spend over every claim in proportion to its USDC owed, and a burn inside that window takes its share as a final cut. The tokens the fill bought belong to no claim after the report. They stay in the vault, and at the switch they redeem into the USDC ratio. Before a self-service burn, compare `totalYesOwed()` and `totalNoOwed()` with the vault's two token balances: a balance above the owed total and above the free pairs can be an unreported fill. The Operator reports the tick before it relays `burnPositionFor`, which closes this window on the relayed path (finding CV-08 of `audits/code-validation-round-1.md`, and ADR-DYNK in FEAT-7G40).
+
 ### 6.3 Exit after a freeze
 
 After `emergencyCancelAll` the burn, the collect, and the reclaim run unchanged at the frozen `currentTick`. No code path differs from sections 4.3, 6.1, and 6.2. Each LP exits in their own transaction.

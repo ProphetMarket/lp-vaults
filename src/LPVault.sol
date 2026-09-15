@@ -1338,6 +1338,17 @@ contract LPVault {
     ///      leaves records in that shape, and their liquidity already left the ticks. Burning one
     ///      would touch the ticks by zero and could clear a bitmap bit a survivor needs. The freeze
     ///      (emergencyCancelAll) leaves every record intact, so a burn after it pays in full.
+    ///
+    ///      A burn is valued at the last reported tick (decision C8). A fill the keeper has not
+    ///      reported yet has already spent the vault's USDC. The ledger's ratio spreads that
+    ///      spend over every claim in proportion to its USDC owed, and a burn inside that
+    ///      window takes its share as a final cut. The tokens the fill bought belong to no
+    ///      claim after the report. They stay in the vault, and at the switch they redeem into
+    ///      the USDC ratio. Before a self-service burn, compare totalYesOwed() and
+    ///      totalNoOwed() with the vault's two token balances: a balance above the owed total
+    ///      and above the free pairs can be an unreported fill. The Operator reports the tick
+    ///      before it relays burnPositionFor, which closes this window on the relayed path
+    ///      (finding CV-08 of audits/code-validation-round-1.md, and ADR-DYNK in FEAT-7G40).
     /// @param positionId The ID of the position to close
     function burnPosition(uint256 positionId) external nonReentrant {
         // --- Checks ---
