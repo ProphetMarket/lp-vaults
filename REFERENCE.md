@@ -449,7 +449,7 @@ sequenceDiagram
     Vault-->>Operator: positionId
 ```
 
-**Events:** `PositionMinted(uint256 indexed positionId, address indexed owner, int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity, uint256 usdcAmount, bytes32 intentId)`. The `positions(uint256)` getter returns `(owner, tickLower, tickUpper, mintTick, liquidity)`, five words. `mintTick` is `currentTick` at the mint, clamped to `tickLower` when the price was below the range and to `tickUpper` when it was at or above it (FR-AFPO).
+**Events:** `PositionMinted(uint256 indexed positionId, address indexed owner, int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity, uint256 usdcAmount, bytes32 intentId)`. The `positions(uint256)` getter returns `(owner, tickLower, tickUpper, mintTick, liquidity, spreadGrowthInsideLastX128)`, six words since R18. `mintTick` is `currentTick` at the mint, clamped to `tickLower` when the price was below the range and to `tickUpper` when it was at or above it (FR-AFPO).
 
 **Reverts:**
 - `NotOperator()` — caller is not an operator
@@ -603,7 +603,7 @@ sequenceDiagram
     Note right of Vault: PositionBurned event emitted
 ```
 
-**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when free pairs merged before the switch; `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` when tokens redeemed after it; `PositionBurned(uint256 indexed positionId, address indexed owner, uint256 usdcOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid)` — `paid < owed` marks a ratio below 1; before the switch `tokenPaid` is the tokens transferred, after it the USDC paid for the token leg, and the one USDC transfer carries `usdcPaid + tokenPaid`
+**Events:** `CompleteSetsMerged(address indexed caller, uint256 amount)` when free pairs merged before the switch; `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` when tokens redeemed after it; `PositionBurned(uint256 indexed positionId, address indexed owner, uint256 usdcOwed, uint256 usdcPaid, uint256 spreadOwed, uint256 spreadPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid)`, nine fields since R18 — `paid < owed` marks a ratio below 1; before the switch `tokenPaid` is the tokens transferred and the one USDC transfer carries `usdcPaid + spreadPaid`, after it `tokenPaid` is the USDC paid for the token leg and the one transfer carries all three; `SpreadCredited(uint256 amount, uint256 spreadGrowthGlobalX128)` when the burn's own credit found a surplus; `ResidueSwept(uint256 indexed positionId, address indexed owner, uint256 usdcResidue, uint256 yesResidue, uint256 noResidue)` on the last live position's burn
 
 **Reverts:**
 - `PositionNotFound()` — never minted, already burned, or consumed by `mergePositions`
@@ -671,7 +671,7 @@ function mergeCompleteSets() external nonReentrant
 
 **Actor:** Any wallet
 
-Merges the vault's free pairs, `min(YES − min(YES, totalYesOwed()), NO − min(NO, totalNoOwed()))`, as complete sets of the vault's condition into USDC held by the vault, through the Conditional Tokens contract. A pair below what the ledger owes is a claim's band token and never merges, so the merge changes no claim's token leg and no claim's ratio, and the caller receives nothing (finding CV-01 of `audits/code-validation-round-1.md`, R14). No role, pause, phase, or heartbeat check. A vault with no free pair returns without a call and emits nothing.
+Credits the vault's measured spread to the liquidity in range, then merges the vault's free pairs, `min(YES − min(YES, totalYesOwed()), NO − min(NO, totalNoOwed()))`, as complete sets of the vault's condition into USDC held by the vault, through the Conditional Tokens contract. The credit is where a round trip that ended where it began is attributed, because the unchanged-tick report reads no balance (FEAT-E943 ADR-E94V). A pair below what the ledger owes is a claim's band token and never merges, so the merge changes no claim's token leg and no claim's ratio, and the caller receives nothing (finding CV-01 of `audits/code-validation-round-1.md`, R14). No role, pause, phase, or heartbeat check. A vault with no free pair returns without a call and emits nothing.
 
 ```mermaid
 sequenceDiagram
@@ -892,33 +892,47 @@ function totalNoOwedScaled()   external view returns (uint256)   // token units 
 function totalUsdcOwed() public view returns (uint256)           // the three truncated totals
 function totalYesOwed()  public view returns (uint256)
 function totalNoOwed()   public view returns (uint256)
+function totalSpreadOwedX128() external view returns (uint256)   // USDC units x 2^128
+function totalSpreadOwed() public view returns (uint256)         // the fourth truncated total
+function spreadGrowthGlobalX128() external view returns (uint256)
 function noSideLiquidity() external view returns (uint128)
-function ticks(int24) external view returns (uint128 liquidityGross, int128 liquidityNet, int128 noLiquidityNet)
+function ticks(int24) external view returns (uint128 liquidityGross, int128 liquidityNet, int128 noLiquidityNet, uint256 spreadGrowthOutsideX128)
 function payoutNumerators() external view returns (uint128 numYes, uint128 numNo)  // (0, 0) until the switch
 ```
 
 **Actor:** any reader
 
-The running totals of what the vault owes to its live positions, per asset, held in the claim's pre-division unit so that a mint and its burn cancel exactly, and truncated only in the three getters. Every mint, burn, and segment of a tick move writes them in the same call; the merge and the freeze write none. They are the ratio denominators every burn reads before its debit, and the monitoring surface for a shortfall, which no on-chain path reports otherwise. `noSideLiquidity` is the in-range liquidity whose mint tick is at or below `currentTick`, and `ticks()` returns a third value, the net of the NO sub-ranges `[mintTick, tickUpper)` at that tick.
+The running totals of what the vault owes to its live positions, per asset, held in the claim's pre-division unit so that a mint and its burn cancel exactly, and truncated only in the getters. Every mint, burn, credit, and segment of a tick move writes them in the same call; the freeze writes none, and a position merge writes only the spread dust its floor drops. They are the ratio denominators every burn reads before its debit, and the monitoring surface for a shortfall, which no on-chain path reports otherwise. `noSideLiquidity` is the in-range liquidity whose mint tick is at or below `currentTick`, and `ticks()` returns the net of the NO sub-ranges `[mintTick, tickUpper)` at that tick and, since R18, that tick's spread growth snapshot.
+
+**The spread claim.** `totalSpreadOwedX128` is the fourth total: the spread the vault has credited and not yet paid, in USDC units times 2^128. An off-chain reader computes one position's share with the same formula the burn uses, from `positions(id)`, `ticks(lower)`, `ticks(upper)`, and `spreadGrowthGlobalX128`:
+
+```text
+below  = currentTick >= tickLower ? outside(tickLower) : global − outside(tickLower)
+above  = currentTick <  tickUpper ? outside(tickUpper) : global − outside(tickUpper)
+inside = global − below − above
+spread = liquidity × (inside − spreadGrowthInsideLastX128) / 2^128        // every step mod 2^256
+```
+
+Every subtraction wraps modulo 2^256 on purpose: only the difference is meaningful, and both values wrapped by the same offset (FEAT-E943 ADR-E94R). A position minted after a credit reads a spread of exactly zero.
 
 **The ratio.** Per asset, the smaller of 1 and what the vault holds over what it owes:
 
 ```text
 freePairs = min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed()))
-usdcRatio = min(1, (usdc.balanceOf(vault) + freePairs − totalEscrowed) / totalUsdcOwed())
+usdcRatio = min(1, (usdc.balanceOf(vault) + freePairs − totalEscrowed) / (totalUsdcOwed() + totalSpreadOwed()))
 yesRatio  = min(1, (YES balance − freePairs) / totalYesOwed())
 noRatio   = min(1, (NO balance − freePairs) / totalNoOwed())
 ```
 
-The free pairs are the complete sets above what the ledger owes in both tokens, read before the exiting position is debited, so its own band never counts as free. A token balance less the free pairs is never below the smaller of the balance and the total, so a balance that covers the total gives a ratio of 1 whatever the other token's balance is. A burn pays `usdcOwed × usdcRatio` and `tokenOwed × tokenRatio`, each rounded down and never above what is held, and debits the totals by the full owed amount, so every later claimant meets the same ratio. A zero total is a ratio of 1. The reclaim paths apply no ratio: escrowed USDC is senior.
+The free pairs are the complete sets above what the ledger owes in both tokens, read before the exiting position is debited, so its own band never counts as free. A token balance less the free pairs is never below the smaller of the balance and the total, so a balance that covers the total gives a ratio of 1 whatever the other token's balance is. A burn pays `usdcOwed × usdcRatio`, its spread, and `tokenOwed × tokenRatio`, each rounded down and never above what is held, and debits the four totals by the full owed amount, so every later claimant meets the same ratio. The two USDC legs share one floor: `spreadPaid = prorate(usdcOwed + spreadOwed) − prorate(usdcOwed)`, so their sum can never exceed what the vault holds. Since R18 the USDC ratio's denominator is `totalUsdcOwed() + totalSpreadOwed()`, read after the burn's own credit, because the credit turned that surplus into an obligation. A zero total is a ratio of 1. The reclaim paths apply no ratio: escrowed USDC is senior.
 
 **After the switch.** `payoutNumerators()` is non-zero once the Oracle's first successful `redeemOutcomeTokens` stored the payout. Every asset is then USDC, and one ratio covers every leg, with `at(x, y) = floor(x × numYes ÷ den) + floor(y × numNo ÷ den)` and `den = numYes + numNo`:
 
 ```text
-usdcRatio = min(1, (usdc.balanceOf(vault) + at(YES balance, NO balance) − totalEscrowed) / (totalUsdcOwed() + at(totalYesOwed(), totalNoOwed())))
+usdcRatio = min(1, (usdc.balanceOf(vault) + at(YES balance, NO balance) − totalEscrowed) / (totalUsdcOwed() + totalSpreadOwed() + at(totalYesOwed(), totalNoOwed())))
 ```
 
-A burn pays `(usdcOwed + tokenUsdc) × usdcRatio` as one USDC transfer, where `tokenUsdc = at(tokenOwed, 0)` for a YES band and `at(0, tokenOwed)` for a NO band, and reports `tokenPaid` as the part the principal did not take. The three totals stay per asset; only the ratio values them at the payout.
+A burn pays `(usdcOwed + spreadOwed + tokenUsdc) × usdcRatio` as one USDC transfer, where `tokenUsdc = at(tokenOwed, 0)` for a YES band and `at(0, tokenOwed)` for a NO band, and reports `spreadPaid` and `tokenPaid` as the parts the principal did not take. The three token-denominated totals stay per asset; only the ratio values them at the payout.
 
 ---
 

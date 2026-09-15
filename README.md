@@ -24,12 +24,13 @@ The contracts are the on-chain foundation only. The off-chain keeper, event list
 | Escrow Deposit for Mint Intent | implemented | Operator escrows an LP's USDC from the LP's Safe against a signed mint intent |
 | Mint LP Position | implemented | Operator-gated mint that consumes a per-intent escrow |
 | Collect Fees on a Position | deprecated | Deprecated in R17: the platform pays LP income off-chain |
-| Burn LP Position | implemented | LP exit by the Safe or relayed: the claim from the mint tick (decision C26), USDC plus one outcome token, each at the ledger's ratio per asset |
-| Vault Solvency Ledger | implemented | Running totals of what the vault owes per asset, moved on every booking and every tick segment, and the per-asset ratio every payout applies (decision O2) |
+| Burn LP Position | implemented | LP exit by the Safe or relayed: the claim from the mint tick (decision C26), USDC, the position's credited spread, and one outcome token, each at the ledger's ratio per asset, with the last position to leave also taking the residue |
+| Vault Solvency Ledger | implemented | Running totals of what the vault owes per asset and as spread, moved on every booking, every credit, and every tick segment, and the per-asset ratio every payout applies (decision O2) |
+| Spread Attribution | implemented | The vault measures the USDC it holds above escrow and above what it owes, and credits it to the liquidity that was in range at the levels where the fills earned it (decision O1b, answered on-chain) |
 | Complete-Set Merge and Resolution Redemption | implemented | Any wallet merges the vault's free YES and NO pairs (the pairs above what the ledger owes in both tokens) into USDC, in every phase, and the Oracle's redemption after resolution switches every later payout to USDC |
 | Merge Positions | implemented | Operator housekeeping to combine same-range same-owner positions |
 | Notify and Distribute Fees | deprecated | Deprecated in R17: the platform pays LP income off-chain |
-| Update Tick and Cross Ticks | implemented | Operator tick sync that crosses ticks and shifts the solvency ledger |
+| Update Tick and Cross Ticks | implemented | Operator tick sync that crosses ticks, shifts the solvency ledger, credits the measured spread per segment, and merges the vault's free pairs |
 | LP Escape Hatch | implemented | One-call reclaim of an escrow the Operator did not mint, by the Safe or relayed |
 
 Full specs are under `specs/features/`. Feature index: [specs/FEATURES.md](specs/FEATURES.md).
@@ -98,7 +99,7 @@ forge test -vvv          # with call traces
 forge coverage           # coverage report
 ```
 
-The test suite holds 697 tests, 17 of them invariants: integration tests, one file per use case at `test/features/FEAT-*/UC-*.t.sol`, plus fuzz tests on the claim formula and invariant tests on tick state, the solvency ledger, and escrow accounting under `test/invariants/`.
+The test suite holds 721 tests, 18 of them invariants: integration tests, one file per use case at `test/features/FEAT-*/UC-*.t.sol`, plus fuzz tests on the claim formula and invariant tests on tick state, the solvency ledger, the spread attribution, and escrow accounting under `test/invariants/`.
 
 ### Format
 
