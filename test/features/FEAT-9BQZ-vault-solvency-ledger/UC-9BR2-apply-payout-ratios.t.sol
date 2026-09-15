@@ -3,12 +3,13 @@ pragma solidity 0.8.20;
 
 // UC-9BR2: Apply Payout Ratios
 // Integration tests for every scenario in this use case.
-// Covers: SC-9BSC, SC-9BSD, SC-9BSE, SC-9BSF, SC-9BSG, SC-COET, SC-COEU, SC-CYSB, SC-CYSC
+// Covers: SC-9BSC, SC-9BSD, SC-9BSE, SC-9BSF, SC-9BSG, SC-COET, SC-COEU, SC-CYSB, SC-CYSC, SC-DFDY
 
 import {Vm} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
+import {KeeperFillFixture} from "../../fixtures/KeeperFillFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 
 // ──────────────────────────────────────────────
@@ -553,5 +554,120 @@ contract FullDebitOnShortPayoutTest is PayoutRatioTestBase {
         assertEq(vault.totalYesOwed(), 0, "90 debited, not 60");
         assertEq(vault.totalUsdcOwedScaled(), 0, "no phantom USDC claim");
         assertEq(vault.totalYesOwedScaled(), 0, "no phantom YES claim");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-DFDY: Drift-free fills conserve value across claims on both sides of the price, before
+//          and after the switch
+// What: Four positions minted at different ticks on both sides of the price, each after the
+//       move that precedes it: [5500, 6500) with 300 USDC at 6000, [5500, 6500) with 300 at
+//       5500, [5000, 6000) with 250 at 5700, and [6000, 7000) with 400 at 6300. The moves
+//       6000 → 5500 → 5700 → 6300 → 5800, each filled by the keeper at the board's bid, at a
+//       spread of 0 and of 2,000 bps. Run A burns every position before the switch; run B
+//       reports [1, 0], the Oracle winds down and redeems, then every position burns. In
+//       every run every PositionBurned reports paid == owed on every leg, and the vault ends
+//       with 0 YES, 0 NO, and exactly totalEscrowed plus the summed spread income, which is
+//       0 at a spread of 0.
+// Why:  Finding CV-02 of audits/code-validation-round-1.md: no test modeled the keeper, so a
+//       merge rule that was wrong for the claim model (CV-01) passed every test. The spread
+//       income is asserted as held, not paid: FR-9BRP caps every ratio at 1, and the income
+//       decision (O1b) splits the pool later. On the source before R14 run A failed at both
+//       spreads: the merge took every pair, the last burns paid a cut token leg, and the
+//       vault kept USDC above the spread income.
+// ──────────────────────────────────────────────
+contract DriftFreeConservationTest is PayoutRatioTestBase, KeeperFillFixture {
+    uint256[] ids;
+
+    /// @dev The mints and the filled moves of the scenario, from the vault at 6000. Returns the
+    ///      spread income the fills left in the vault.
+    function _mintsAndFills(uint32 spreadBps) internal returns (uint256 income) {
+        ids.push(_escrowAndMint(vault, operatorAddr, LP_PK, 5500, 6500, 300e6, keccak256("p0")));
+        _moveTick(5500);
+        income += _fillMove(vault, exchangeAddr, 6000, 5500, spreadBps);
+        ids.push(_escrowAndMint(vault, operatorAddr, LP_PK, 5500, 6500, 300e6, keccak256("p1")));
+        _moveTick(5700);
+        income += _fillMove(vault, exchangeAddr, 5500, 5700, spreadBps);
+        ids.push(_escrowAndMint(vault, operatorAddr, LP_PK, 5000, 6000, 250e6, keccak256("p2")));
+        _moveTick(6300);
+        income += _fillMove(vault, exchangeAddr, 5700, 6300, spreadBps);
+        ids.push(_escrowAndMint(vault, operatorAddr, LP_PK, 6000, 7000, 400e6, keccak256("p3")));
+        _moveTick(5800);
+        income += _fillMove(vault, exchangeAddr, 6300, 5800, spreadBps);
+    }
+
+    /// @dev Burns every position, checks every leg of every PositionBurned against its owed
+    ///      amount, and returns the sum of the CompleteSetsMerged amounts. After the switch the
+    ///      token leg's owed amount is its USDC at the payout [1, 0]: the YES count, or 0 for NO.
+    function _burnAllInFull(bool afterSwitch) internal returns (uint256 merged) {
+        vm.recordLogs();
+        for (uint256 i = 0; i < ids.length; i++) {
+            _burn(ids[i]);
+        }
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 burns;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == CompleteSetsMerged.selector) merged += abi.decode(logs[i].data, (uint256));
+            if (logs[i].topics[0] != PositionBurned.selector) continue;
+            burns++;
+            (
+                uint256 usdcOwed,
+                uint256 feesOwed,
+                uint256 usdcPaid,
+                uint256 tokenId,
+                uint256 tokenOwed,
+                uint256 tokenPaid
+            ) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256));
+            assertEq(usdcPaid, usdcOwed + feesOwed, "the USDC leg is paid in full");
+            uint256 tokenExpected = afterSwitch ? (tokenId == vault.yesTokenId() ? tokenOwed : 0) : tokenOwed;
+            assertEq(tokenPaid, tokenExpected, "the token leg is paid in full");
+        }
+        assertEq(burns, ids.length, "every position burned");
+    }
+
+    function _run(uint32 spreadBps, bool afterSwitch) internal {
+        uint256 income = _mintsAndFills(spreadBps);
+        if (spreadBps == 0) assertEq(income, 0, "no spread income at a spread of 0");
+        else assertGt(income, 0, "the board's bids leave spread income");
+
+        // Under drift-free fills the tokens above the owed totals are the round-trip pairs
+        uint256 freeYes = _yesOf(address(vault)) - vault.totalYesOwed();
+        uint256 freeNo = ctf.balanceOf(address(vault), vault.noTokenId()) - vault.totalNoOwed();
+        assertEq(freeYes, freeNo, "the excess of each token is the round-trip pairs");
+        assertGt(freeYes, 0, "the path leaves round-trip pairs to merge");
+
+        if (afterSwitch) _resolveAndRedeem(1, 0);
+
+        uint256 merged = _burnAllInFull(afterSwitch);
+
+        assertEq(merged, afterSwitch ? 0 : freeYes, "the burns merge exactly the round-trip pairs");
+        assertEq(_yesOf(address(vault)), 0, "the vault ends with no YES");
+        assertEq(ctf.balanceOf(address(vault), vault.noTokenId()), 0, "the vault ends with no NO");
+        assertEq(
+            mockUsdc.balanceOf(address(vault)),
+            vault.totalEscrowed() + income,
+            "the vault keeps exactly the spread income"
+        );
+        assertEq(vault.totalUsdcOwed() + vault.totalYesOwed() + vault.totalNoOwed(), 0, "every total is zero");
+    }
+
+    // SC-DFDY: run A at a spread of 0, every burn in full and nothing above escrow
+    function test_whenFillsAreDriftFreeAtNoSpreadThenEveryBurnPaysInFullBeforeTheSwitch() public {
+        _run(0, false);
+    }
+
+    // SC-DFDY: run A at 2,000 bps, every burn in full and exactly the spread income above escrow
+    function test_whenFillsAreDriftFreeAtASpreadThenEveryBurnPaysInFullBeforeTheSwitch() public {
+        _run(2000, false);
+    }
+
+    // SC-DFDY: run B at a spread of 0, after the Oracle's redemption
+    function test_whenFillsAreDriftFreeAtNoSpreadThenEveryBurnPaysInFullAfterTheSwitch() public {
+        _run(0, true);
+    }
+
+    // SC-DFDY: run B at 2,000 bps, after the Oracle's redemption
+    function test_whenFillsAreDriftFreeAtASpreadThenEveryBurnPaysInFullAfterTheSwitch() public {
+        _run(2000, true);
     }
 }

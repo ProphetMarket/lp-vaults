@@ -4,13 +4,14 @@ pragma solidity 0.8.20;
 // FEAT-6HBN: Complete-Set Merge and Resolution Redemption
 // UC-6HBO: Merge Complete Sets
 // Integration tests for every scenario in this use case, against the real ConditionalTokens bytecode.
-// Covers: SC-6HC9, SC-6HCA, SC-6HCB, SC-6HCC
+// Covers: SC-6HC9, SC-6HCA, SC-6HCB, SC-6HCC, SC-DFDV, SC-DFDW
 
 import {Vm} from "forge-std/Vm.sol";
 import {StdStorage, stdStorage} from "forge-std/StdStorage.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
+import {KeeperFillFixture} from "../../fixtures/KeeperFillFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
@@ -77,12 +78,12 @@ contract MergeCompleteSetsTestBase is LPVaultFixture {
 
 // ──────────────────────────────────────────────
 // SC-6HC9: Any wallet merges the vault's matched pairs into USDC
-// What: With 100 YES and 60 NO in the vault, mergeCompleteSets merges min(100, 60) = 60
-//       complete sets through the ConditionalTokens contract. The vault ends with 40 YES,
-//       0 NO, and 60 more USDC. The caller receives nothing, and no vault storage changes.
-// Why:  Under the claim model a pair holds a claim's principal and its spread, and a
-//       payout must turn it into USDC first. One YES plus one NO always pays exactly
-//       1 USDC, so the merge moves no value.
+// What: With 100 YES and 60 NO in the vault and no token owed, mergeCompleteSets merges the
+//       free pairs, min(100 − 0, 60 − 0) = 60 complete sets, through the ConditionalTokens
+//       contract. The vault ends with 40 YES, 0 NO, and 60 more USDC. The caller receives
+//       nothing, and no vault storage changes.
+// Why:  Under the claim model a round-trip pair holds a claim's principal and its spread, and
+//       a payout must turn it into USDC first. The merge takes no token a claim is owed.
 // Example: vault 100e6 YES, 60e6 NO, 500e6 USDC → keeper merges → 40e6 YES, 0 NO, 560e6 USDC.
 // ──────────────────────────────────────────────
 contract MergeMatchedPairsTest is MergeCompleteSetsTestBase {
@@ -231,8 +232,8 @@ contract NothingToMergeTest is MergeCompleteSetsTestBase {
 // What: With 10 YES and 10 NO in the vault, the Operator and a wallet with no role each
 //       merge 10 pairs in WindDown phase, in the Cancelled phase, and while trading is
 //       paused. lastOperatorActivityTimestamp keeps its value, also when the Operator calls.
-// Why:  A merge moves no value, so no phase and no pause has a reason to block it
-//       (decision C9). A heartbeat refresh from any wallet would let anyone postpone
+// Why:  The merge takes no token a claim is owed, so no phase and no pause has a reason
+//       to block it (decision C9). A heartbeat refresh from any wallet would let anyone postpone
 //       emergencyCancelAll.
 // Example: oracle starts wind-down, a day passes, operator merges → +10 USDC, timer unchanged.
 // Setup:   The Cancelled case writes phase 3 through VaultStorage, because the merge reads
@@ -359,5 +360,147 @@ contract MergeAfterEmergencyCancelTest is MergeCompleteSetsTestBase {
         vault.mergeCompleteSets();
 
         assertEq(vault.phase(), 3, "phase must stay Cancelled");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-DFDV: The merge leaves every claim's band token in the vault
+// What: Safe A holds the R9 example minted at 6000 and Safe B the same range minted at
+//       5500. Drift-free fills moved the vault to 5700: the fall to 5500 bought 150 YES on
+//       A's levels, and the rise to 5700 bought 60 NO on A's levels and 60 NO on B's. The
+//       vault holds 150 YES and 120 NO, and the ledger owes 90 YES (A) and 60 NO (B). The
+//       merge takes the free pairs, min(150 − 90, 120 − 60) = 60, and leaves 90 YES, 60 NO,
+//       and above the base's donated B exactly the USDC the ledger owes. A second call
+//       merges nothing.
+// Why:  Finding CV-01 of audits/code-validation-round-1.md: a merge of min(150, 120) = 120
+//       pairs would net A's YES against B's NO, pay both a cut token leg, and strand 60
+//       USDC in the vault. The state is reached through the driver port, the mints and the
+//       tick reports, and the fill fixture, never through a storage setter.
+// Example: 150e6 YES, 120e6 NO, 90e6 and 60e6 owed → merge → 90e6 YES, 60e6 NO, +60e6 USDC.
+// ──────────────────────────────────────────────
+contract MergeLeavesOwedTokensTest is MergeCompleteSetsTestBase, KeeperFillFixture {
+    uint256 constant LP_A_PK = 0xA11CE;
+    uint256 constant LP_B_PK = 0xB0B;
+    int24 constant LOWER = 5500;
+    int24 constant UPPER = 6500;
+    uint256 constant PRINCIPAL = 300e6;
+
+    // The two claims' USDC after the fills, and what the ledger owes them (SC-DFDX)
+    uint256 constant FILLS_LEFT = 460_951_500;
+    uint256 constant USDC_OWED = 520_951_500;
+
+    function setUp() public override {
+        super.setUp();
+        _moveTick(6000);
+        _escrowAndMint(vault, operatorAddr, LP_A_PK, LOWER, UPPER, PRINCIPAL, keccak256("A"));
+        _moveTick(5500);
+        _fillMove(vault, exchangeAddr, 6000, 5500, 0);
+        _escrowAndMint(vault, operatorAddr, LP_B_PK, LOWER, UPPER, PRINCIPAL, keccak256("B"));
+        _moveTick(5700);
+        _fillMove(vault, exchangeAddr, 5500, 5700, 0);
+    }
+
+    function _moveTick(int24 tick) internal {
+        vm.prank(operatorAddr);
+        vault.updateTick(tick);
+    }
+
+    // SC-DFDV: the fills leave the two-claim state of the finding
+    function test_theFillsLeaveTheTwoClaimState() public view {
+        assertEq(_vaultYes(), 150e6, "150 YES bought on the fall");
+        assertEq(_vaultNo(), 120e6, "60 NO bought on each claim's levels on the rise");
+        assertEq(mockUsdc.balanceOf(address(vault)), VAULT_USDC + FILLS_LEFT, "the USDC the fills left");
+        assertEq(vault.totalYesOwed(), 90e6, "A's band owes 90 YES");
+        assertEq(vault.totalNoOwed(), 60e6, "B's band owes 60 NO");
+        assertEq(vault.totalUsdcOwed(), USDC_OWED, "the two claims' USDC");
+    }
+
+    // SC-DFDV: the merge takes 60 pairs and leaves exactly what the ledger owes
+    function test_whenClaimsHoldBothTokensThenTheMergeTakesOnlyTheFreePairs() public {
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit CompleteSetsMerged(keeper, 60e6);
+
+        vm.prank(keeper);
+        vault.mergeCompleteSets();
+
+        assertEq(_vaultYes(), 90e6, "A's 90 YES stay in the vault");
+        assertEq(_vaultNo(), 60e6, "B's 60 NO stay in the vault");
+        assertEq(mockUsdc.balanceOf(address(vault)) - VAULT_USDC, USDC_OWED, "above B, exactly the USDC owed");
+        assertEq(mockUsdc.balanceOf(address(vault)) - VAULT_USDC, vault.totalUsdcOwed(), "the ledger agrees");
+    }
+
+    // SC-DFDV: a second call finds no free pair and merges nothing
+    function test_whenTheFreePairsAreGoneThenASecondCallMergesNothing() public {
+        vm.prank(keeper);
+        vault.mergeCompleteSets();
+
+        vm.recordLogs();
+        vm.prank(keeper);
+        vault.mergeCompleteSets();
+
+        assertEq(vm.getRecordedLogs().length, 0, "no mergePositions call and no event on the second call");
+        assertEq(_vaultYes(), 90e6, "the owed YES stay");
+        assertEq(_vaultNo(), 60e6, "the owed NO stay");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-DFDW: A donated token merges nothing when no pair is free
+// What: The vault at 5700 holds one R9 position minted at 6000, so the ledger owes 90 YES,
+//       and the vault holds exactly the 90 YES its fill bought and 0 NO. A stranger sends
+//       50 NO through the receiver hook and calls mergeCompleteSets. The free pairs are
+//       min(90 − 90, 50 − 0) = 0: no mergePositions call, no event, the vault still holds
+//       90 YES and 50 NO, and the position's burn pays the 90 YES in full.
+// Why:  Closes the griefing path of finding CV-01: under min(yes, no) a wallet could force
+//       a merge of another claim's token by sending the complement.
+// Example: 90e6 YES owed and held, 50e6 NO donated → merge → nothing; burn → 90e6 YES paid.
+// ──────────────────────────────────────────────
+contract DonationMergesNothingTest is MergeCompleteSetsTestBase, KeeperFillFixture {
+    uint256 constant LP_A_PK = 0xA11CE;
+    address safeA;
+    uint256 positionId;
+    address stranger = makeAddr("stranger");
+
+    function setUp() public override {
+        super.setUp();
+        safeA = _safeOf(vm.addr(LP_A_PK));
+        vm.prank(operatorAddr);
+        vault.updateTick(6000);
+        positionId = _escrowAndMint(vault, operatorAddr, LP_A_PK, 5500, 6500, 300e6, keccak256("A"));
+        vm.prank(operatorAddr);
+        vault.updateTick(5700);
+        _fillMove(vault, exchangeAddr, 6000, 5700, 0);
+        assertEq(_vaultYes(), 90e6, "precondition: the fill bought the 90 YES the band owes");
+        assertEq(vault.totalYesOwed(), 90e6, "precondition: the ledger owes 90 YES");
+
+        // The stranger splits 50 USDC into 50 YES and 50 NO and sends the NO to the vault
+        _mintCompleteSets(mockUsdc, stranger, vault.conditionId(), 50e6);
+        uint256 noId = vault.noTokenId();
+        vm.prank(stranger);
+        ctf.safeTransferFrom(stranger, address(vault), noId, 50e6, "");
+    }
+
+    // SC-DFDW: no free pair, so no merge call and no event
+    function test_whenNoPairIsFreeThenADonatedTokenMergesNothing() public {
+        vm.recordLogs();
+        vm.prank(stranger);
+        vault.mergeCompleteSets();
+
+        assertEq(vm.getRecordedLogs().length, 0, "no mergePositions call and no CompleteSetsMerged event");
+        assertEq(_vaultYes(), 90e6, "the owed YES stay");
+        assertEq(_vaultNo(), 50e6, "the donated NO stay");
+    }
+
+    // SC-DFDW: the position's burn still pays its 90 YES in full
+    function test_whenNoPairIsFreeThenTheBurnPaysTheBandInFull() public {
+        vm.prank(stranger);
+        vault.mergeCompleteSets();
+
+        vm.prank(safeA);
+        vault.burnPosition(positionId);
+
+        assertEq(ctf.balanceOf(safeA, vault.yesTokenId()), 90e6, "the Safe receives the whole band");
+        assertEq(_vaultYes(), 0, "no YES left in the vault");
+        assertEq(_vaultNo(), 50e6, "the donation stays in the vault");
     }
 }

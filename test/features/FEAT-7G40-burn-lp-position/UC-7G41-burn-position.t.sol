@@ -8,12 +8,13 @@ pragma solidity 0.8.20;
 // decision O2 (FEAT-9BQZ), the tick deinitialization that closes audit issue 6.15, and the
 // resolved branch after the Oracle's redemption (FEAT-6HBN, the switch).
 // Covers: SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B,
-//         SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6, SC-CYS7, SC-CYS8, SC-CYS9, SC-CYSA
+//         SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6, SC-CYS7, SC-CYS8, SC-CYS9, SC-CYSA, SC-DFDX
 
 import {Vm, VmSafe} from "forge-std/Vm.sol";
 import {LPVaultFactory} from "../../../src/LPVaultFactory.sol";
 import {LPVault, IConditionalTokens} from "../../../src/LPVault.sol";
 import {LPVaultFixture} from "../../fixtures/LPVaultFixture.sol";
+import {KeeperFillFixture} from "../../fixtures/KeeperFillFixture.sol";
 import {MockERC20} from "../../fixtures/MockERC20.sol";
 import {VaultStorage} from "../../fixtures/VaultStorage.sol";
 
@@ -708,6 +709,114 @@ contract BurnMergesFirstTest is BurnPositionTestBase {
             if (logs[i].topics[0] == PositionBurned.selector) burnedAt = i;
         }
         assertLt(mergedAt, burnedAt, "the merge precedes the burn event");
+    }
+}
+
+// ──────────────────────────────────────────────
+// SC-DFDX: Two claims on opposite sides of the tick are both paid in full
+// What: Safe A holds the example minted at 6000 and Safe B the same range minted at 5500.
+//       Drift-free fills through the exchange approval and the receiver hook: the fall to
+//       5500 bought 150 YES on A's levels for 86,242,500 units, and the rise to 5700 bought
+//       60 NO on A's levels and 60 NO on B's for 52,806,000 units. The vault holds 150 YES,
+//       120 NO, and 460,951,500 USDC units against 90 YES, 60 NO, and 520,951,500 owed.
+//       A's burn computes 60 free pairs, merges them, and pays 247,354,500 USDC and 90 YES;
+//       B's burn finds no free pair and pays 273,597,000 USDC and 60 NO. Every leg reports
+//       paid == owed, and the vault ends with no token and nothing above escrow.
+// Why:  Finding CV-01 of audits/code-validation-round-1.md: on the source before R14 the
+//       same steps merged 120 pairs, paid A 30 YES and B 0 NO, and left 60 USDC in the vault
+//       with no live position. The free pairs are read before the ledger debit, so A's own
+//       band never counts as free at A's burn.
+// ──────────────────────────────────────────────
+contract TwoClaimsPaidInFullTest is BurnPositionTestBase, KeeperFillFixture {
+    // B's claim at 5700: the NO band [5500, 5700) and the USDC the band did not spend
+    uint256 constant B_USDC = 273_597_000;
+    uint256 constant B_TOKENS = 60e6;
+    uint256 constant FILLS_LEFT = 460_951_500;
+    uint256 constant FREE_PAIRS = 60e6;
+
+    uint256 positionB;
+
+    function setUp() public override {
+        super.setUp();
+        _moveTick(5500);
+        _fillMove(vault, exchangeAddr, MINT_TICK, 5500, 0);
+        positionB = _mintExample(LP_B_PK, keccak256("B"));
+        _moveTick(5700);
+        _fillMove(vault, exchangeAddr, 5500, 5700, 0);
+    }
+
+    // SC-DFDX: the fills leave the two-claim state of the finding
+    function test_theFillsLeaveTheTwoClaimState() public view {
+        assertEq(_yesOf(address(vault)), 150e6, "150 YES bought on the fall");
+        assertEq(_noOf(address(vault)), 120e6, "60 NO bought on each claim's levels on the rise");
+        assertEq(mockUsdc.balanceOf(address(vault)), FILLS_LEFT, "the USDC the fills left");
+        assertEq(vault.totalYesOwed(), BAND_TOKENS, "A's band owes 90 YES");
+        assertEq(vault.totalNoOwed(), B_TOKENS, "B's band owes 60 NO");
+        assertEq(vault.totalUsdcOwed(), FELL_USDC + B_USDC, "the two claims' USDC");
+    }
+
+    // SC-DFDX: A's burn merges the 60 free pairs and pays both legs in full
+    function test_whenClaimsHoldBothTokensThenTheFirstBurnPaysInFull() public {
+        vm.expectEmit(true, false, false, true, address(vault));
+        emit CompleteSetsMerged(safe, FREE_PAIRS);
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(positionId, safe, FELL_USDC, 0, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+
+        _burn(positionId);
+
+        assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "A receives its USDC in full");
+        assertEq(_yesOf(safe), BAND_TOKENS, "A receives its 90 YES in full");
+        assertEq(_yesOf(address(vault)), 0, "no YES left after A's band is paid");
+        assertEq(_noOf(address(vault)), B_TOKENS, "B's 60 NO stay for B");
+    }
+
+    // SC-DFDX: B's burn finds no free pair and pays both legs in full, and the vault ends empty
+    function test_whenClaimsHoldBothTokensThenBothBurnsPayInFull() public {
+        _burn(positionId);
+
+        vm.recordLogs();
+        vm.prank(safeB);
+        vault.burnPosition(positionB);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        assertEq(_countLogs(logs, address(vault), CompleteSetsMerged.selector), 0, "B's burn merges nothing");
+        (uint256 usdcOwed,, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid) = _burnedLog(logs);
+        assertEq(usdcOwed, B_USDC, "B's USDC owed");
+        assertEq(usdcPaid, B_USDC, "B's USDC paid in full");
+        assertEq(tokenId, vault.noTokenId(), "B's band is NO");
+        assertEq(tokenOwed, B_TOKENS, "B's NO owed");
+        assertEq(tokenPaid, B_TOKENS, "B's NO paid in full");
+        assertEq(mockUsdc.balanceOf(safeB), B_USDC, "B receives its USDC");
+        assertEq(_noOf(safeB), B_TOKENS, "B receives its 60 NO");
+
+        assertEq(_yesOf(address(vault)), 0, "the vault holds no YES");
+        assertEq(_noOf(address(vault)), 0, "the vault holds no NO");
+        assertEq(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "nothing above escrow strands");
+        assertEq(vault.totalUsdcOwed() + vault.totalYesOwed() + vault.totalNoOwed(), 0, "every total is zero");
+    }
+
+    // SC-DFDX: one CompleteSetsMerged(safeA, 60) across both burns, before A's PositionBurned
+    function test_whenClaimsHoldBothTokensThenOneMergePrecedesTheFirstBurnLog() public {
+        vm.recordLogs();
+        _burn(positionId);
+        vm.prank(safeB);
+        vault.burnPosition(positionB);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+
+        uint256 mergedAt = type(uint256).max;
+        uint256 firstBurnAt = type(uint256).max;
+        uint256 merges;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] == CompleteSetsMerged.selector) {
+                merges++;
+                mergedAt = i;
+                assertEq(address(uint160(uint256(logs[i].topics[1]))), safe, "the caller is Safe A");
+                assertEq(abi.decode(logs[i].data, (uint256)), FREE_PAIRS, "60 free pairs merged");
+            }
+            if (logs[i].topics[0] == PositionBurned.selector && firstBurnAt == type(uint256).max) firstBurnAt = i;
+        }
+        assertEq(merges, 1, "exactly one merge across both burns");
+        assertLt(mergedAt, firstBurnAt, "the merge precedes A's burn event");
     }
 }
 
