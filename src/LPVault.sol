@@ -1239,13 +1239,15 @@ contract LPVault {
     }
 
     /// @dev One body for both collect entry points. Reads first (the fees, both token balances,
-    ///      the switch, the USDC balance, the ledger totals, and the amount to pay), effects
-    ///      second (the snapshot, tokensOwed to zero, and the fee total's debit), interactions
-    ///      last (the settlement, then the transfer), per NFR-U07R. The amount to pay is known
-    ///      before the settlement because a merge pays exactly min(yes, no) USDC and a redemption
-    ///      exactly balance x numerator / denominator per side. A zero-owed collect reads no
-    ///      balance and settles nothing (FR-U07K). The claim settles at the ratio with no
-    ///      remainder: a cut is final, and the LP chose the moment (ADR-COEN in FEAT-9BQZ).
+    ///      the switch, the free pairs, the USDC balance, the ledger totals, and the amount to
+    ///      pay), effects second (the snapshot, tokensOwed to zero, and the fee total's debit),
+    ///      interactions last (the settlement, then the transfer), per NFR-U07R. The amount to
+    ///      pay is known before the settlement because a merge pays exactly the free pairs this
+    ///      function computed and a redemption exactly balance x numerator / denominator per
+    ///      side. The settlement receives that number, never a fresh read: after the fee debit
+    ///      the ledger has moved (ADR-DFE2 in FEAT-6HBN). A zero-owed collect reads no balance
+    ///      and settles nothing (FR-U07K). The claim settles at the ratio with no remainder: a
+    ///      cut is final, and the LP chose the moment (ADR-COEN in FEAT-9BQZ).
     function _collect(uint256 positionId, Position storage p) internal {
         // --- Reads ---
 
@@ -1275,17 +1277,20 @@ contract LPVault {
 
         // Pro-rata (decision O2, FR-U07K): the owed amount times the USDC ratio of the solvency
         // ledger, read before the debit. Before the switch: the USDC the vault holds above
-        // escrow, counting the pairs the merge below turns into USDC, over the principal and the
-        // fees it owes (FR-9BRM). After the switch: the same with every token valued at the
-        // stored payout on both sides, one ratio for every leg (FR-CYS5).
+        // escrow, counting the free pairs the merge below turns into USDC, over the principal
+        // and the fees it owes (FR-9BRM). After the switch: the same with every token valued at
+        // the stored payout on both sides, one ratio for every leg (FR-CYS5), and no pair to
+        // count, because the redemption replaces the merge.
         uint256 yes;
         uint256 no;
         bool resolved;
+        uint256 pairs;
         uint256 paid;
         if (owed > 0) {
             (yes, no) = _tokenBalances();
             resolved = _resolved();
-            (uint256 held, uint256 total) = _usdcRatio(yes, no, resolved);
+            if (!resolved) pairs = _freePairs(yes, no);
+            (uint256 held, uint256 total) = _usdcRatio(pairs, yes, no, resolved);
             paid = _prorate(owed, held, total);
         }
 
@@ -1302,8 +1307,9 @@ contract LPVault {
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
-        // The merge before the switch, the redemption after it; nothing when owed was zero
-        _settle(yes, no, resolved);
+        // The merge of the free pairs computed above before the switch, the redemption after it;
+        // nothing when owed was zero
+        _settle(pairs, yes, no, resolved);
 
         if (paid > 0) _safeTransfer(usdc, p.owner, paid);
         if (owed > 0) emit FeesCollected(positionId, p.owner, owed, paid);
@@ -1421,11 +1427,15 @@ contract LPVault {
         uint256 tokenId;
         uint256 tokenOwed;
         uint256 tokenPaid;
-        // Both balances and the switch, read once: _settle merges the pairs before the switch and
-        // redeems both balances after it (FEAT-6HBN)
+        // Both balances and the switch, read once: _settle merges the free pairs before the switch
+        // and redeems both balances after it (FEAT-6HBN)
         uint256 yes;
         uint256 no;
         bool resolved;
+        // The free pairs, min(yes - min(yes, totalYesOwed()), no - min(no, totalNoOwed())), read
+        // before the ledger debit so this position's own band never counts as free (ADR-DFE2).
+        // Zero after the switch, where the redemption replaces the merge and nothing reads it.
+        uint256 pairs;
         // The same claim and fees in the ledger's pre-division unit (FEAT-9BQZ FR-9BR9, FR-9BRC)
         uint256 usdcScaled;
         uint256 tokenScaled;
@@ -1489,9 +1499,10 @@ contract LPVault {
 
         // --- Interactions (external calls last, per checks-effects-interactions) ---
 
-        // The pairs, or after the switch every token, become the USDC that _usdcRatio already
-        // counted (decision C26, FEAT-6HBN)
-        _settle(a.yes, a.no, a.resolved);
+        // The free pairs computed before the debit, or after the switch every token, become the
+        // USDC that _usdcRatio already counted (decision C26, FEAT-6HBN). Never a fresh read here:
+        // after the debit the exiting position's own band would count as free (ADR-DFE2).
+        _settle(a.pairs, a.yes, a.no, a.resolved);
 
         // One transfer covers the claim's USDC and the fees (FR-7G4R), and after the switch the
         // token leg's USDC too (FR-CYS4)
@@ -1509,11 +1520,12 @@ contract LPVault {
         emit PositionBurned(positionId, owner, a.usdcOwed, a.feesOwed, a.usdcPaid, a.tokenId, a.tokenOwed, a.tokenPaid);
     }
 
-    /// @dev The fees, the claim, both token balances, the switch, the USDC balance, the ledger
-    ///      totals, and the two amounts to pay, from view reads only. The amounts are computable
-    ///      before the settlement because the ConditionalTokens contract pays exactly min(yes, no)
-    ///      USDC for a merge, and exactly balance x numerator / denominator per side for a
-    ///      redemption, which _atPayout reproduces (NFR-7G59). Pro-rata (decision O2, FR-COEX):
+    /// @dev The fees, the claim, both token balances, the switch, the free pairs, the USDC
+    ///      balance, the ledger totals, and the two amounts to pay, from view reads only. The
+    ///      amounts are computable before the settlement because the ConditionalTokens contract
+    ///      pays exactly the free pairs computed here for a merge, and exactly balance x
+    ///      numerator / denominator per side for a redemption, which _atPayout reproduces
+    ///      (NFR-7G59). Pro-rata (decision O2, FR-COEX):
     ///      before the switch each owed amount times its asset's ratio, the smaller of 1 and held
     ///      over the ledger's total, rounded down, and never a revert; after the switch every leg
     ///      is USDC, so one ratio covers principal, fees, and the token leg valued at the stored
@@ -1553,9 +1565,13 @@ contract LPVault {
         a.resolved = _resolved();
         bool isYes = a.tokenId == yesTokenId;
 
+        // The free pairs, once, before any effect (FR-9BRM to FR-9BRO, ADR-DFE2); after the
+        // switch the redemption replaces the merge and no pair is counted
+        if (!a.resolved) a.pairs = _freePairs(a.yes, a.no);
+
         // The USDC ratio: principal and fees share it (ADR-9BSI), escrow stays out (FR-9BRM),
         // and after the switch the token totals join it at the stored payout (FR-CYS5)
-        (uint256 held, uint256 total) = _usdcRatio(a.yes, a.no, a.resolved);
+        (uint256 held, uint256 total) = _usdcRatio(a.pairs, a.yes, a.no, a.resolved);
 
         if (a.resolved) {
             // The token leg in USDC at the stored payout, then one prorate of the sum: tokenPaid
@@ -1569,10 +1585,10 @@ contract LPVault {
 
         a.usdcPaid = _prorate(a.usdcOwed + a.feesOwed, held, total);
 
-        // The merge below consumes the pairs of each token, so the band's token is what is left;
-        // the band's ratio is independent of the USDC ratio (FR-9BRN to FR-9BRQ)
-        uint256 pairs = _pairs(a.yes, a.no);
-        uint256 tokenHeld = (isYes ? a.yes : a.no) - pairs;
+        // The merge consumes the free pairs of each token, so the band's token is what is left,
+        // never below the smaller of the balance and the total; the band's ratio is independent
+        // of the USDC ratio (FR-9BRN to FR-9BRQ)
+        uint256 tokenHeld = (isYes ? a.yes : a.no) - a.pairs;
         a.tokenPaid = _prorate(a.tokenOwed, tokenHeld, isYes ? totalYesOwed() : totalNoOwed());
     }
 
@@ -1643,7 +1659,7 @@ contract LPVault {
 
     /// @dev The USDC a payout may draw on, the USDC ratio's numerator (decisions C6 and C7,
     ///      FEAT-9BQZ FR-9BRM, FR-CYS5): the balance plus `incoming`, the USDC the settlement is
-    ///      about to produce (the pairs before the switch, the redeemed value after it), less the
+    ///      about to produce (the free pairs before the switch, the redeemed value after it), less the
     ///      escrow total, floored at zero. On chain a fill turns vault USDC into tokens (decision
     ///      C8), so the balance can sit below totalEscrowed, and a checked subtraction would
     ///      revert every exit.
@@ -1654,18 +1670,23 @@ contract LPVault {
     }
 
     /// @dev The two sides of the USDC ratio, read before the debit, for the burn and the collect
-    ///      (FEAT-9BQZ). Before the switch: what the vault holds above escrow counting the pairs,
-    ///      over the principal and the fees it owes (FR-9BRM). After the switch every asset is
-    ///      USDC: the numerator adds what the vault's YES and NO redeem for at the stored payout,
-    ///      and the denominator adds what the YES and NO totals redeem for, so one ratio covers
-    ///      every leg (FR-CYS5). The totals themselves stay per asset (ADR-9BSJ).
-    function _usdcRatio(uint256 yes, uint256 no, bool resolved) internal view returns (uint256 held, uint256 total) {
+    ///      (FEAT-9BQZ). Before the switch: what the vault holds above escrow counting `pairs`,
+    ///      the free pairs the caller computed from _freePairs before any effect, over the
+    ///      principal and the fees it owes (FR-9BRM). After the switch every asset is USDC: the
+    ///      numerator adds what the vault's YES and NO redeem for at the stored payout, and the
+    ///      denominator adds what the YES and NO totals redeem for, so one ratio covers every leg
+    ///      (FR-CYS5), and `pairs` is not read. The totals themselves stay per asset (ADR-9BSJ).
+    function _usdcRatio(uint256 pairs, uint256 yes, uint256 no, bool resolved)
+        internal
+        view
+        returns (uint256 held, uint256 total)
+    {
         total = totalUsdcOwed() + totalFeesOwed();
         if (resolved) {
             held = _availableUsdc(_atPayout(yes, no));
             total += _atPayout(totalYesOwed(), totalNoOwed());
         } else {
-            held = _availableUsdc(_pairs(yes, no));
+            held = _availableUsdc(pairs);
         }
     }
 
@@ -2089,38 +2110,57 @@ contract LPVault {
     // Complete-set merge (FEAT-6HBN, UC-6HBO)
     // ──────────────────────────────────────────────
 
-    // SC-6HC9, SC-6HCA, SC-6HCB, SC-6HCC: permissionless merge of matched YES and NO pairs
-    /// @notice Merges min(YES balance, NO balance) complete sets of the vault's condition into
-    ///         USDC held by the vault. Any wallet may call it, in every phase.
+    // SC-6HC9, SC-6HCA, SC-6HCB, SC-6HCC, SC-DFDV, SC-DFDW: permissionless merge of the free pairs
+    /// @notice Merges the vault's free pairs, the complete sets above what the ledger owes in
+    ///         both tokens, into USDC held by the vault. Any wallet may call it, in every phase.
     /// @dev No role check, no pause check, no phase check, and no heartbeat refresh (ADR-6HCJ,
     ///      ADR-6HCL, ADR-6HCM): a refresh from any wallet would let anyone postpone
     ///      emergencyCancelAll, and a frozen vault's payouts still need the merge first
     ///      (decision C9).
-    ///      MEV analysis: one YES plus one NO always pays exactly 1 USDC, so a merge moves no value
-    ///      between parties. The caller receives nothing, and front-running, back-running, or
-    ///      repeating the call changes no one's position. Keeper rule: anyone can merge at any
-    ///      time, so every order that names the vault as maker must be a BUY order, and no resting
-    ///      order may depend on the vault's YES or NO balance.
+    ///      MEV analysis: the merge takes only pairs no claim is owed (ADR-DFE2), so it changes
+    ///      no claim's token leg and no claim's ratio: a free pair is worth exactly 1 USDC to the
+    ///      vault before and after. The caller receives nothing, and front-running, back-running,
+    ///      or repeating the call changes no one's position. A wallet that sends the
+    ///      complementary token cannot force a merge of another claim's token (finding CV-01 of
+    ///      audits/code-validation-round-1.md). Keeper rule: anyone can merge at any time, so
+    ///      every order that names the vault as maker must be a BUY order, and no resting order
+    ///      may depend on the vault's YES or NO balance.
     function mergeCompleteSets() external nonReentrant {
         (uint256 yes, uint256 no) = _tokenBalances();
-        _mergeCompleteSets(_pairs(yes, no));
+        _mergeCompleteSets(_freePairs(yes, no));
     }
 
-    /// @dev The complete sets the vault holds, min(yes, no). One definition, because the public
-    ///      merge, the ratio, the burn, and the settlement all need the same number.
-    function _pairs(uint256 yes, uint256 no) internal pure returns (uint256) {
-        return yes < no ? yes : no;
+    /// @dev The free pairs the vault holds: min(yes - min(yes, totalYesOwed()), no - min(no,
+    ///      totalNoOwed())), the complete sets above what the ledger owes in both tokens
+    ///      (ADR-DFE2). One definition, because the public merge, the ratio, the burn, and the
+    ///      settlement all need the same number. A payout calls it before its ledger debit, so
+    ///      the exiting position's own band is never counted as free (finding CV-01). Under
+    ///      drift-free fills the free pairs are exactly the round-trip pairs; under drift a pair
+    ///      below the owed totals stays unmerged and is paid in kind at each token's ratio. The
+    ///      zero-balance guard is correct because a free count is at most the balance, so a zero
+    ///      balance on either side gives zero free pairs; it exists so the no-pair collect skips
+    ///      the two ledger reads and stays under its gas bound (NFR-U07P in FEAT-U079).
+    function _freePairs(uint256 yes, uint256 no) internal view returns (uint256) {
+        if (yes == 0 || no == 0) return 0;
+        uint256 yesOwed = totalYesOwed();
+        uint256 noOwed = totalNoOwed();
+        uint256 freeYes = yes > yesOwed ? yes - yesOwed : 0;
+        uint256 freeNo = no > noOwed ? no - noOwed : 0;
+        return freeYes < freeNo ? freeYes : freeNo;
     }
 
-    /// @dev The settlement every payout runs as its first interaction: the merge of the pairs
-    ///      before the switch, the redemption of every token after it (FEAT-6HBN ADR-6HCK), so a
-    ///      token that arrived late never strands. Both return without a call when there is
-    ///      nothing to settle.
-    function _settle(uint256 yes, uint256 no, bool resolved) internal {
+    /// @dev The settlement every payout runs as its first interaction: the merge of `pairs`, the
+    ///      free pairs the caller computed before its ledger debit, before the switch, and the
+    ///      redemption of every token after it (FEAT-6HBN ADR-6HCK), so a token that arrived late
+    ///      never strands. Never a read of the free pairs here: _burn calls this after the
+    ///      debit, where the exiting position's own band would count as free, and the transfer
+    ///      the burn computed would then revert (ADR-DFE2). Both branches return without a call
+    ///      when there is nothing to settle.
+    function _settle(uint256 pairs, uint256 yes, uint256 no, bool resolved) internal {
         if (resolved) {
             _redeemOutcomeTokens(yes, no);
         } else {
-            _mergeCompleteSets(_pairs(yes, no));
+            _mergeCompleteSets(pairs);
         }
     }
 
@@ -2134,8 +2174,8 @@ contract LPVault {
     }
 
     /// @dev Merges `amount` pairs, and returns without a call when there are none, so a payout
-    ///      can run it unconditionally (FR-6HC0). The caller passes min(yes, no) from
-    ///      _tokenBalances. No modifier: _burn and _collect call it inside their guarded entry
+    ///      can run it unconditionally (FR-6HC0). The caller passes the free pairs from
+    ///      _freePairs. No modifier: _burn and _collect call it inside their guarded entry
     ///      points, as their first interaction. A zero-amount mergePositions would not revert,
     ///      but it costs gas and emits an event.
     function _mergeCompleteSets(uint256 amount) internal {
