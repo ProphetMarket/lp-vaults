@@ -4,8 +4,8 @@ name: LP Escape Hatch
 module: contracts
 domain: "@positions"
 status: implemented
-version: 2
-refs: [FEAT-T7AF, FEAT-3ZRI, FEAT-REPZ]
+version: 3
+refs: [FEAT-T7AF, FEAT-3ZRI, FEAT-REPZ, FEAT-6HBN]
 ---
 
 # LP Escape Hatch
@@ -53,6 +53,10 @@ Linked to: UC-JAIK, UC-3Z93
 Fit Criterion: Given an escrow, `reclaimDeposit` and `reclaimDepositFor` succeed when the vault is paused, after `startWindDown`, and after `emergencyCancelAll` has set phase 3. A pending deposit is never locked by a phase (audit issue 6.7).
 Linked to: UC-JAIK, UC-3Z93
 
+**FR-DU2U** `When a reclaim refunds an escrow, the system shall merge the vault's free pairs (FEAT-6HBN FR-6HBZ) into USDC before the USDC transfer, and shall pay the recorded amount unchanged.`
+Fit Criterion: Given a 600 USDC escrow, a vault balance of 200 after the exchange's allowance spent 400 on a fill, and 500 free pairs, the reclaim merges 500 pairs and pays 600 in one call; with no free pair the reclaim makes no merge call and emits no `CompleteSetsMerged`. Escrow seniority (decision C7) binds burns and collects, which read the balance less `totalEscrowed`, and not fills: the exchange holds an unlimited USDC allowance from `initialize` (FEAT-REPZ FR-REQO), so a fill can spend escrowed USDC, and the keeper must keep its quoted size below the vault's USDC balance minus `totalEscrowed`. The merge is what lets a reclaim recover without a keeper (finding CV-06 of `audits/code-validation-round-1.md`, ADR-DU2V).
+Linked to: UC-JAIK, UC-3Z93
+
 ### Signature Validation
 
 **FR-3ZVN** `When the Safe calls reclaimDeposit, the system shall verify no signature and shall authorize the refund from msg.sender alone.`
@@ -85,7 +89,8 @@ Linked to: UC-JAIK, UC-3Z93
 
 ## Non-Functional Requirements
 
-**NFR-JAIW** Security: `reclaimDeposit and reclaimDepositFor shall each use the inline nonReentrant modifier per CLAUDE.md rule 1, and each shall set usedIntents, delete the escrow, and reduce totalEscrowed before the USDC transfer.`
+**NFR-JAIW** Security: `reclaimDeposit and reclaimDepositFor shall each use the inline nonReentrant modifier per CLAUDE.md rule 1, and each shall set usedIntents, delete the escrow, and reduce totalEscrowed before the merge of the free pairs and the USDC transfer, which are the only external calls, in that order.`
+Fit Criterion: the two token balances and the free pairs are read before any effect; the merge is the first interaction and the USDC transfer the last; a token that re-enters during the transfer meets the guard (the NFR-JAIW reentrancy test).
 
 **NFR-JAIX** Security: `The owner-key signature verification on reclaimDepositFor shall enforce s-malleability bounds and reject v values outside {27, 28} per CLAUDE.md rule 5, through the shared _recoverSigner.`
 
@@ -103,6 +108,7 @@ Fit Criterion: A Safe completes `reclaimDeposit` in a vault whose entire operato
 - A reclaim deletes the escrow entry and marks the intentId used, so mint and reclaim are mutually exclusive
 - `reclaimDeposit` succeeds in a vault with zero registered operators
 - Both reclaim paths succeed while paused, in WindDown, and in Cancelled
+- A reclaim merges the vault's free pairs before it pays, so a vault whose balance a fill took below its escrow still pays the full amount in one call when the free pairs cover the gap (FR-DU2U)
 - `reclaimDepositFor` pays the recorded Safe, not the caller, and rejects a MintIntent signature, an expired deadline, and an owner key that derives a different Safe
 - `reclaimDepositFor` refreshes `lastOperatorActivityTimestamp`; `reclaimDeposit` does not
 - OPERATOR TRUST ASSUMPTION NatSpec block present on `reclaimDepositFor`, including an MEV analysis

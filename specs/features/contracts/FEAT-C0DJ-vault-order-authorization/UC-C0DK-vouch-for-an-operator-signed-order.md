@@ -3,7 +3,7 @@ id: UC-C0DK
 name: Vouch for an Operator-Signed Order
 feature: FEAT-C0DJ
 status: implemented
-version: 2
+version: 3
 actor: Operator
 ---
 

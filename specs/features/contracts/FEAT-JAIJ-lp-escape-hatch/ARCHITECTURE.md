@@ -2,8 +2,8 @@
 id: FEAT-JAIJ
 name: LP Escape Hatch
 use_cases: [UC-JAIK, UC-3Z93]
-scenarios: [SC-JAIL, SC-3Z9L, SC-45IG, SC-JAIN, SC-3ZA0, SC-JAIP, SC-9OYE, SC-3Z9D, SC-3Z9F, SC-45IH, SC-3Z9G, SC-3Z9H, SC-3Z9I, SC-9OYF, SC-9OYG, SC-9OYH]
-last_update: 2026-09-12
+scenarios: [SC-JAIL, SC-3Z9L, SC-45IG, SC-JAIN, SC-3ZA0, SC-JAIP, SC-9OYE, SC-DU2T, SC-3Z9D, SC-3Z9F, SC-45IH, SC-3Z9G, SC-3Z9H, SC-3Z9I, SC-9OYF, SC-9OYG, SC-9OYH]
+last_update: 2026-09-14
 ---
 
 # Architecture: LP Escape Hatch
@@ -18,10 +18,12 @@ C4Context
     System(vault, "LPVault", "Per-market vault with reclaimDeposit and reclaimDepositFor")
     System(factory, "LPVaultFactory", "Holds the Safe derivation inputs")
     System_Ext(usdc, "USDC", "ERC-20 token contract")
+    System_Ext(ctf, "ConditionalTokens", "ERC-1155 outcome tokens")
     Rel(lp, vault, "reclaimDeposit(intentId)", "Safe transaction")
     Rel(lp, operator, "signs ReclaimIntent with a deadline", "EIP-712 off-chain")
     Rel(operator, vault, "reclaimDepositFor(lp, intentId, deadline, signature)", "contract call")
     Rel(vault, factory, "safeFactory(), safeProxyBytecodeHash()", "STATICCALL, relayed path only")
+    Rel(vault, ctf, "balanceOf, then mergePositions of the free pairs", "ERC-1155, before the transfer")
     Rel(vault, usdc, "transfer to the recorded Safe", "ERC-20")
 ```
 
@@ -37,12 +39,14 @@ C4Container
     ContainerDb(escrow, "pendingDeposits mapping", "Storage", "the record every reclaim reads and deletes")
     ContainerDb(intents, "usedIntents mapping", "Storage", "shared with the mint")
     System_Ext(usdc, "USDC ERC-20")
+    System_Ext(ctf, "ConditionalTokens ERC-1155")
     Rel(lp, vault, "reclaimDeposit", "tx from the Safe")
     Rel(operator, vault, "reclaimDepositFor", "tx")
     Rel(vault, eip712, "verify the owner key against lp", "relayed path only")
     Rel(vault, escrow, "read, then delete", "storage")
     Rel(vault, intents, "read, then set", "storage")
-    Rel(vault, usdc, "transfer(recorded Safe, recorded amount)", "ERC-20")
+    Rel(vault, ctf, "_freePairs, then _mergeCompleteSets (shared with FEAT-6HBN)", "first interaction")
+    Rel(vault, usdc, "transfer(recorded Safe, recorded amount)", "ERC-20, last interaction")
 ```
 
 ## Data Model
@@ -68,14 +72,16 @@ erDiagram
 - A reclaim pays exactly `pendingDeposits[intentId].amount` to exactly `pendingDeposits[intentId].lp`, and never a caller-supplied value
 - After a reclaim, `pendingDeposits[intentId].lp == address(0)` and `totalEscrowed` fell by the refunded amount
 - Neither reclaim path reads `phase`, `paused`, or the Operator registry
+- A reclaim merges only the free pairs (FEAT-6HBN ADR-DFE2), before the transfer, and pays the recorded amount whatever the merge produced (ADR-DU2V)
 
 ## Component Inventory
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | vault contract | `reclaimDeposit(bytes32)` (external, nonReentrant), `reclaimDepositFor(address,bytes32,uint256,bytes)` (external, onlyOperator, nonReentrant, touchesHeartbeat), `_refundEscrow()` (internal), `RECLAIM_INTENT_TYPEHASH`, `_verifySafeOwnerSignature()` (shared with FEAT-3ZRI), `DepositReclaimed` (event) |
+| `src/LPVault.sol` | vault contract | `reclaimDeposit(bytes32)` (external, nonReentrant), `reclaimDepositFor(address,bytes32,uint256,bytes)` (external, onlyOperator, nonReentrant, touchesHeartbeat), `_refundEscrow()` (internal), `RECLAIM_INTENT_TYPEHASH`, `_verifySafeOwnerSignature()` (shared with FEAT-3ZRI), `_tokenBalances()`, `_freePairs()`, `_mergeCompleteSets()` (shared with FEAT-6HBN), `DepositReclaimed` (event) |
 | `test/fixtures/LPVaultFixture.sol` | Test fixture | `_signReclaimIntent()`, `_escrow()` |
-| `test/features/FEAT-JAIJ-lp-escape-hatch/UC-JAIK-reclaim-deposit.t.sol` | Integration tests for the direct reclaim | SC-JAIL, SC-3Z9L, SC-45IG, SC-JAIN, SC-3ZA0, SC-JAIP, SC-9OYE, the NFR-JAIW reentrancy test |
+| `test/fixtures/ConditionalTokensFixture.sol` | Test fixture | `_giveOutcomeTokens()`, the free pairs of SC-DU2T |
+| `test/features/FEAT-JAIJ-lp-escape-hatch/UC-JAIK-reclaim-deposit.t.sol` | Integration tests for the direct reclaim | SC-JAIL, SC-3Z9L, SC-45IG, SC-JAIN, SC-3ZA0, SC-JAIP, SC-9OYE, SC-DU2T, the NFR-JAIW reentrancy test |
 | `test/features/FEAT-JAIJ-lp-escape-hatch/UC-3Z93-operator-reclaim-deposit-for-lp.t.sol` | Integration tests for the relayed reclaim | SC-3Z9D, SC-3Z9F, SC-45IH, SC-3Z9G, SC-3Z9H, SC-3Z9I, SC-9OYF, SC-9OYG, SC-9OYH |
 
 ## Event Topology
@@ -83,6 +89,7 @@ erDiagram
 | Event | Publisher | Payload | Condition | Consumers |
 |-------|-----------|---------|-----------|-----------|
 | `DepositReclaimed(bytes32 indexed intentId, address indexed lp, uint256 usdcAmount)` | `LPVault.reclaimDeposit`, `LPVault.reclaimDepositFor` | `intentId, lp, usdcAmount` -- the recorded Safe and the recorded amount | On every successful reclaim, on either path | Off-chain indexer, LP UI |
+| `CompleteSetsMerged(address indexed caller, uint256 amount)` (FEAT-6HBN) | `LPVault._mergeCompleteSets`, inside `_refundEscrow` | `caller, amount` -- the reclaim's caller and the free pairs merged | On a reclaim that finds free pairs, before `DepositReclaimed` | Off-chain event listener |
 
 **Non-events (explicit):**
 - Every revert scenario: no event emitted
@@ -100,14 +107,16 @@ erDiagram
 | System | Protocol | Direction | Purpose |
 |--------|----------|-----------|---------|
 | USDC ERC-20 | ERC-20 transfer | outbound | Return the recorded amount to the recorded Safe |
+| ConditionalTokens (Gnosis CTF) | `balanceOf`, `mergePositions` | outbound | Merge the vault's free pairs into USDC before the transfer, so a reclaim never waits on a keeper (FR-DU2U) |
 | LPVaultFactory | STATICCALL | inbound read | `operators(msg.sender)` for `onlyOperator`, and the Safe derivation inputs, on the relayed path only |
 
 ## Code Map
 
 | Spec ID | Spec Name | Implementation Files |
 |---------|-----------|---------------------|
-| UC-JAIK | Reclaim Deposit | `src/LPVault.sol:reclaimDeposit()`, `src/LPVault.sol:_refundEscrow()` |
+| UC-JAIK | Reclaim Deposit | `src/LPVault.sol:reclaimDeposit()`, `src/LPVault.sol:_refundEscrow()`, `src/LPVault.sol:_freePairs()`, `src/LPVault.sol:_mergeCompleteSets()` |
 | SC-JAIL | Successful reclaim in one call | `src/LPVault.sol:reclaimDeposit()`, `src/LPVault.sol:_refundEscrow()` |
+| SC-DU2T | Reclaim merges the vault's free pairs before it pays | `src/LPVault.sol:_refundEscrow()`, `src/LPVault.sol:_freePairs()`, `src/LPVault.sol:_mergeCompleteSets()` |
 | SC-3Z9L | Revert when nothing is escrowed for the intent | `src/LPVault.sol:reclaimDeposit()` (escrow read) |
 | SC-45IG | Revert when the caller is not the recorded Safe | `src/LPVault.sol:reclaimDeposit()` (recorded Safe check) |
 | SC-JAIN | Revert when intent already fulfilled | `src/LPVault.sol:reclaimDeposit()` (usedIntents check) |
@@ -144,6 +153,9 @@ In the context of `reclaimDepositFor` accepting an owner-key signature relayed b
 **ADR-9OYQ:** One-call reclaim, because the escrow record proves the deposit
 In the context of an escrow that records the Safe, the amount, and the intent hash at deposit time, facing the two-phase 24-hour reclaim (ADR-JB78) that existed only because the vault once had no deposit record, we decided that `reclaimDeposit(intentId)` refunds the recorded amount to the recorded Safe in one call, with no Operator signature, no timelock, no phase check, and no pause check, and that `reclaimDepositFor` relays the same refund from the owner key's `ReclaimIntent`, to achieve an escape hatch that works exactly when the Operator does not and that never locks a pending deposit in any phase, accepting that an LP can withdraw an escrow at any moment before the mint, so the Operator must mint promptly or lose the deposit. The user decided this on 2026-09-11. The mint and the reclaim keep sharing `usedIntents` (ADR-JAIY), so exactly one of them can happen.
 
+**ADR-DU2V:** The refund merges the free pairs first, because escrow seniority binds burns and collects and not fills
+In the context of a vault whose USDC is one balance under the exchange's unlimited allowance (FEAT-REPZ FR-REQO), facing finding CV-06 of `audits/code-validation-round-1.md` (a fill can spend escrowed USDC, so a reclaim of 600 against a balance of 200 reverts `TransferFailed` until a keeper merges, redeems, or sells), we decided that `_refundEscrow` reads both token balances and the free pairs before its effects and merges them as its first interaction, before the USDC transfer, through the same `_freePairs` and `_mergeCompleteSets` every payout uses (FEAT-6HBN ADR-DFE2), to achieve a reclaim that never waits on a keeper, accepting two balance reads and, when free pairs exist, one merge call per reclaim, and accepting that seniority (decision C7) stays an accounting rule against burns and collects (`_availableUsdc`) and never a bound on fills, which the keeper enforces off-chain by quoting below the balance minus `totalEscrowed`. Rejected: a balance check that reverts the fill, because the vault is not the exchange's caller and never sees a fill; a cap on the exchange allowance, because it would need a refresh on every deposit and reclaim; a reclaim that pays the balance and keeps the rest owed, because a partial escrow is a claim the ledger does not carry. The user decided this on 2026-09-14 (audit-fix step R15).
+
 ## Testing Decisions
 
 | Service/Pattern | Decision | Reason |
@@ -154,3 +166,4 @@ In the context of an escrow that records the Safe, the amount, and the intent ha
 | Deadline | injection | `vm.warp` sets `block.timestamp` on either side of the deadline |
 | Operator-registry independence | e2e | Remove every operator via the Admin path, then drive `reclaimDeposit` to completion (SC-3ZA0) |
 | Phase and pause | e2e | `pauseTrading`, `startWindDown`, and `emergencyCancelAll` after a `vm.warp` past the silence timelock set the three states (SC-9OYE, SC-9OYH) |
+| The fill that spends escrowed USDC | e2e | `vm.prank(exchange)` spends the vault's USDC through the standing allowance `initialize` granted, and `_giveOutcomeTokens` gives the vault its free pairs through the real ConditionalTokens bytecode (SC-DU2T) |

@@ -4,7 +4,7 @@ name: Merge Positions
 module: contracts
 domain: "@positions"
 status: implemented
-version: 4
+version: 5
 refs: [FEAT-T7AF]
 ---
 
@@ -50,6 +50,10 @@ Linked to: UC-K1M8
 Fit Criterion: Given positions with the same owner and range and different mintTick values, the call reverts with `MintTickMismatch` and no position changes. Under the claim model (decision C26) two positions with different mint ticks hold different assets, so one record cannot represent both.
 Linked to: UC-K1M8
 
+**FR-DU2X** `If mergePositions is called with a survivor or a consumed position whose owner is the zero address, then the system shall revert.`
+Fit Criterion: Given two burned positions, or one live and one burned, the call reverts with `PositionNotFound` after the duplicate check and before any liquidity is read, and no event is emitted. A deleted record reads owner zero, range [0, 0), and mint tick 0, so two of them pass every equality check against each other (finding CV-03 of `audits/code-validation-round-1.md`). A consumed record with a live owner and zero liquidity stays mergeable, because it keeps its range and mint tick.
+Linked to: UC-K1M8
+
 ### Liquidity Conservation
 
 **FR-AFPU** `When mergePositions completes, the sum of liquidity over every position in the vault shall equal the sum before the call.`
@@ -83,6 +87,7 @@ Linked to: UC-K1M8
 - Fee accounting preserved after merge (no loss, no double-counting)
 - A repeated position ID reverts before any liquidity is read
 - Positions with different mint ticks do not merge
+- A burned record never merges: the survivor's and every consumed record's owner is checked before any liquidity is read (FR-DU2X)
 - The merge conservation fuzz test and `invariant_mergeConservesLiquidity` pass
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
 - FEATURES.md status is `implemented`

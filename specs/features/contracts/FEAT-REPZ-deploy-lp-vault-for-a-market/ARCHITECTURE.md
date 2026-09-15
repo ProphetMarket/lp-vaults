@@ -2,7 +2,7 @@
 id: FEAT-REPZ
 name: Deploy LP Vault for a Market
 use_cases: [UC-REQ0, UC-REQ1, UC-REQ2]
-scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5, SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN, SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR, SC-6HBV, SC-6HBW, SC-6HBX, SC-6HBY, SC-9OY7, SC-BZC2, SC-BZC3, SC-BZC4]
+scenarios: [SC-REQ3, SC-REQ4, SC-REQ5, SC-REQ6, SC-REQ7, SC-REQ8, SC-REQ9, SC-REQA, SC-RG74, SC-RG75, SC-RG76, SC-RG77, SC-3WLL, SC-3WLM, SC-3WLN, SC-3WLO, SC-REQB, SC-REQC, SC-REQD, SC-REQE, SC-REQF, SC-REQG, SC-REQH, SC-FKD4, SC-FKD5, SC-5UJF, SC-5UJG, SC-5UJH, SC-5UJI, SC-5UJJ, SC-5UJK, SC-5UJL, SC-5UJM, SC-5UJN, SC-5UJO, SC-5UJP, SC-5UJQ, SC-5UJR, SC-6HBV, SC-6HBW, SC-6HBX, SC-6HBY, SC-9OY7, SC-BZC2, SC-BZC3, SC-BZC4, SC-DU2Y]
 last_update: 2026-09-14
 ---
 
@@ -89,7 +89,7 @@ erDiagram
         bytes32 conditionId "storage, non-zero, prepared 2-outcome condition"
         uint256 yesTokenId "storage, index set 1 position ID of (usdc, conditionId)"
         uint256 noTokenId "storage, index set 2 position ID of (usdc, conditionId)"
-        address factory "storage, onlyFactory guard + auth delegation"
+        address factory "storage, set once by initialize (msg.sender == factory_ checked inline) + auth delegation"
         int24 tickSpacing "storage"
         uint128 minimumFirstLiquidity "storage, set by Oracle via createVault, updatable via setMinimumFirstLiquidity"
         uint32 emergencyCancelTimelock "storage, copied from the factory default at createVault, never written again"
@@ -148,10 +148,10 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVaultFactory.sol` | Clone deployer + market registry + factory-level Auth + outcome-token identity check before clone deployment + the two Safe derivation inputs + the default emergency-cancel timelock | `createVault()`, `_validateOutcomeIdentity()`, `vaultForMarket`, `safeFactory`, `safeProxyBytecodeHash`, `defaultEmergencyCancelTimelock`, `MAX_EMERGENCY_CANCEL_TIMELOCK`, `setDefaultEmergencyCancelTimelock()`, admin/operator/oracle management, `ZeroConditionId`, `ZeroTokenId`, `DuplicateTokenId`, `NotBinaryCondition`, `TokenIdMismatch`, `ZeroBytecodeHash`, `ZeroTimelock`, `TimelockTooLong` |
+| `src/LPVaultFactory.sol` | Clone deployer + market registry + factory-level Auth + outcome-token identity check before clone deployment + the two Safe derivation inputs + the default emergency-cancel timelock | `createVault()`, `_validateOutcomeIdentity()`, `vaultForMarket`, `safeFactory`, `safeProxyBytecodeHash`, `defaultEmergencyCancelTimelock`, `MAX_EMERGENCY_CANCEL_TIMELOCK`, `setDefaultEmergencyCancelTimelock()`, admin/operator/oracle management, `ZeroConditionId`, `ZeroTokenId`, `DuplicateTokenId`, `NotBinaryCondition`, `TokenIdMismatch`, `ZeroBytecodeHash`, `ZeroTimelock`, `TimelockTooLong`, `InvalidTickSpacing` |
 | `src/LPVault.sol` | Per-market vault implementation (clone target), with the token ID restriction in the receiver hooks | `initialize()`, `conditionId`, `yesTokenId`, `noTokenId`, `emergencyCancelTimelock`, `_requireOwnTokenId()`, `UnknownTokenId`, inline `IConditionalTokens`, position/tick/fee state, vault-level Auth |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ0-deploy-factory.t.sol` | Integration tests for Deploy Factory | Factory deployment, role-separation revert, implementation-not-initializable and clone-initializable scenarios, factory and vault modifier checks |
-| `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ1-create-vault-for-market.t.sol` | Integration tests for Create Vault for Market | Vault creation, duplicate-market and non-oracle reverts, initialization guards, minimum-first-liquidity floor, the default emergency-cancel timelock and its copy, ERC-1155 receiver hooks |
+| `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ1-create-vault-for-market.t.sol` | Integration tests for Create Vault for Market | Vault creation, duplicate-market and non-oracle reverts, initialization guards, minimum-first-liquidity floor, the tick-spacing check (SC-DU2Y), the default emergency-cancel timelock and its copy, ERC-1155 receiver hooks |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ2-manage-roles-on-factory.t.sol` | Integration tests for Manage Roles on Factory | Operator, oracle, and admin role management scenarios, and role propagation to vaults |
 | `test/fixtures/ConditionalTokensFixture.sol` | Test fixture -- real ConditionalTokens bytecode, binary condition setup, vault creation with a verified identity, complete-set minting for holders | `ITestConditionalTokens`, `_deployConditionalTokens()`, `_prepareBinaryCondition()`, `_createVault()`, `_mintCompleteSets()`, `_binaryPartition()` |
 | `test/fixtures/MockERC20.sol` | Test fixture -- the one USDC mock of the suite | `MockERC20` |
@@ -188,7 +188,7 @@ erDiagram
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| call | `LPVaultFactory.createVault(bytes32,int24,uint128,bytes32,uint256,uint256)` | `createVault` | onlyOracle | `marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId` | `address vault` | DuplicateMarket, NotOracle, ZeroFloor, ZeroConditionId, ZeroTokenId, DuplicateTokenId, NotBinaryCondition, TokenIdMismatch |
+| call | `LPVaultFactory.createVault(bytes32,int24,uint128,bytes32,uint256,uint256)` | `createVault` | onlyOracle | `marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId` | `address vault` | DuplicateMarket, NotOracle, ZeroFloor, InvalidTickSpacing, ZeroConditionId, ZeroTokenId, DuplicateTokenId, NotBinaryCondition, TokenIdMismatch |
 | call | `LPVault.setMinimumFirstLiquidity(uint128)` | `setMinimumFirstLiquidity` | onlyOracle | `newMin` | void | NotOracle, ZeroFloor |
 | call | `LPVaultFactory.setDefaultEmergencyCancelTimelock(uint32)` | `setDefaultEmergencyCancelTimelock` | onlyAdmin | `newTimelock` | void | NotAdmin, ZeroTimelock, TimelockTooLong |
 | call | `LPVaultFactory.addOperator(address)` | `addOperator` | onlyAdmin | `operator_` | void | NotAdmin, RoleSeparation |
@@ -199,7 +199,7 @@ erDiagram
 | call | `LPVaultFactory.addAdmin(address)` | `addAdmin` | onlyAdmin | `admin_` | void | NotAdmin, ZeroAddress |
 | call | `LPVaultFactory.removeAdmin(address)` | `removeAdmin` | onlyAdmin | `admin` | void | NotAdmin, CannotRemoveLastAdmin |
 | call | `LPVaultFactory.renounceAdminRole()` | `renounceAdminRole` | onlyAdmin | none | void | NotAdmin, CannotRemoveLastAdmin |
-| call | `LPVault.initialize(...)` | `initialize` | onlyFactory | `marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity, version, conditionId, yesTokenId, noTokenId` (reads `defaultEmergencyCancelTimelock()` from the factory) | void | AlreadyInitialized, NotFactory |
+| call | `LPVault.initialize(...)` | `initialize` | initializer + inline `msg.sender == factory_` (factory not yet stored) | `marketId, usdc, exchange, conditionalTokens, tickSpacing, factory, minimumFirstLiquidity, version, conditionId, yesTokenId, noTokenId` (reads `defaultEmergencyCancelTimelock()` from the factory) | void | AlreadyInitialized, NotFactory |
 | call | `LPVault.onERC1155Received(address,address,uint256,uint256,bytes)` | `onERC1155Received` | onlyConditionalTokens | `operator, from, id, value, data` | `bytes4` (`0xf23a6e61`) | NotConditionalTokens, UnknownTokenId |
 | call | `LPVault.onERC1155BatchReceived(address,address,uint256[],uint256[],bytes)` | `onERC1155BatchReceived` | onlyConditionalTokens | `operator, from, ids, values, data` | `bytes4` (`0xbc197c81`) | NotConditionalTokens, UnknownTokenId |
 | call | `LPVault.supportsInterface(bytes4)` | `supportsInterface` | public view | `interfaceId` | `bool` | none |
@@ -249,6 +249,7 @@ stateDiagram-v2
 | SC-REQ9 | Re-initialization revert | `src/LPVault.sol:initialize()` |
 | SC-REQA | Only factory can initialize | `src/LPVault.sol:initialize()` |
 | SC-RG74 | createVault reverts on zero floor | `src/LPVaultFactory.sol:createVault()`, `src/LPVault.sol:initialize()` |
+| SC-DU2Y | createVault reverts when tickSpacing is zero or negative | `src/LPVaultFactory.sol:createVault()` (the `InvalidTickSpacing` check) |
 | SC-RG75 | Oracle updates minimumFirstLiquidity | `src/LPVault.sol:setMinimumFirstLiquidity()` |
 | SC-RG76 | Non-Oracle setMinimumFirstLiquidity revert | `src/LPVault.sol:setMinimumFirstLiquidity()` |
 | SC-RG77 | setMinimumFirstLiquidity zero revert | `src/LPVault.sol:setMinimumFirstLiquidity()` |

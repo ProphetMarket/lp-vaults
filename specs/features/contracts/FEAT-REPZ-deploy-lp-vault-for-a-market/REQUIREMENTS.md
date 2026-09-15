@@ -4,7 +4,7 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 9
+version: 10
 refs: []
 ---
 
@@ -82,7 +82,7 @@ Fit Criterion: Given an already-initialized vault, a second `initialize()` call 
 Linked to: UC-REQ1
 
 **FR-REQQ** `If a non-factory address calls initialize() on a vault clone, then the system shall revert.`
-Fit Criterion: Given any address != factory, calling `initialize()` reverts with an onlyFactory error.
+Fit Criterion: Given any address != factory, calling `initialize()` reverts with `NotFactory`. The check is inline, `msg.sender != factory_`, because `factory` is not yet stored when a clone is initialized; no `onlyFactory` modifier exists (finding CV-05 of `audits/code-validation-round-1.md` deleted the unused one).
 Linked to: UC-REQ1
 
 ### ERC-1155 Receiver Compatibility
@@ -145,6 +145,10 @@ Linked to: UC-REQ1
 
 **FR-RG4Y** `If the Oracle calls createVault with minimumFirstLiquidity == 0, or setMinimumFirstLiquidity is called with newMin == 0, then the system shall revert.`
 Fit Criterion: Given `minimumFirstLiquidity == 0` in `createVault`, the call reverts. Given `newMin == 0` in `setMinimumFirstLiquidity`, the call reverts. The vault's `minimumFirstLiquidity` is never zero in any reachable state.
+Linked to: UC-REQ1
+
+**FR-DU2Z** `If the Oracle calls createVault with tickSpacing <= 0, then the system shall revert.`
+Fit Criterion: Given `tickSpacing == 0` or `tickSpacing == -10` in `createVault`, the call reverts with `InvalidTickSpacing` and no vault is registered. A vault's `tickSpacing` is positive in every reachable state, so the alignment check `tickLower % tickSpacing` in `_requireValidRange` never divides by zero (finding CV-12 of `audits/code-validation-round-1.md`).
 Linked to: UC-REQ1
 
 ### Default Emergency-Cancel Timelock
@@ -241,6 +245,7 @@ Linked to: UC-REQ2
 - Implementation contract cannot be initialized directly
 - The vault accepts inbound ERC-1155 transfers of its own two outcome-token IDs from its own ConditionalTokens contract, and rejects receiver-hook calls from every other address and every other token ID
 - A vault cannot be created with a zero conditionId, a zero or duplicated outcome-token ID, a condition whose outcome slot count is not 2, or a token pair that differs from the condition's index set 1 and index set 2 position IDs
+- A vault cannot be created with a zero or negative tick spacing (FR-DU2Z)
 - Forge fmt passes; no console.log in production code
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
 - Factory role rotation (addOperator, removeOperator, setOracle, transferAdmin/acceptAdmin, addAdmin, removeAdmin, renounceAdminRole) propagates immediately to all existing vaults deployed by that factory

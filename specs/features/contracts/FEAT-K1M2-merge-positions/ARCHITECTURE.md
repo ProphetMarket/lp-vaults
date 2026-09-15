@@ -2,7 +2,7 @@
 id: FEAT-K1M2
 name: Merge Positions
 use_cases: [UC-K1M8]
-scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC, SC-3XUP, SC-3XUQ, SC-AFPQ, SC-AFPR]
+scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC, SC-3XUP, SC-3XUQ, SC-AFPQ, SC-AFPR, SC-DU2W]
 last_update: 2026-09-14
 ---
 
@@ -57,7 +57,7 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | Vault with position merge | `mergePositions()`, `PositionsMerged` event, `DuplicatePositionId`, `MintTickMismatch` |
+| `src/LPVault.sol` | Vault with position merge | `mergePositions()`, `PositionsMerged` event, `DuplicatePositionId`, `MintTickMismatch`, `PositionNotFound` (shared with FEAT-7G40) |
 | `test/invariants/TickState.t.sol` | Invariant suite whose handler mints, moves the tick, merges same-range same-mint-tick pairs, and runs the documented `[a, a]` rejection | `invariant_mergeConservesLiquidity`, `invariant_duplicateMergeAlwaysRejected` |
 
 ## Event Topology
@@ -74,7 +74,7 @@ erDiagram
 
 | Method | Path | Handler | Auth | Request Shape | Response Shape | Error Codes |
 |--------|------|---------|------|---------------|----------------|-------------|
-| call | `LPVault.mergePositions(uint256[])` | `mergePositions` | onlyOperator | `positionIds` | void | NotOperator, TradingIsPaused, VaultCancelled, InsufficientPositions, DuplicatePositionId, RangeMismatch, MintTickMismatch |
+| call | `LPVault.mergePositions(uint256[])` | `mergePositions` | onlyOperator | `positionIds` | void | NotOperator, TradingIsPaused, VaultCancelled, InsufficientPositions, DuplicatePositionId, PositionNotFound, RangeMismatch, MintTickMismatch |
 
 ## Integration Points
 
@@ -86,6 +86,7 @@ _None — merge is a pure storage operation with no external calls._
 |---------|-----------|---------------------|
 | UC-K1M8 | Merge Same-Range Positions | `src/LPVault.sol:mergePositions()` |
 | SC-K1M9 | Successful merge | `src/LPVault.sol:mergePositions()` |
+| SC-DU2W | Revert when a merged record was burned | `src/LPVault.sol:mergePositions()` (the two owner checks) |
 | SC-3XUP | Successful merge refreshes silence timer | `src/LPVault.sol:mergePositions()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-3XUQ | Reverted merge leaves silence timer untouched | `src/LPVault.sol:mergePositions()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-K1MA | Revert on mismatched ranges | `src/LPVault.sol:mergePositions()` |

@@ -4,7 +4,7 @@ name: Vault Order Authorization
 module: contracts
 domain: "@vault"
 status: implemented
-version: 2
+version: 3
 refs: [FEAT-REPZ, FEAT-9BQZ, FEAT-TOGR, FEAT-T7AF, FEAT-JXQO, FEAT-K1MD, FEAT-JGE7]
 ---
 
@@ -86,7 +86,7 @@ Rationale: the vault vouches for a signer, never for an order's uniqueness. Orde
 Fit Criterion: `isValidSignature` is declared `view` and answers correctly under `staticcall`. It is callable by any address with any input, so a state-mutating implementation would be an unguarded external write reachable by anyone, and would make the method a reentrancy surface on a contract that holds LP capital.
 
 **NFR-C0E3** Auditability: `Every function this feature adds shall carry an OPERATOR TRUST ASSUMPTION NatSpec block.`
-Fit Criterion: the block states plainly that any registered Operator can author orders that spend vault assets through the exchange, that LPs are trusting Operators not to sign orders that trade against their interest, and that the vault enforces who signed but never what was signed. The vault checks who signed, never what was signed. The Operator's order sizes and prices are trusted. The per-market deposit cap in Part 6 of the audit plan is the economic bound. Matches the style already used on every Operator-gated function in `ProphetCTFExchange.sol` and `LPVault.sol`.
+Fit Criterion: the block states plainly that any registered Operator can author orders that spend vault assets through the exchange, that LPs are trusting Operators not to sign orders that trade against their interest, and that the vault enforces who signed but never what was signed. The vault checks who signed, never what was signed. The Operator's order sizes and prices are trusted. The block cites no economic bound: no deposit cap exists in the code (finding CV-07 of `audits/code-validation-round-1.md`), so the trust block stands on its own. Matches the style already used on every Operator-gated function in `ProphetCTFExchange.sol` and `LPVault.sol`.
 
 **NFR-C0E4** Compatibility: `The success value shall be exactly 0x1626ba7e and the failure value shall be a fixed value distinguishable from it.`
 Fit Criterion: the success path returns `0x1626ba7e` byte for byte, and every failure path returns `0xffffffff`. An almost-right magic value fails silently and identically to a rejected signature, which is the hardest class of integration bug to diagnose from on-chain evidence alone.

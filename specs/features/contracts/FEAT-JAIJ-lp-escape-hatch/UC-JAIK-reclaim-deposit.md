@@ -3,7 +3,7 @@ id: UC-JAIK
 name: Reclaim Deposit
 feature: FEAT-JAIJ
 status: implemented
-version: 2
+version: 3
 actor: LP
 ---
 
@@ -164,5 +164,31 @@ The Safe calls `reclaimDeposit(intentId)` on the vault, through a Safe transacti
 
 **Side Effects:**
 - Same as SC-JAIL on each vault
+
+---
+
+### SC-DU2T: Reclaim merges the vault's free pairs before it pays
+
+**Given:**
+- The Operator escrowed 600 USDC from Safe S against intentId X
+- The exchange's standing USDC allowance spent 400 of the vault's USDC on a fill, so the vault holds 200 USDC against 600 escrowed: escrow seniority (decision C7) binds burns and collects, not fills
+- The vault holds 500 YES and 500 NO and no live position, so `totalYesOwed()` and `totalNoOwed()` are 0 and all 500 pairs are free (FEAT-6HBN ADR-DFE2)
+
+**Steps:**
+1. Safe S calls `reclaimDeposit(X)`
+2. System reads both token balances and computes the free pairs, `min(500 − 0, 500 − 0) = 500`
+3. System marks `usedIntents[X] = true`, deletes the escrow, and subtracts 600 from totalEscrowed
+4. System merges 500 pairs through the ConditionalTokens contract, which pays the vault 500 USDC
+5. System transfers 600 USDC to S
+
+**Outcomes:**
+- S receives the full 600 in one call, with no keeper action
+- The vault holds 100 USDC, 0 YES, and 0 NO
+- The same steps run for `reclaimDepositFor`, because both entry points share `_refundEscrow`
+
+**Side Effects:**
+- `CompleteSetsMerged(S, 500)` emitted by the vault, then `DepositReclaimed(X, S, 600)`
+- `PositionsMerge` emitted by ConditionalTokens
+- Without the merge the transfer of 600 against 200 reverts `TransferFailed` until a keeper merges (finding CV-06 of `audits/code-validation-round-1.md`)
 
 ---

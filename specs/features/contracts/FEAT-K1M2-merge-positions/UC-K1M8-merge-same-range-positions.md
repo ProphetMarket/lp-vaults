@@ -3,7 +3,7 @@ id: UC-K1M8
 name: Merge Same-Range Positions
 feature: FEAT-K1M2
 status: implemented
-version: 4
+version: 5
 actor: Operator
 ---
 
@@ -194,6 +194,27 @@ Operator calls `mergePositions(uint256[] calldata positionIds)` on the vault.
 
 **Side Effects:**
 - No state changes at all
+- No events emitted
+
+---
+
+### SC-DU2W: Revert when a merged record was burned
+
+**Given:**
+- Positions posA and posB shared an owner, a range, and a mint tick, and the owner's Safe burned both, so each record is deleted and reads owner zero, range [0, 0), and mint tick 0
+
+**Steps:**
+1. Operator calls `mergePositions([posA, posB])`
+2. System checks that no ID repeats
+3. System reads the survivor's owner and finds the zero address
+
+**Outcomes:**
+- The call reverts with `PositionNotFound` before it reads any liquidity
+- A merge of a live position with a burned one reverts the same way, at the consumed record's owner check
+- Before this guard two deleted records passed every equality check against each other and the merge emitted `PositionsMerged` for two positions that no longer exist (finding CV-03 of `audits/code-validation-round-1.md`)
+
+**Side Effects:**
+- No state changes
 - No events emitted
 
 ---

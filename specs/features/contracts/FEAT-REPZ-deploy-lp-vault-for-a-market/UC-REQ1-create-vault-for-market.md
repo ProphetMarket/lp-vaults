@@ -3,7 +3,7 @@ id: UC-REQ1
 name: Create Vault for Market
 feature: FEAT-REPZ
 status: implemented
-version: 9
+version: 10
 actor: Oracle
 ---
 
@@ -119,10 +119,10 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditio
 
 **Steps:**
 1. A non-factory address calls `initialize()` on the vault clone
-2. System checks the `onlyFactory` modifier
+2. System checks `msg.sender == factory_` inline, because `factory` is not yet stored when a clone is initialized (no `onlyFactory` modifier exists; finding CV-05 of `audits/code-validation-round-1.md`)
 
 **Outcomes:**
-- The call reverts with an onlyFactory error
+- The call reverts with `NotFactory`
 
 **Side Effects:**
 - No state changes
@@ -468,6 +468,28 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditio
 
 **Side Effects:**
 - None -- `supportsInterface` is a pure view
+
+---
+
+### SC-DU2Y: createVault reverts when tickSpacing is zero or negative
+
+**Given:**
+- marketId has no existing vault in the registry
+- Oracle passes `tickSpacing = 0`, or `tickSpacing = -10`
+
+**Steps:**
+1. Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditionId, yesTokenId, noTokenId)`
+2. System validates the spacing beside the floor, before the duplicate-market check and the identity check
+
+**Outcomes:**
+- The call reverts with `InvalidTickSpacing`
+- No vault is registered for marketId
+- A zero spacing would make every `depositForIntent` revert with a division-by-zero panic in the alignment check, and a negative spacing reads wrong in every document (finding CV-12 of `audits/code-validation-round-1.md`)
+
+**Side Effects:**
+- No clone deployed
+- No state changes
+- No events emitted
 
 ---
 
