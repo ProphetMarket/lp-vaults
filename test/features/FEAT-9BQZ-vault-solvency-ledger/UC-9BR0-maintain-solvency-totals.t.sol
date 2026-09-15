@@ -51,6 +51,8 @@ contract SolvencyLedgerTestBase is LPVaultFixture {
         address indexed owner,
         uint256 usdcOwed,
         uint256 usdcPaid,
+        uint256 spreadOwed,
+        uint256 spreadPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
@@ -157,13 +159,26 @@ contract LedgerBurnDebitTest is SolvencyLedgerTestBase {
         assertEq(vault.totalYesOwed(), BAND_TOKENS, "precondition: the YES total after the move");
     }
 
-    // SC-9BS0: the totals fall by the claim the event reports
+    // SC-9BS0: the totals fall by the claim the event reports, and the burn's own credit pays
+    // the Safe the USDC the vault held above what it owed (FEAT-E943 SC-E94N)
     function test_whenBurnedThenTotalsFallByTheOwedAmounts() public {
+        // The vault still holds its whole 300 USDC deposit and its 90 YES cover what it owes, so
+        // 300,000,000 - 247,354,500 is creditable as spread to the only liquidity in range.
+        // The growth is stored per unit of liquidity and floored, and this surplus divides the
+        // liquidity exactly, so the position's claim reads one unit below the measurement. That
+        // one unit is the dust the closing sweep pays back in the same burn (FEAT-E943 FR-E94C).
+        uint256 credited = PRINCIPAL - FELL_USDC - 1;
+
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(
+            positionId, safe, FELL_USDC, FELL_USDC, credited, credited, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS
+        );
         _burn(positionId);
 
         _assertPrincipalTotalsZero();
+        assertEq(vault.totalSpreadOwedX128(), 0, "the spread total is debited to zero");
+        assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the Safe receives the principal plus the credited spread");
+        assertEq(mockUsdc.balanceOf(address(vault)), 0, "the vault keeps nothing above escrow");
     }
 
     // SC-9BS0: the scaled debit is the scaled claim

@@ -50,6 +50,8 @@ contract OperatorBurnTestBase is LPVaultFixture {
         address indexed owner,
         uint256 usdcOwed,
         uint256 usdcPaid,
+        uint256 spreadOwed,
+        uint256 spreadPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
@@ -74,6 +76,15 @@ contract OperatorBurnTestBase is LPVaultFixture {
     function _moveTick(int24 tick) internal {
         vm.prank(operatorAddr);
         vault.updateTick(tick);
+    }
+
+    /// @dev Moves USDC out of the vault through the exchange's standing approval, as the fill
+    ///      that bought the band's tokens would (decision C8). Without it the vault would hold
+    ///      more USDC than the ledger owes, and the burn would credit the difference as spread
+    ///      (FEAT-E943).
+    function _drainThroughExchange(uint256 amount) internal {
+        vm.prank(exchangeAddr);
+        assertTrue(mockUsdc.transferFrom(address(vault), exchangeAddr, amount), "the fill should spend");
     }
 
     function _fundVault(uint256 yesAmount, uint256 noAmount) internal {
@@ -106,7 +117,7 @@ contract OperatorBurnTestBase is LPVaultFixture {
     }
 
     function _assertLive() internal view {
-        (address owner,,,, uint128 liq) = vault.positions(positionId);
+        (address owner,,,, uint128 liq,) = vault.positions(positionId);
         assertEq(owner, safe, "the position keeps its owner");
         assertEq(liq, LIQUIDITY, "the position keeps its liquidity");
     }
@@ -124,7 +135,7 @@ contract OperatorBurnAtMintTickTest is OperatorBurnTestBase {
         uint256 operatorBefore = mockUsdc.balanceOf(operatorAddr);
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0, 0, 0);
         _relay(_sig());
 
         assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the Safe receives 300 USDC");
@@ -140,7 +151,7 @@ contract OperatorBurnAtMintTickTest is OperatorBurnTestBase {
         _relay(_sig());
 
         assertTrue(vault.usedBurnAuthorizations(structHash), "the struct hash is consumed");
-        (address owner,,,, uint128 liq) = vault.positions(positionId);
+        (address owner,,,, uint128 liq,) = vault.positions(positionId);
         assertEq(owner, address(0), "the record is deleted");
         assertEq(liq, 0, "the record is deleted");
     }
@@ -154,7 +165,7 @@ contract OperatorBurnAtMintTickTest is OperatorBurnTestBase {
         vault.burnPosition(twin);
 
         assertEq(mockUsdc.balanceOf(safe), mockUsdc.balanceOf(safeB), "both paths pay the same USDC");
-        (uint128 gLower,,) = vault.ticks(LOWER);
+        (uint128 gLower,,,) = vault.ticks(LOWER);
         assertEq(gLower, 0, "both paths removed their liquidity from the shared tick");
     }
 }
@@ -167,12 +178,13 @@ contract OperatorBurnAfterPriceFellTest is OperatorBurnTestBase {
         super.setUp();
         _moveTick(5700);
         _fundVault(BAND_TOKENS, 0);
+        _drainThroughExchange(PRINCIPAL - FELL_USDC);
     }
 
     // SC-7G4D: 247.3545 USDC plus 90 YES to the Safe, nothing to the Operator
     function test_whenRelayedAfterFallThenSafeReceivesUsdcPlusYes() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, 0, 0, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
         _relay(_sig());
 
         assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "the USDC leg goes to the Safe");
@@ -190,12 +202,13 @@ contract OperatorBurnAfterPriceRoseTest is OperatorBurnTestBase {
         super.setUp();
         _moveTick(6300);
         _fundVault(0, BAND_TOKENS);
+        _drainThroughExchange(PRINCIPAL - ROSE_USDC);
     }
 
     // SC-7G4E: 265.3455 USDC plus 90 NO to the Safe
     function test_whenRelayedAfterRiseThenSafeReceivesUsdcPlusNo() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, ROSE_USDC, ROSE_USDC, vault.noTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, ROSE_USDC, ROSE_USDC, 0, 0, vault.noTokenId(), BAND_TOKENS, BAND_TOKENS);
         _relay(_sig());
 
         assertEq(mockUsdc.balanceOf(safe), ROSE_USDC, "the USDC leg goes to the Safe");
@@ -397,7 +410,7 @@ contract OperatorBurnInWindDownTest is OperatorBurnTestBase {
     // SC-7G4K: the same amounts, and the phase stays WindDown
     function test_whenWindDownThenRelayedBurnPaysAsInActive() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0, 0, 0);
         _relay(_sig());
 
         assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the Safe receives 300 USDC in WindDown");

@@ -410,9 +410,9 @@ contract UpdateTickSameTickTest is UpdateTickTestBase {
     /// @dev One hash over the three initialized tick records (liquidityGross,
     ///      liquidityNet, noLiquidityNet at ticks 0, 100, and 200).
     function _tickRecordsHash() internal view returns (bytes32) {
-        (uint128 g0, int128 n0, int128 no0) = vault.ticks(int24(0));
-        (uint128 g100, int128 n100, int128 no100) = vault.ticks(int24(100));
-        (uint128 g200, int128 n200, int128 no200) = vault.ticks(int24(200));
+        (uint128 g0, int128 n0, int128 no0,) = vault.ticks(int24(0));
+        (uint128 g100, int128 n100, int128 no100,) = vault.ticks(int24(100));
+        (uint128 g200, int128 n200, int128 no200,) = vault.ticks(int24(200));
         return keccak256(abi.encode(g0, n0, no0, g100, n100, no100, g200, n200, no200));
     }
 }
@@ -602,14 +602,14 @@ contract BoundedTickSearchFarAboveTest is BoundedTickSearchTestBase {
 
     // SC-5IDH: activeLiquidity is unchanged and the planted ticks are untouched
     function test_whenTickIsPlantedFarAboveThenPlantedTicksAreUntouched() public {
-        (uint128 gLower, int128 nLower,) = vault.ticks(int24(8388590));
-        (uint128 gUpper, int128 nUpper,) = vault.ticks(int24(8388600));
+        (uint128 gLower, int128 nLower,,) = vault.ticks(int24(8388590));
+        (uint128 gUpper, int128 nUpper,,) = vault.ticks(int24(8388600));
 
         _move(int24(300));
 
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
-        (uint128 gLowerAfter, int128 nLowerAfter,) = vault.ticks(int24(8388590));
-        (uint128 gUpperAfter, int128 nUpperAfter,) = vault.ticks(int24(8388600));
+        (uint128 gLowerAfter, int128 nLowerAfter,,) = vault.ticks(int24(8388590));
+        (uint128 gUpperAfter, int128 nUpperAfter,,) = vault.ticks(int24(8388600));
         assertEq(gLowerAfter, gLower, "tick 8388590 liquidityGross must not move");
         assertEq(nLowerAfter, nLower, "tick 8388590 liquidityNet must not move");
         assertEq(gUpperAfter, gUpper, "tick 8388600 liquidityGross must not move");
@@ -652,14 +652,14 @@ contract BoundedTickSearchFarBelowTest is BoundedTickSearchTestBase {
 
     // SC-5IDI: activeLiquidity is unchanged and the planted ticks are untouched
     function test_whenTickIsPlantedFarBelowThenPlantedTicksAreUntouched() public {
-        (uint128 gLower, int128 nLower,) = vault.ticks(int24(-8388600));
-        (uint128 gUpper, int128 nUpper,) = vault.ticks(int24(-8388590));
+        (uint128 gLower, int128 nLower,,) = vault.ticks(int24(-8388600));
+        (uint128 gUpper, int128 nUpper,,) = vault.ticks(int24(-8388590));
 
         _move(int24(100));
 
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity must not move");
-        (uint128 gLowerAfter, int128 nLowerAfter,) = vault.ticks(int24(-8388600));
-        (uint128 gUpperAfter, int128 nUpperAfter,) = vault.ticks(int24(-8388590));
+        (uint128 gLowerAfter, int128 nLowerAfter,,) = vault.ticks(int24(-8388600));
+        (uint128 gUpperAfter, int128 nUpperAfter,,) = vault.ticks(int24(-8388590));
         assertEq(gLowerAfter, gLower, "tick -8388600 liquidityGross must not move");
         assertEq(nLowerAfter, nLower, "tick -8388600 liquidityNet must not move");
         assertEq(gUpperAfter, gUpper, "tick -8388590 liquidityGross must not move");

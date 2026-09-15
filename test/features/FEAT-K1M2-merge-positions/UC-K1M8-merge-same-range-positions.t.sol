@@ -83,14 +83,14 @@ contract MergePositionsSuccessTest is MergePositionsTestBase {
     // SC-K1M9: survivor liquidity equals sum of both positions
     function test_survivorLiquidityEqualsSumOfBoth() public {
         // Both positions: 500 USDC on [0, 100) → each has 5e18 liquidity
-        (,,,, uint128 liqA) = vault.positions(posA);
-        (,,,, uint128 liqB) = vault.positions(posB);
+        (,,,, uint128 liqA,) = vault.positions(posA);
+        (,,,, uint128 liqB,) = vault.positions(posB);
         uint128 expectedLiq = liqA + liqB;
 
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
-        (,,,, uint128 survivorLiq) = vault.positions(posA);
+        (,,,, uint128 survivorLiq,) = vault.positions(posA);
         assertEq(survivorLiq, expectedLiq, "survivor liquidity should equal sum");
         assertEq(survivorLiq, 10e18, "survivor liquidity should be 10e18");
     }
@@ -100,7 +100,7 @@ contract MergePositionsSuccessTest is MergePositionsTestBase {
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
-        (,,,, uint128 consumedLiq) = vault.positions(posB);
+        (,,,, uint128 consumedLiq,) = vault.positions(posB);
         assertEq(consumedLiq, 0, "consumed position liquidity should be zero");
     }
 
@@ -118,15 +118,15 @@ contract MergePositionsSuccessTest is MergePositionsTestBase {
     // SC-K1M9: tick liquidityGross unchanged after merge
     function test_tickLiquidityGrossUnchanged() public {
         // Record tick state before merge
-        (uint128 grossLowerBefore,,) = vault.ticks(int24(0));
-        (uint128 grossUpperBefore,,) = vault.ticks(int24(100));
+        (uint128 grossLowerBefore,,,) = vault.ticks(int24(0));
+        (uint128 grossUpperBefore,,,) = vault.ticks(int24(100));
 
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
         // Tick state must be identical — total liquidity on the range hasn't changed
-        (uint128 grossLowerAfter,,) = vault.ticks(int24(0));
-        (uint128 grossUpperAfter,,) = vault.ticks(int24(100));
+        (uint128 grossLowerAfter,,,) = vault.ticks(int24(0));
+        (uint128 grossUpperAfter,,,) = vault.ticks(int24(100));
         assertEq(grossLowerAfter, grossLowerBefore, "tickLower liquidityGross unchanged");
         assertEq(grossUpperAfter, grossUpperBefore, "tickUpper liquidityGross unchanged");
     }
@@ -171,15 +171,15 @@ contract MergePositionsRangeMismatchTest is MergePositionsTestBase {
 
     // SC-K1MA: no state change on revert (positions unchanged)
     function test_noStateChangeOnMismatch() public {
-        (,,,, uint128 liqABefore) = vault.positions(posA);
-        (,,,, uint128 liqCBefore) = vault.positions(posC);
+        (,,,, uint128 liqABefore,) = vault.positions(posA);
+        (,,,, uint128 liqCBefore,) = vault.positions(posC);
 
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.RangeMismatch.selector);
         vault.mergePositions(_buildIds(posA, posC));
 
-        (,,,, uint128 liqAAfter) = vault.positions(posA);
-        (,,,, uint128 liqCAfter) = vault.positions(posC);
+        (,,,, uint128 liqAAfter,) = vault.positions(posA);
+        (,,,, uint128 liqCAfter,) = vault.positions(posC);
         assertEq(liqAAfter, liqABefore, "posA liquidity unchanged after revert");
         assertEq(liqCAfter, liqCBefore, "posC liquidity unchanged after revert");
     }
@@ -226,13 +226,13 @@ contract MergePositionsInsufficientInputTest is MergePositionsTestBase {
 contract MergePositionsDuplicateIdTest is MergePositionsTestBase {
     // SC-AFPQ: a repeated ID reverts and the position keeps its liquidity
     function test_whenAnIdRepeatsThenMergeRevertsAndLiquidityIsUnchanged() public {
-        (,,,, uint128 liqBefore) = vault.positions(posA);
+        (,,,, uint128 liqBefore,) = vault.positions(posA);
 
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.DuplicatePositionId.selector);
         vault.mergePositions(_buildIds(posA, posA));
 
-        (,,,, uint128 liqAfter) = vault.positions(posA);
+        (,,,, uint128 liqAfter,) = vault.positions(posA);
         assertEq(liqAfter, liqBefore, "posA liquidity must not double");
     }
 
@@ -285,8 +285,8 @@ contract MergePositionsMintTickMismatchTest is MergePositionsTestBase {
 
     // SC-AFPR: the two mint ticks differ and the merge reverts
     function test_whenMintTicksDifferThenMergeReverts() public {
-        (,,, int24 mintTickA,) = vault.positions(posA);
-        (,,, int24 mintTickC,) = vault.positions(posC);
+        (,,, int24 mintTickA,,) = vault.positions(posA);
+        (,,, int24 mintTickC,,) = vault.positions(posC);
         assertEq(mintTickA, int24(0), "posA was minted at tick 0");
         assertEq(mintTickC, int24(50), "posC was minted at tick 50");
 
@@ -297,15 +297,15 @@ contract MergePositionsMintTickMismatchTest is MergePositionsTestBase {
 
     // SC-AFPR: both positions keep their liquidity
     function test_whenMintTicksDifferThenNoStateChanges() public {
-        (,,,, uint128 liqABefore) = vault.positions(posA);
-        (,,,, uint128 liqCBefore) = vault.positions(posC);
+        (,,,, uint128 liqABefore,) = vault.positions(posA);
+        (,,,, uint128 liqCBefore,) = vault.positions(posC);
 
         vm.prank(operatorAddr);
         vm.expectRevert(LPVault.MintTickMismatch.selector);
         vault.mergePositions(_buildIds(posA, posC));
 
-        (,,,, uint128 liqAAfter) = vault.positions(posA);
-        (,,,, uint128 liqCAfter) = vault.positions(posC);
+        (,,,, uint128 liqAAfter,) = vault.positions(posA);
+        (,,,, uint128 liqCAfter,) = vault.positions(posC);
         assertEq(liqAAfter, liqABefore, "posA liquidity unchanged after revert");
         assertEq(liqCAfter, liqCBefore, "posC liquidity unchanged after revert");
     }
@@ -315,7 +315,7 @@ contract MergePositionsMintTickMismatchTest is MergePositionsTestBase {
         vm.prank(operatorAddr);
         vault.mergePositions(_buildIds(posA, posB));
 
-        (,,,, uint128 survivorLiq) = vault.positions(posA);
+        (,,,, uint128 survivorLiq,) = vault.positions(posA);
         assertEq(survivorLiq, uint128(10e18), "posA and posB share mint tick 0 and merge");
     }
 }
@@ -345,7 +345,7 @@ contract MergePositionsConservationFuzzTest is MergePositionsTestBase {
             );
         }
         for (uint256 i = 0; i < ids.length; i++) {
-            (,,,, uint128 liquidity) = vault.positions(ids[i]);
+            (,,,, uint128 liquidity,) = vault.positions(ids[i]);
             sum += liquidity;
         }
     }
@@ -358,10 +358,10 @@ contract MergePositionsConservationFuzzTest is MergePositionsTestBase {
         vm.prank(operatorAddr);
         vault.mergePositions(ids);
 
-        (,,,, uint128 survivorLiq) = vault.positions(ids[0]);
+        (,,,, uint128 survivorLiq,) = vault.positions(ids[0]);
         assertEq(uint256(survivorLiq), sumBefore, "survivor liquidity must equal the sum before the merge");
         for (uint256 i = 1; i < ids.length; i++) {
-            (,,,, uint128 consumedLiq) = vault.positions(ids[i]);
+            (,,,, uint128 consumedLiq,) = vault.positions(ids[i]);
             assertEq(consumedLiq, 0, "every consumed position must hold zero");
         }
     }
@@ -377,7 +377,7 @@ contract MergePositionsConservationFuzzTest is MergePositionsTestBase {
         if (from == to) to = (to + 1) % ids.length;
         uint256[] memory liqBefore = new uint256[](ids.length);
         for (uint256 i = 0; i < ids.length; i++) {
-            (,,,, uint128 liquidity) = vault.positions(ids[i]);
+            (,,,, uint128 liquidity,) = vault.positions(ids[i]);
             liqBefore[i] = liquidity;
         }
         uint256[] memory withRepeat = new uint256[](ids.length);
@@ -391,7 +391,7 @@ contract MergePositionsConservationFuzzTest is MergePositionsTestBase {
         vault.mergePositions(withRepeat);
 
         for (uint256 i = 0; i < ids.length; i++) {
-            (,,,, uint128 liquidity) = vault.positions(ids[i]);
+            (,,,, uint128 liquidity,) = vault.positions(ids[i]);
             assertEq(liquidity, liqBefore[i], "no position may change on a rejected merge");
         }
     }
@@ -490,7 +490,7 @@ contract MergePositionsBurnedRecordsTest is MergePositionsTestBase {
         vault.burnPosition(posA);
         vault.burnPosition(posB);
         vm.stopPrank();
-        (address ownerA,,,,) = vault.positions(posA);
+        (address ownerA,,,,,) = vault.positions(posA);
         assertEq(ownerA, address(0), "precondition: posA is deleted");
 
         vm.prank(operatorAddr);
@@ -507,7 +507,7 @@ contract MergePositionsBurnedRecordsTest is MergePositionsTestBase {
         vm.expectRevert(LPVault.PositionNotFound.selector);
         vault.mergePositions(_buildIds(posA, posB));
 
-        (,,,, uint128 liqA) = vault.positions(posA);
+        (,,,, uint128 liqA,) = vault.positions(posA);
         assertEq(liqA, 5e18, "posA keeps its liquidity");
     }
 }

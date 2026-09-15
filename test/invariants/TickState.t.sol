@@ -80,8 +80,10 @@ contract TickStateHandler is LPVaultFixture {
     ///      while every revert was documented.
     bytes4 public undocumentedRevert;
     /// @dev The allowance for one crossing. Measured at 12,339 gas on 2026-09-13 with a probe
-    ///      of 200 crossings, so this is about 2.4 times the real cost.
-    uint256 constant GAS_PER_CROSSING = 30_000;
+    ///      of 200 crossings. Raised from 30,000 on 2026-09-15 (step R18): a tick crossed for the
+    ///      first time now also writes its spread growth snapshot from zero to a nonzero value,
+    ///      which costs 20,000 gas on its own (FEAT-E943 ADR-E94R).
+    uint256 constant GAS_PER_CROSSING = 40_000;
 
     /// @dev The move whose gas above its crossing allowance is the highest so far: that gas,
     ///      its (from, to) pair, and its crossing count. A zero-crossing move has no allowance,
@@ -135,7 +137,7 @@ contract TickStateHandler is LPVaultFixture {
         int24 tickUpper;
         uint128 copiedLiquidity;
         if (positionIds.length > 0 && placementSeed % 4 == 0) {
-            (, tickLower, tickUpper,, copiedLiquidity) =
+            (, tickLower, tickUpper,, copiedLiquidity,) =
                 vault.positions(positionIds[placementSeed % positionIds.length]);
         }
         // A burned record reads zero, so its range cannot be copied; place the mint at random instead
@@ -167,7 +169,7 @@ contract TickStateHandler is LPVaultFixture {
         positionIds.push(id);
         referencedTicks.push(tickLower);
         referencedTicks.push(tickUpper);
-        (,,, int24 mintTick,) = vault.positions(id);
+        (,,, int24 mintTick,,) = vault.positions(id);
         referencedTicks.push(mintTick);
     }
 
@@ -259,13 +261,13 @@ contract TickStateHandler is LPVaultFixture {
         uint256 count = positionIds.length;
         if (count < 2) return;
         uint256 a = positionIds[seedA % count];
-        (, int24 lowerA, int24 upperA, int24 mintTickA,) = vault.positions(a);
+        (, int24 lowerA, int24 upperA, int24 mintTickA,,) = vault.positions(a);
         uint256 b = 0;
         bool foundPair = false;
         for (uint256 i = 0; i < count; i++) {
             uint256 candidate = positionIds[(seedB % count + i) % count];
             if (candidate == a) continue;
-            (, int24 lowerB, int24 upperB, int24 mintTickB,) = vault.positions(candidate);
+            (, int24 lowerB, int24 upperB, int24 mintTickB,,) = vault.positions(candidate);
             if (lowerB == lowerA && upperB == upperA && mintTickB == mintTickA) {
                 b = candidate;
                 foundPair = true;
@@ -488,12 +490,21 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         uint256 count = handler.referencedTickCount();
         for (uint256 i = 0; i < count; i++) {
             int24 tick = handler.referencedTicks(i);
-            (uint128 liquidityGross,,) = vault.ticks(tick);
+            (uint128 liquidityGross,,, uint256 spreadOutside) = vault.ticks(tick);
             assertEq(
                 _bitIsSet(tick),
                 liquidityGross > 0,
                 string.concat("the bitmap bit of tick ", vm.toString(tick), " must match liquidityGross > 0")
             );
+            // FEAT-E943: a burn that takes liquidityGross to zero deletes the whole record, the
+            // spread growth snapshot with it, so a tick that is referenced again starts clean
+            if (liquidityGross == 0) {
+                assertEq(
+                    spreadOutside,
+                    0,
+                    string.concat("the deleted tick ", vm.toString(tick), " must read a zero spread snapshot")
+                );
+            }
         }
     }
 
@@ -543,7 +554,7 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
     }
 
     function _liquidityGrossAt(int24 tick) internal view returns (uint256) {
-        (uint128 liquidityGross,,) = vault.ticks(tick);
+        (uint128 liquidityGross,,,) = vault.ticks(tick);
         return liquidityGross;
     }
 
@@ -556,7 +567,7 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
         PositionView[] memory every = new PositionView[](count);
         uint256 live = 0;
         for (uint256 i = 0; i < count; i++) {
-            (address owner, int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity) = vault.positions(i);
+            (address owner, int24 tickLower, int24 tickUpper, int24 mintTick, uint128 liquidity,) = vault.positions(i);
             if (owner == address(0)) continue;
             every[live++] = PositionView(tickLower, tickUpper, mintTick, liquidity);
         }
@@ -579,7 +590,7 @@ contract TickStateInvariantTest is StdInvariant, LPVaultFixture {
                 if (p.tickUpper == tick) noNet -= int256(uint256(p.liquidity));
             }
         }
-        (uint128 liquidityGross,, int128 noLiquidityNet) = vault.ticks(tick);
+        (uint128 liquidityGross,, int128 noLiquidityNet,) = vault.ticks(tick);
         assertEq(
             liquidityGross,
             sum,

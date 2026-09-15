@@ -130,7 +130,7 @@ contract EscrowDepositSuccessTest is EscrowDepositTestBase {
         _depositBase();
 
         assertEq(vault.nextPositionId(), 0, "no position should be created");
-        (uint128 gross,,) = vault.ticks(tickLower);
+        (uint128 gross,,,) = vault.ticks(tickLower);
         assertEq(gross, 0, "no tick should be touched");
         assertFalse(vault.usedIntents(intentId), "the intent is funded, not consumed");
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity should not change");
@@ -150,7 +150,7 @@ contract EscrowDepositSuccessTest is EscrowDepositTestBase {
         vm.prank(operatorAddr);
         uint256 posId = vault.mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, FAR_DEADLINE);
 
-        (address owner,,,,) = vault.positions(posId);
+        (address owner,,,,,) = vault.positions(posId);
         assertEq(owner, lp, "the position should belong to the Safe");
     }
 }

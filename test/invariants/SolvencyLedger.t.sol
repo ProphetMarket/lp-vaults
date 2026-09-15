@@ -92,6 +92,16 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     ///      the ratio on a real cut and not only on a ratio of 1.
     uint256 public cutPayouts;
 
+    /// @dev The spread every burn paid, and the residue the closing sweep carried beyond a
+    ///      position's own claim (FEAT-E943 NFR-E94E). Their sum is what left the vault as
+    ///      spread, which the conservation harness checks against the fills' income.
+    uint256 public spreadPaidOut;
+    uint256 public residueSwept;
+
+    /// @dev The largest surplus any credit left uncredited while liquidity was in range and both
+    ///      tokens covered their totals (FR-E946). Below one USDC unit on every call.
+    uint256 public maxUncredited;
+
     /// @dev The first undocumented revert selector of each guarded action. Zero while every
     ///      revert was documented.
     bytes4 public undocumentedMoveRevert;
@@ -106,10 +116,33 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         address indexed owner,
         uint256 usdcOwed,
         uint256 usdcPaid,
+        uint256 spreadOwed,
+        uint256 spreadPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
     );
+    event SpreadCredited(uint256 amount, uint256 spreadGrowthGlobalX128);
+    event ResidueSwept(
+        uint256 indexed positionId, address indexed owner, uint256 usdcResidue, uint256 yesResidue, uint256 noResidue
+    );
+
+    /// @dev The nine fields of one PositionBurned log, as a memory struct: the two check
+    ///      functions below would otherwise exceed the compiler's stack without via_ir.
+    struct BurnLog {
+        uint256 usdcOwed;
+        uint256 usdcPaid;
+        uint256 spreadOwed;
+        uint256 spreadPaid;
+        uint256 tokenId;
+        uint256 tokenOwed;
+        uint256 tokenPaid;
+    }
+
+    function _decodeBurn(bytes memory data) internal pure returns (BurnLog memory b) {
+        (b.usdcOwed, b.usdcPaid, b.spreadOwed, b.spreadPaid, b.tokenId, b.tokenOwed, b.tokenPaid) =
+            abi.decode(data, (uint256, uint256, uint256, uint256, uint256, uint256, uint256));
+    }
 
     constructor(
         LPVault vault_,
@@ -148,7 +181,7 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         int24 tickLower;
         int24 tickUpper;
         if (copyRange && positionIds.length > 0) {
-            (, int24 lo, int24 hi,, uint128 liq) = vault.positions(positionIds[widthSeed % positionIds.length]);
+            (, int24 lo, int24 hi,, uint128 liq,) = vault.positions(positionIds[widthSeed % positionIds.length]);
             if (liq > 0) {
                 tickLower = lo;
                 tickUpper = hi;
@@ -238,6 +271,8 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         uint256 yesTotal = vault.totalYesOwed();
         uint256 noTotal = vault.totalNoOwed();
 
+        usdcTotal = _usdcTotalAfterCredit(usdcHeld, usdcTotal, resolved);
+
         vm.recordLogs();
         vm.prank(lp);
         try vault.burnPosition(id) {
@@ -300,11 +335,11 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         uint256 count = positionIds.length;
         if (count < 2) return;
         uint256 a = positionIds[seedA % count];
-        (, int24 lowerA, int24 upperA, int24 mintA,) = vault.positions(a);
+        (, int24 lowerA, int24 upperA, int24 mintA,,) = vault.positions(a);
         for (uint256 i = 0; i < count; i++) {
             uint256 b = positionIds[(seedB % count + i) % count];
             if (b == a) continue;
-            (, int24 lowerB, int24 upperB, int24 mintB,) = vault.positions(b);
+            (, int24 lowerB, int24 upperB, int24 mintB,,) = vault.positions(b);
             if (lowerB == lowerA && upperB == upperA && mintB == mintA) {
                 uint256[] memory ids = new uint256[](2);
                 ids[0] = a;
@@ -338,8 +373,29 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         uint256 balance = mockUsdc.balanceOf(address(vault)) + incoming;
         uint256 escrowed = vault.totalEscrowed();
         held = balance > escrowed ? balance - escrowed : 0;
-        total = vault.totalUsdcOwed();
+        total = vault.totalUsdcOwed() + vault.totalSpreadOwed();
         if (resolved) total += _atPayout(vault.totalYesOwed(), vault.totalNoOwed());
+    }
+
+    /// @dev The denominator a burn actually divides by (FEAT-E943): the burn credits its own
+    ///      measured surplus before it values the claim, which turns that surplus into an
+    ///      obligation, so the total rises before the ratio is read (FR-9BRM). This mirrors
+    ///      `_creditSpread` exactly, floor included: `growth = floor(creditable x 2^128 /
+    ///      active)`, the spread total gains `growth x active`, and `totalSpreadOwed()` is that
+    ///      running X128 total truncated once.
+    function _usdcTotalAfterCredit(uint256 held, uint256 total, bool resolved) internal view returns (uint256) {
+        (uint256 yes, uint256 no) = _balances();
+        // The token-cover check: nothing is creditable while a token balance is short (FR-E948)
+        if (!resolved && (yes < vault.totalYesOwed() || no < vault.totalNoOwed())) return total;
+        if (held <= total) return total;
+
+        uint256 active = vault.activeLiquidity();
+        if (active == 0) return total;
+
+        uint256 scaledBefore = vault.totalSpreadOwedX128();
+        uint256 growth = ((held - total) << 128) / active;
+        uint256 scaledAfter = scaledBefore + growth * active;
+        return total - (scaledBefore >> 128) + (scaledAfter >> 128);
     }
 
     /// @dev What `yes` YES and `no` NO redeem for at the stored payout, each side rounded down,
@@ -356,12 +412,22 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     function _checkResolvedBurnedLog(Vm.Log[] memory logs, uint256 usdcHeld, uint256 usdcTotal) internal {
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != PositionBurned.selector) continue;
-            (uint256 usdcOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid) =
-                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
-            uint256 tokenUsdc = tokenId == vault.yesTokenId()
-                ? _atPayout(tokenOwed, 0)
-                : (tokenId == vault.noTokenId() ? _atPayout(0, tokenOwed) : 0);
-            _checkLeg(usdcOwed + tokenUsdc, usdcPaid + tokenPaid, usdcHeld, usdcTotal, "USDC (resolved)");
+            BurnLog memory b = _decodeBurn(logs[i].data);
+            spreadPaidOut += b.spreadPaid;
+            residueSwept += _sweptUsdc(logs);
+            uint256 tokenUsdc = b.tokenId == vault.yesTokenId()
+                ? _atPayout(b.tokenOwed, 0)
+                : (b.tokenId == vault.noTokenId() ? _atPayout(0, b.tokenOwed) : 0);
+            // One prorate of the whole sum after the switch (FR-CYS4), with the spread leg
+            _checkLeg(b.usdcOwed, b.usdcPaid, usdcHeld, usdcTotal, "USDC (resolved)");
+            _checkLeg(b.usdcOwed + b.spreadOwed, b.usdcPaid + b.spreadPaid, usdcHeld, usdcTotal, "spread (resolved)");
+            _checkLeg(
+                b.usdcOwed + b.spreadOwed + tokenUsdc,
+                b.usdcPaid + b.spreadPaid + b.tokenPaid,
+                usdcHeld,
+                usdcTotal,
+                "USDC sum (resolved)"
+            );
             // A redemption burns tokens, which is a TransferSingle to the zero address; a
             // transfer to any other address is the token leg the switch forbids
             for (uint256 j = 0; j < logs.length; j++) {
@@ -415,11 +481,15 @@ contract SolvencyLedgerHandler is LPVaultFixture {
     ) internal {
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != PositionBurned.selector) continue;
-            (uint256 usdcOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid) =
-                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
-            _checkLeg(usdcOwed, usdcPaid, usdcHeld, usdcTotal, "USDC");
-            if (tokenId == vault.yesTokenId()) _checkLeg(tokenOwed, tokenPaid, yesHeld, yesTotal, "YES");
-            else if (tokenId == vault.noTokenId()) _checkLeg(tokenOwed, tokenPaid, noHeld, noTotal, "NO");
+            BurnLog memory b = _decodeBurn(logs[i].data);
+            spreadPaidOut += b.spreadPaid;
+            residueSwept += _sweptUsdc(logs);
+            _checkLeg(b.usdcOwed, b.usdcPaid, usdcHeld, usdcTotal, "USDC");
+            // The two USDC legs share one floor: spreadPaid is what the sum's prorate leaves
+            // beyond the principal's (FR-9BRR)
+            _checkLeg(b.usdcOwed + b.spreadOwed, b.usdcPaid + b.spreadPaid, usdcHeld, usdcTotal, "USDC with spread");
+            if (b.tokenId == vault.yesTokenId()) _checkLeg(b.tokenOwed, b.tokenPaid, yesHeld, yesTotal, "YES");
+            else if (b.tokenId == vault.noTokenId()) _checkLeg(b.tokenOwed, b.tokenPaid, noHeld, noTotal, "NO");
             return;
         }
         _mismatch("a successful burn must emit PositionBurned");
@@ -433,6 +503,27 @@ contract SolvencyLedgerHandler is LPVaultFixture {
         if (paid != expected) _mismatch(string.concat("a burn paid the wrong ", asset, " share"));
         if (paid > held) _mismatch(string.concat("a burn paid more ", asset, " than the vault held"));
         if (owed > 0 && held < total) cutPayouts++;
+    }
+
+    /// @dev The USDC the closing sweep carried in this call's logs, beyond the position's claim.
+    function _sweptUsdc(Vm.Log[] memory logs) internal view returns (uint256 swept) {
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].emitter != address(vault) || logs[i].topics[0] != ResidueSwept.selector) continue;
+            (swept,,) = abi.decode(logs[i].data, (uint256, uint256, uint256));
+        }
+    }
+
+    /// @dev Records how much measured surplus a credit left behind, for invariant_surplusIsCredited.
+    ///      Called after every action that credits. While liquidity is in range and both tokens
+    ///      cover their totals, the vault's holdings must sit within one unit of what it owes.
+    function _recordUncredited() internal {
+        if (vault.activeLiquidity() == 0) return;
+        (uint256 held, uint256 total, bool resolved) = _usdcRatioSides();
+        if (!resolved) {
+            (uint256 yes, uint256 no) = _balances();
+            if (yes < vault.totalYesOwed() || no < vault.totalNoOwed()) return;
+        }
+        if (held > total && held - total > maxUncredited) maxUncredited = held - total;
     }
 
     function _mismatch(string memory reason) internal {
@@ -514,6 +605,10 @@ contract DriftFreeLedgerHandler is SolvencyLedgerHandler, KeeperFillFixture {
         int24 from = vault.currentTick();
         super.move(moveSeed);
         int24 to = vault.currentTick();
+        // Measured after the report's own credit and before the next fill, which re-opens the
+        // gap that the following merge or report closes (FEAT-E943 NFR-E94E)
+        _recordUncredited();
+
         if (to != from) spreadIncome += _fillMove(vault, exchangeAddr, from, to, SPREAD_BPS);
     }
 
@@ -526,7 +621,7 @@ contract DriftFreeLedgerHandler is SolvencyLedgerHandler, KeeperFillFixture {
     ///      drops the records a merge consumed, which no longer burn (PositionNotFound).
     function burnAll() external {
         for (uint256 i = positionIds.length; i > 0; i--) {
-            (,,,, uint128 liquidity) = vault.positions(positionIds[i - 1]);
+            (,,,, uint128 liquidity,) = vault.positions(positionIds[i - 1]);
             if (liquidity == 0) {
                 positionIds[i - 1] = positionIds[positionIds.length - 1];
                 positionIds.pop();
@@ -596,6 +691,32 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
         assertEq(vault.totalUsdcOwedScaled(), sums.usdc, "the USDC total must equal the sum of the scaled claims");
         assertEq(vault.totalYesOwedScaled(), sums.yes, "the YES total must equal the sum of the scaled claims");
         assertEq(vault.totalNoOwedScaled(), sums.no, "the NO total must equal the sum of the scaled claims");
+
+        // NFR-9BRX, extended by R18: the fourth total equals the sum of every live position's
+        // X128 spread claim, mod 2^256, with no tolerance (FEAT-E943 NFR-E94E)
+        assertEq(
+            vault.totalSpreadOwedX128(), _sumSpreadClaims(), "the spread total must equal the sum of the X128 claims"
+        );
+    }
+
+    /// @dev The sum over live positions of liquidity x (spreadGrowthInside - the snapshot), the
+    ///      test-side mirror of the accumulator (FEAT-E943 FR-E94B). The wrapping subtractions
+    ///      are the ones ADR-E94R names: only the difference is meaningful.
+    function _sumSpreadClaims() internal view returns (uint256 sum) {
+        uint256 global = vault.spreadGrowthGlobalX128();
+        int24 current = vault.currentTick();
+        uint256 count = vault.nextPositionId();
+        for (uint256 i = 0; i < count; i++) {
+            (address owner, int24 lo, int24 hi,, uint128 l, uint256 last) = vault.positions(i);
+            if (owner == address(0) || l == 0) continue;
+            (,,, uint256 lowerOutside) = vault.ticks(lo);
+            (,,, uint256 upperOutside) = vault.ticks(hi);
+            unchecked {
+                uint256 below = current >= lo ? lowerOutside : global - lowerOutside;
+                uint256 above = current < hi ? upperOutside : global - upperOutside;
+                sum += uint256(l) * (global - below - above - last);
+            }
+        }
     }
 
     // FR-A2ZS: noSideLiquidity equals the in-range liquidity whose mint tick is at or below the
@@ -605,7 +726,7 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
         uint256 sum;
         uint256 count = vault.nextPositionId();
         for (uint256 i = 0; i < count; i++) {
-            (address owner, int24 lo, int24 hi, int24 m, uint128 l) = vault.positions(i);
+            (address owner, int24 lo, int24 hi, int24 m, uint128 l,) = vault.positions(i);
             if (owner == address(0)) continue;
             if (lo <= c && c < hi && m <= c) sum += l;
         }
@@ -672,7 +793,7 @@ contract SolvencyLedgerInvariantTest is StdInvariant, LPVaultFixture {
     }
 
     function _addPosition(Sums memory sums, uint256 i) internal view {
-        (address owner, int24 lo, int24 hi, int24 m, uint128 l) = vault.positions(i);
+        (address owner, int24 lo, int24 hi, int24 m, uint128 l,) = vault.positions(i);
         if (owner == address(0) || l == 0) return;
         (uint256 u, uint256 y, uint256 n) = _claimScaled(lo, hi, m, l);
         sums.usdc += u;
@@ -725,6 +846,14 @@ contract SolvencyConservationInvariantTest is StdInvariant, LPVaultFixture {
         handler.burn(1);
     }
 
+    // NFR-E94E: every unit the vault measures as surplus is credited. After a report's own
+    // credit, with liquidity in range and both tokens covering their totals, what the vault holds
+    // sits within one USDC unit of what it owes: the growth is stored per unit of liquidity and
+    // floored once, so at most one unit waits for the next credit (FEAT-E943 FR-E946, FR-E949).
+    function invariant_surplusIsCredited() public view {
+        assertLe(handler.maxUncredited(), 1, "a credit must leave below one unit of surplus behind");
+    }
+
     // SC-DFDY, FR-9BRM to FR-9BRO: under drift-free fills the USDC above escrow plus the free
     // pairs covers the USDC total, and each token balance covers its total, so every ratio is
     // 1 on every call.
@@ -768,11 +897,23 @@ contract SolvencyConservationInvariantTest is StdInvariant, LPVaultFixture {
         assertEq(ctf.balanceOf(address(vault), vault.noTokenId()), 0, "no NO after every burn");
         assertEq(vault.totalUsdcOwed() + vault.totalYesOwed() + vault.totalNoOwed(), 0, "every total is zero");
 
-        uint256 above = mockUsdc.balanceOf(address(vault)) - vault.totalEscrowed();
-        uint256 income = handler.spreadIncome();
-        uint256 residueBound = handler.completedMints() + handler.completedMoves() + handler.completedBurns()
-            + handler.completedRedemptions() + handler.completedMerges();
-        assertGe(above, income, "the vault keeps at least the spread income");
-        assertLe(above, income + residueBound, "the vault keeps at most the spread income plus the rounding dust");
+        // Since R18 the spread income is paid, not held: the credit turns it into an obligation
+        // the ledger carries, every burn pays its position's share, and the last live position's
+        // burn sweeps what no credit could attribute (FEAT-E943 FR-E94C, SC-DFDY). So the vault
+        // ends at exactly its escrow total, with nothing above it for anyone to claim later.
+        assertEq(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "the vault keeps nothing above escrow");
+        assertEq(vault.totalSpreadOwedX128(), 0, "the spread total is debited to zero");
+
+        // Every unit the fills left reaches a Safe, as a spread leg or as the closing sweep's
+        // residue, and nothing beyond the income is ever created (NFR-E94E)
+        // The two together are the income, within the truncation dust every floor drops: a
+        // claim's principal and its spread each truncate once per burn, and a position merge
+        // drops below one unit when it rolls two snapshots into one (FEAT-9BQZ FR-9BRH)
+        assertApproxEqAbs(
+            handler.spreadPaidOut() + handler.residueSwept(),
+            handler.spreadIncome(),
+            handler.completedBurns() + handler.completedMerges() + handler.completedMints(),
+            "every unit of spread income reaches a Safe, within the floors' dust"
+        );
     }
 }

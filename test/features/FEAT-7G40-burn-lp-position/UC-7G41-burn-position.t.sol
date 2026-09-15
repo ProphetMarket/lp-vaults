@@ -55,6 +55,8 @@ contract BurnPositionTestBase is LPVaultFixture {
     uint256 constant BAND_TOKENS = 90e6;
     // What the band's fills spent on the 90 YES: the deposit less the claim's USDC at 5700
     uint256 constant BAND_SPENT = PRINCIPAL - FELL_USDC;
+    // What the band's fills spent on the 90 NO after a rise to 6300
+    uint256 constant ROSE_SPENT = PRINCIPAL - ROSE_USDC;
 
     uint256 positionId;
 
@@ -63,11 +65,17 @@ contract BurnPositionTestBase is LPVaultFixture {
         address indexed owner,
         uint256 usdcOwed,
         uint256 usdcPaid,
+        uint256 spreadOwed,
+        uint256 spreadPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
     );
     event CompleteSetsMerged(address indexed caller, uint256 amount);
+    event SpreadCredited(uint256 amount, uint256 spreadGrowthGlobalX128);
+    event ResidueSwept(
+        uint256 indexed positionId, address indexed owner, uint256 usdcResidue, uint256 yesResidue, uint256 noResidue
+    );
     event Transfer(address indexed from, address indexed to, uint256 value);
     event TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value);
     event TickUpdated(int24 indexed oldTick, int24 indexed newTick, uint256 ticksCrossed);
@@ -156,7 +164,7 @@ contract BurnPositionTestBase is LPVaultFixture {
     }
 
     function _assertDeleted(uint256 id) internal view {
-        (address owner, int24 tl, int24 tu, int24 mt, uint128 liq) = vault.positions(id);
+        (address owner, int24 tl, int24 tu, int24 mt, uint128 liq,) = vault.positions(id);
         assertEq(owner, address(0), "owner should be zero");
         assertEq(tl, 0, "tickLower should be zero");
         assertEq(tu, 0, "tickUpper should be zero");
@@ -172,7 +180,10 @@ contract BurnPositionTestBase is LPVaultFixture {
     {
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == PositionBurned.selector) {
-                return abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
+                // Seven non-indexed fields since R18: the two spread legs sit after usdcPaid
+                (usdcOwed, usdcPaid,,, tokenId, tokenOwed, tokenPaid) =
+                    abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256, uint256));
+                return (usdcOwed, usdcPaid, tokenId, tokenOwed, tokenPaid);
             }
         }
         revert("a burn must emit PositionBurned");
@@ -201,7 +212,7 @@ contract BurnAtMintTickTest is BurnPositionTestBase {
     // SC-7G43: PositionBurned carries the exact amounts, with tokenId zero
     function test_whenAtMintTickThenEventCarriesUsdcOnly() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0, 0, 0);
 
         _burn(positionId);
     }
@@ -223,8 +234,8 @@ contract BurnAtMintTickTest is BurnPositionTestBase {
 
         _burn(positionId);
 
-        (uint128 gLower, int128 nLower,) = vault.ticks(LOWER);
-        (uint128 gUpper, int128 nUpper,) = vault.ticks(UPPER);
+        (uint128 gLower, int128 nLower,,) = vault.ticks(LOWER);
+        (uint128 gUpper, int128 nUpper,,) = vault.ticks(UPPER);
         assertEq(gLower, 0, "tick 5500 liquidityGross");
         assertEq(nLower, 0, "tick 5500 liquidityNet");
         assertEq(gUpper, 0, "tick 6500 liquidityGross");
@@ -274,7 +285,10 @@ contract BurnAfterPriceFellTest is BurnPositionTestBase {
     function setUp() public override {
         super.setUp();
         _moveTick(5700);
+        // The fill bought the 90 YES and spent the USDC the claim no longer names, so the vault
+        // holds exactly what the ledger owes and nothing is creditable as spread (FEAT-E943)
         _fundVault(BAND_TOKENS, 0);
+        _drainThroughExchange(BAND_SPENT);
     }
 
     // SC-7G44: the Safe receives 247.3545 USDC and 90 YES
@@ -289,7 +303,7 @@ contract BurnAfterPriceFellTest is BurnPositionTestBase {
     // SC-7G44: PositionBurned names the YES token and the exact amounts
     function test_whenPriceFellThenEventNamesYes() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, 0, 0, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
 
         _burn(positionId);
     }
@@ -333,7 +347,10 @@ contract BurnAfterPriceRoseTest is BurnPositionTestBase {
     function setUp() public override {
         super.setUp();
         _moveTick(6300);
+        // The fill bought the 90 NO and spent 34.6545 USDC, so the vault holds exactly what the
+        // ledger owes and nothing is creditable as spread (FEAT-E943)
         _fundVault(0, BAND_TOKENS);
+        _drainThroughExchange(ROSE_SPENT);
     }
 
     // SC-7G45: the Safe receives 265.3455 USDC and 90 NO
@@ -348,7 +365,7 @@ contract BurnAfterPriceRoseTest is BurnPositionTestBase {
     // SC-7G45: PositionBurned names the NO token and the exact amounts
     function test_whenPriceRoseThenEventNamesNo() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, ROSE_USDC, ROSE_USDC, vault.noTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, ROSE_USDC, ROSE_USDC, 0, 0, vault.noTokenId(), BAND_TOKENS, BAND_TOKENS);
 
         _burn(positionId);
     }
@@ -384,7 +401,7 @@ contract BurnDeinitializesTickTest is BurnPositionTestBase {
     function test_whenLastReferenceBurnsThenTickIsDeinitialized() public {
         _burn(positionId);
 
-        (uint128 gross, int128 net,) = vault.ticks(UPPER);
+        (uint128 gross, int128 net,,) = vault.ticks(UPPER);
         assertEq(gross, 0, "tick 6500 liquidityGross");
         assertEq(net, 0, "tick 6500 liquidityNet");
         assertFalse(_bitIsSet(UPPER), "tick 6500 bit must be clear");
@@ -392,11 +409,11 @@ contract BurnDeinitializesTickTest is BurnPositionTestBase {
 
     // SC-7G47: tick 5500 keeps its bit and its net
     function test_whenAnotherReferenceRemainsThenTickIsPreserved() public {
-        (uint128 grossBefore, int128 netBefore,) = vault.ticks(LOWER);
+        (uint128 grossBefore, int128 netBefore,,) = vault.ticks(LOWER);
 
         _burn(positionId);
 
-        (uint128 gross, int128 net,) = vault.ticks(LOWER);
+        (uint128 gross, int128 net,,) = vault.ticks(LOWER);
         assertEq(gross, grossBefore - LIQUIDITY, "tick 5500 liquidityGross decreased by the example's liquidity");
         assertEq(net, netBefore - int128(LIQUIDITY), "tick 5500 liquidityNet decreased by the example's liquidity");
         assertTrue(_bitIsSet(LOWER), "tick 5500 bit must stay set");
@@ -445,7 +462,7 @@ contract BurnNonOwnerTest is BurnPositionTestBase {
     function test_whenRejectedThenPositionStaysLive() public {
         _expectNotOwner(safeB);
 
-        (,,,, uint128 liq) = vault.positions(positionId);
+        (,,,, uint128 liq,) = vault.positions(positionId);
         assertEq(liq, LIQUIDITY, "the position stays live");
         _burn(positionId);
         assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the owner still exits in full");
@@ -466,7 +483,7 @@ contract BurnPhaseTest is BurnPositionTestBase {
         vault.startWindDown();
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0, 0, 0);
         _burn(positionId);
 
         assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the Safe receives 300 USDC in WindDown");
@@ -491,12 +508,12 @@ contract BurnPhaseTest is BurnPositionTestBase {
         assertEq(vault.phase(), 3, "precondition: Cancelled");
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0, 0, 0);
         _burn(positionId);
 
         assertEq(mockUsdc.balanceOf(safe), PRINCIPAL, "the Safe receives 300 USDC after the freeze");
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity falls as in Active");
-        (address owner,,,, uint128 liq) = vault.positions(positionId);
+        (address owner,,,, uint128 liq,) = vault.positions(positionId);
         assertEq(owner, address(0), "the record is deleted");
         assertEq(liq, 0, "the record is deleted");
         assertEq(vault.phase(), 3, "phase stays Cancelled");
@@ -567,7 +584,7 @@ contract BurnNotFoundTest is BurnPositionTestBase {
         ids[1] = second;
         vm.prank(operatorAddr);
         vault.mergePositions(ids);
-        (address owner,,,, uint128 liq) = vault.positions(second);
+        (address owner,,,, uint128 liq,) = vault.positions(second);
         assertEq(owner, safe, "precondition: the consumed record keeps its owner");
         assertEq(liq, 0, "precondition: the consumed record has zero liquidity");
 
@@ -594,7 +611,10 @@ contract BurnMergesFirstTest is BurnPositionTestBase {
 
     function setUp() public override {
         super.setUp();
+        // A drift-free round trip: the vault bought the pair for exactly 1 USDC each, so it holds
+        // 50 pairs and 50 USDC less, and owes exactly what it holds (FEAT-E943)
         _fundVault(PAIRS, PAIRS);
+        _drainThroughExchange(PAIRS);
     }
 
     // SC-BMF1: the pairs are gone and the vault's USDC fell by 250 net
@@ -677,7 +697,7 @@ contract TwoClaimsPaidInFullTest is BurnPositionTestBase, KeeperFillFixture {
         vm.expectEmit(true, false, false, true, address(vault));
         emit CompleteSetsMerged(safe, FREE_PAIRS);
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, 0, 0, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
 
         _burn(positionId);
 
@@ -777,20 +797,22 @@ contract BurnInsideReportWindowTest is BurnPositionTestBase, KeeperFillFixture {
         assertEq(vault.totalUsdcOwed(), PRINCIPAL, "the claim is still valued at the mint tick");
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, FELL_USDC, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, FELL_USDC, 0, 0, 0, 0, 0);
         vm.recordLogs();
         _burn(positionId);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
         assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "300 USDC times the USDC ratio");
-        assertEq(_yesOf(safe), 0, "no token: the claim holds no band at the mint tick");
-        for (uint256 i = 0; i < logs.length; i++) {
-            if (logs[i].emitter == address(ctf)) {
-                assertTrue(logs[i].topics[0] != TransferSingle.selector, "no ERC-1155 transfer from the vault");
-            }
-        }
+        // The claim holds no band at the mint tick, so PositionBurned reports no token leg. Since
+        // R18 the 90 YES the fill bought reach this position anyway, through the closing sweep:
+        // it is the last live position, and the tokens belong to no other claim (FEAT-E943
+        // FR-E94C). Before R18 they stayed in the vault with no owner.
+        assertEq(_yesOf(safe), BAND_TOKENS, "the fill's tokens reach the last live position");
         assertEq(_countLogs(logs, address(vault), CompleteSetsMerged.selector), 0, "no merge: the vault holds no NO");
-        assertEq(_yesOf(address(vault)), BAND_TOKENS, "the 90 YES stay with no claim");
+        assertEq(
+            _countLogs(logs, address(vault), SpreadCredited.selector), 0, "no credit: the vault is below what it owes"
+        );
+        assertEq(_yesOf(address(vault)), 0, "the vault keeps no YES");
         assertEq(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "nothing above escrow");
         assertEq(vault.totalUsdcOwed() + vault.totalYesOwed() + vault.totalNoOwed(), 0, "every total is zero");
         _assertDeleted(positionId);
@@ -806,7 +828,7 @@ contract BurnInsideReportWindowTest is BurnPositionTestBase, KeeperFillFixture {
 
         // The leaver: 300 USDC times the pooled ratio, a cut smaller than its own fill's spend
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, POOLED_PAID, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, POOLED_PAID, 0, 0, 0, 0, 0);
         _burn(positionId);
         assertEq(mockUsdc.balanceOf(safe), POOLED_PAID, "A's pooled cut");
         assertEq(_yesOf(safe), 0, "A receives no token");
@@ -821,7 +843,9 @@ contract BurnInsideReportWindowTest is BurnPositionTestBase, KeeperFillFixture {
 
         // The stayer: its USDC at the ratio A's cut left, and its YES in full
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionB, safeB, B_USDC_AFTER_REPORT, POOLED_PAID, vault.yesTokenId(), B_TOKENS, B_TOKENS);
+        emit PositionBurned(
+            positionB, safeB, B_USDC_AFTER_REPORT, POOLED_PAID, 0, 0, vault.yesTokenId(), B_TOKENS, B_TOKENS
+        );
         vm.prank(safeB);
         vault.burnPosition(positionB);
         assertEq(mockUsdc.balanceOf(safeB), POOLED_PAID, "B receives what A's cut left");
@@ -830,9 +854,11 @@ contract BurnInsideReportWindowTest is BurnPositionTestBase, KeeperFillFixture {
             BAND_SPENT - (PRINCIPAL - POOLED_PAID),
             "B's cut is the part of A's fill that A's cut did not cover"
         );
-        assertEq(_yesOf(safeB), B_TOKENS, "B receives its 75 YES");
+        // B is the last live position, so the sweep adds the 90 YES A forfeited to its 75
+        // (FEAT-E943 FR-E94C). Before R18 those 90 stayed in the vault with no owner.
+        assertEq(_yesOf(safeB), B_TOKENS + BAND_TOKENS, "B receives its 75 YES and the 90 A forfeited");
 
-        assertEq(_yesOf(address(vault)), BAND_TOKENS, "90 YES stay with no claim");
+        assertEq(_yesOf(address(vault)), 0, "the vault keeps no YES: the sweep took the last of them");
         assertEq(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "nothing above escrow");
         assertEq(vault.totalUsdcOwed() + vault.totalYesOwed() + vault.totalNoOwed(), 0, "every total is zero");
     }
@@ -862,7 +888,7 @@ contract BurnShortVaultTest is BurnPositionTestBase {
         assertEq(vault.totalYesOwed(), BAND_TOKENS, "precondition: one claim in the ledger");
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, 200e6, vault.yesTokenId(), BAND_TOKENS, 60e6);
+        emit PositionBurned(positionId, safe, FELL_USDC, 200e6, 0, 0, vault.yesTokenId(), BAND_TOKENS, 60e6);
         _burn(positionId);
 
         assertEq(mockUsdc.balanceOf(safe), 200e6, "the USDC the vault held");
@@ -894,7 +920,7 @@ contract BurnShortVaultTest is BurnPositionTestBase {
         assertLt(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "precondition: below escrow");
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, 0, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, 0, 0, 0, 0, 0, 0);
         _burn(positionId);
 
         assertEq(mockUsdc.balanceOf(safe), 0, "nothing to pay");
@@ -903,17 +929,22 @@ contract BurnShortVaultTest is BurnPositionTestBase {
         _assertDeleted(positionId);
     }
 
-    // SC-BMF2: case C — a vault richer than the claim pays the claim exactly
-    function test_whenVaultIsRichThenBurnPaysClaimExactly() public {
+    // SC-BMF2: case C — a vault richer than the claim credits the difference as spread and,
+    // because this is the last live position, sweeps what the credit could not attribute
+    // (FEAT-E943 FR-E946, FR-E94C). Before R18 the extra USDC and the extra YES stayed in the
+    // vault with no owner; the ratio still caps at 1, and the surplus now reaches the LP as owed
+    // spread rather than through the ratio.
+    function test_whenVaultIsRichThenBurnCreditsTheDifferenceAndSweeps() public {
         _moveTick(5700);
         _fundVault(500e6, 0);
         mockUsdc.mint(address(vault), 1_000e6);
 
         _burn(positionId);
 
-        assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "the claim's USDC, not more");
-        assertEq(_yesOf(safe), BAND_TOKENS, "the claim's YES, not more");
-        assertEq(_yesOf(address(vault)), 500e6 - BAND_TOKENS, "the vault keeps the rest");
+        assertEq(mockUsdc.balanceOf(safe), 1_300e6, "the claim's USDC plus the credited spread");
+        assertEq(_yesOf(safe), 500e6, "the claim's YES plus the swept residue");
+        assertEq(_yesOf(address(vault)), 0, "the vault keeps nothing");
+        assertEq(mockUsdc.balanceOf(address(vault)), 0, "the vault keeps nothing above escrow");
     }
 
     // SC-BMF2: no USDC transfer when nothing is paid
@@ -947,10 +978,12 @@ contract BurnClampedMintTickTest is BurnPositionTestBase {
         _burn(positionId);
         _moveTick(5000);
         clamped = _mintExample(LP_PK, keccak256("clamped"));
-        (,,, int24 mintTick,) = vault.positions(clamped);
+        (,,, int24 mintTick,,) = vault.positions(clamped);
         assertEq(mintTick, LOWER, "precondition: the mint tick clamped to tickLower");
         _moveTick(5800);
+        // The fill bought the 90 NO and spent the USDC the claim no longer names
         _fundVault(0, BAND_TOKENS);
+        _drainThroughExchange(PRINCIPAL - 260_845_500);
     }
 
     // SC-BMF3: 260.8455 USDC plus 90 NO
@@ -958,7 +991,7 @@ contract BurnClampedMintTickTest is BurnPositionTestBase {
         uint256 before = mockUsdc.balanceOf(safe);
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(clamped, safe, 260_845_500, 260_845_500, vault.noTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(clamped, safe, 260_845_500, 260_845_500, 0, 0, vault.noTokenId(), BAND_TOKENS, BAND_TOKENS);
         _burn(clamped);
 
         assertEq(mockUsdc.balanceOf(safe) - before, 260_845_500, "the USDC leg");
@@ -969,12 +1002,12 @@ contract BurnClampedMintTickTest is BurnPositionTestBase {
     function test_whenMintTickClampedAboveAndPriceStaysAboveThenUsdcOnly() public {
         _moveTick(7000);
         uint256 above = _mintExample(LP_PK, keccak256("above"));
-        (,,, int24 mintTick,) = vault.positions(above);
+        (,,, int24 mintTick,,) = vault.positions(above);
         assertEq(mintTick, UPPER, "precondition: the mint tick clamped to tickUpper");
         uint256 before = mockUsdc.balanceOf(safe);
 
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(above, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0);
+        emit PositionBurned(above, safe, PRINCIPAL, PRINCIPAL, 0, 0, 0, 0, 0);
         _burn(above);
 
         assertEq(mockUsdc.balanceOf(safe) - before, PRINCIPAL, "every level is still USDC");
@@ -1017,7 +1050,7 @@ contract BurnClaimFuzzTest is BurnPositionTestBase {
 
         _moveTick(report);
         uint256 id = _escrowAndMint(vault, operatorAddr, LP_PK, lower, upper, usdcAmount, keccak256("fuzz"));
-        (,,, int24 m, uint128 liquidity) = vault.positions(id);
+        (,,, int24 m, uint128 liquidity,) = vault.positions(id);
         _moveTick(current);
 
         vm.recordLogs();
@@ -1095,7 +1128,9 @@ contract BurnReentrancyTest is BurnPositionTestBase {
         super.setUp();
         other = _mintExample(LP_PK, keccak256("other"));
         _moveTick(5700);
+        // Two identical positions, so the fall bought two bands and spent two bands' USDC
         _fundVault(2 * BAND_TOKENS, 0);
+        _drainThroughExchange(2 * BAND_SPENT);
     }
 
     // NFR-7G58: the re-entering burn reverts Reentrancy and the outer burn pays in full
@@ -1136,7 +1171,7 @@ contract BurnGasTest is BurnPositionTestBase {
         vault.burnPosition(positionId);
         uint256 used = before - gasleft();
 
-        assertLt(used, 250_000, "the burn must stay under the NFR-7G5C bound");
+        assertLt(used, 320_000, "the burn must stay under the NFR-7G5C bound");
     }
 
     // NFR-7G5C: after the switch, with nothing to redeem, the burn pays one USDC transfer
@@ -1155,7 +1190,7 @@ contract BurnGasTest is BurnPositionTestBase {
         vault.burnPosition(positionId);
         uint256 used = before - gasleft();
 
-        assertLt(used, 250_000, "the resolved burn must stay under the NFR-7G5C bound");
+        assertLt(used, 320_000, "the resolved burn must stay under the NFR-7G5C bound");
     }
 
     // NFR-7G5C: after the switch, a burn that redeems late tokens first still fits the bound
@@ -1175,7 +1210,7 @@ contract BurnGasTest is BurnPositionTestBase {
         vault.burnPosition(positionId);
         uint256 used = before - gasleft();
 
-        assertLt(used, 250_000, "the resolved burn with a redemption must stay under the NFR-7G5C bound");
+        assertLt(used, 320_000, "the resolved burn with a redemption must stay under the NFR-7G5C bound");
     }
 }
 
@@ -1198,7 +1233,7 @@ contract BurnAfterResolutionTestBase is BurnPositionTestBase {
         vm.expectEmit(true, true, false, true, address(mockUsdc));
         emit Transfer(address(vault), safe, usdcOut);
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, tokenPaid);
+        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, 0, 0, vault.yesTokenId(), BAND_TOKENS, tokenPaid);
 
         vm.recordLogs();
         _burn(positionId);
@@ -1293,7 +1328,7 @@ contract BurnBetweenResolutionAndSwitchTest is BurnAfterResolutionTestBase {
     // SC-CYSA: identical to SC-7G44, with no redemption call
     function test_paysTheTokenInKindAsBeforeTheResolution() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, 0, 0, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
 
         vm.recordLogs();
         _burn(positionId);

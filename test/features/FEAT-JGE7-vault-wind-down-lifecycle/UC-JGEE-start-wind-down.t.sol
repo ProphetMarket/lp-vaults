@@ -41,6 +41,8 @@ contract StartWindDownTestBase is LPVaultFixture {
         address indexed owner,
         uint256 usdcOwed,
         uint256 usdcPaid,
+        uint256 spreadOwed,
+        uint256 spreadPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
@@ -104,7 +106,7 @@ contract SuccessfulWindDownTest is StartWindDownTestBase {
     // SC-JGEF: no other state is modified (positions, ticks unchanged)
     function test_noSideEffectsOnPositionState() public {
         // Snapshot position state before wind-down
-        (address ownerBefore, int24 tlBefore, int24 tuBefore,, uint128 liqBefore) = vault.positions(positionId);
+        (address ownerBefore, int24 tlBefore, int24 tuBefore,, uint128 liqBefore,) = vault.positions(positionId);
         uint128 activeLiqBefore = vault.activeLiquidity();
         int24 currentTickBefore = vault.currentTick();
 
@@ -112,7 +114,7 @@ contract SuccessfulWindDownTest is StartWindDownTestBase {
         vault.startWindDown();
 
         // Verify nothing changed except phase
-        (address ownerAfter, int24 tlAfter, int24 tuAfter,, uint128 liqAfter) = vault.positions(positionId);
+        (address ownerAfter, int24 tlAfter, int24 tuAfter,, uint128 liqAfter,) = vault.positions(positionId);
         assertEq(ownerAfter, ownerBefore, "owner unchanged");
         assertEq(tlAfter, tlBefore, "tickLower unchanged");
         assertEq(tuAfter, tuBefore, "tickUpper unchanged");
@@ -264,7 +266,7 @@ contract ExitPathsSucceedInWindDownTest is StartWindDownTestBase {
 
     // SC-JGEK, FR-JGEC: the burn pays the claim's USDC plus its one outcome token and deletes the position
     function test_whenWoundDownThenBurnPaysTheClaimAndDeletesThePosition() public {
-        (,,,, uint128 liquidity) = vault.positions(positionId);
+        (,,,, uint128 liquidity,) = vault.positions(positionId);
         assertEq(vault.activeLiquidity(), liquidity, "precondition: the position is in range at its mint tick");
         uint256 before_ = mockUsdc.balanceOf(lp);
         uint256 yesBefore = ctf.balanceOf(lp, vault.yesTokenId());
@@ -273,18 +275,18 @@ contract ExitPathsSucceedInWindDownTest is StartWindDownTestBase {
         // 1000 USDC over [0, 100) at its mint tick: every level is still USDC, so the token leg
         // is empty. These are the amounts the same burn pays in Active (FEAT-7G40 SC-7G49).
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, lp, 1000, 1000, 0, 0, 0);
+        emit PositionBurned(positionId, lp, 1000, 1000, 0, 0, 0, 0, 0);
         vm.prank(lp);
         vault.burnPosition(positionId);
 
         assertEq(mockUsdc.balanceOf(lp) - before_, 1000, "the Safe receives the whole principal");
         assertEq(ctf.balanceOf(lp, vault.yesTokenId()), yesBefore, "no YES token is owed at the mint tick");
         assertEq(ctf.balanceOf(lp, vault.noTokenId()), noBefore, "no NO token is owed at the mint tick");
-        (address owner,,,, uint128 liqAfter) = vault.positions(positionId);
+        (address owner,,,, uint128 liqAfter,) = vault.positions(positionId);
         assertEq(owner, address(0), "the position record is deleted");
         assertEq(liqAfter, 0, "the position record is deleted");
-        (uint128 gLower,,) = vault.ticks(int24(0));
-        (uint128 gUpper,,) = vault.ticks(int24(100));
+        (uint128 gLower,,,) = vault.ticks(int24(0));
+        (uint128 gUpper,,,) = vault.ticks(int24(100));
         assertEq(gLower, 0, "tick 0 lost the liquidity");
         assertEq(gUpper, 0, "tick 100 lost the liquidity");
         assertEq(vault.activeLiquidity(), 0, "activeLiquidity fell by the position's liquidity");

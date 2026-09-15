@@ -90,7 +90,7 @@ abstract contract KeeperFillFixture is LPVaultFixture {
         bool falling,
         uint32 spreadBps
     ) internal view {
-        (address owner, int24 tickLower, int24 tickUpper,, uint128 liquidity) = vault.positions(positionId);
+        (address owner, int24 tickLower, int24 tickUpper,, uint128 liquidity,) = vault.positions(positionId);
         if (owner == address(0) || liquidity == 0) return;
         if (tickLower > lo) lo = tickLower;
         if (tickUpper < hi) hi = tickUpper;

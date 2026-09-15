@@ -111,7 +111,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function test_positionRecordIsCorrect() public {
         uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (address owner, int24 tl, int24 tu, int24 mintTick, uint128 liq) = vault.positions(posId);
+        (address owner, int24 tl, int24 tu, int24 mintTick, uint128 liq,) = vault.positions(posId);
         assertEq(owner, lp, "position owner should be the LP's Safe");
         assertEq(tl, tickLower, "tickLower should match");
         assertEq(tu, tickUpper, "tickUpper should match");
@@ -124,7 +124,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function test_lowerTickInitializedCorrectly() public {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (uint128 liqGross, int128 liqNet,) = vault.ticks(tickLower);
+        (uint128 liqGross, int128 liqNet,,) = vault.ticks(tickLower);
         assertEq(liqGross, uint128(10e18), "tick 20 liquidityGross should equal position liquidity");
         assertEq(liqNet, int128(int256(uint256(10e18))), "tick 20 liquidityNet should be positive");
     }
@@ -133,7 +133,7 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function test_upperTickInitializedCorrectly() public {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (uint128 liqGross, int128 liqNet,) = vault.ticks(tickUpper);
+        (uint128 liqGross, int128 liqNet,,) = vault.ticks(tickUpper);
         assertEq(liqGross, uint128(10e18), "tick 80 liquidityGross should equal position liquidity");
         assertEq(liqNet, -int128(int256(uint256(10e18))), "tick 80 liquidityNet should be negative");
     }
@@ -152,11 +152,11 @@ contract MintPositionInRangeSuccessTest is MintPositionTestBase {
     function test_interiorMintTickIsInitializedAndTheNoSubRangeIsBooked() public {
         _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (uint128 liqGross, int128 liqNet, int128 noNet) = vault.ticks(int24(50));
+        (uint128 liqGross, int128 liqNet, int128 noNet,) = vault.ticks(int24(50));
         assertEq(liqGross, uint128(10e18), "tick 50 liquidityGross counts the position");
         assertEq(liqNet, 0, "tick 50 liquidityNet is zero: no position bounds it");
         assertEq(noNet, int128(int256(uint256(10e18))), "tick 50 noLiquidityNet starts the NO sub-range");
-        (,, int128 noNetUpper) = vault.ticks(tickUpper);
+        (,, int128 noNetUpper,) = vault.ticks(tickUpper);
         assertEq(noNetUpper, -int128(int256(uint256(10e18))), "tick 80 noLiquidityNet ends the NO sub-range");
         assertEq((vault.tickBitmap(int16(0)) >> 50) & 1, 1, "tick 50's bitmap bit is set");
         assertEq(vault.noSideLiquidity(), uint128(10e18), "the mint enters on the NO side");
@@ -246,7 +246,7 @@ contract MintPositionOutOfRangeTest is MintPositionTestBase {
         uint256 vaultBefore = mockUsdc.balanceOf(address(vault));
         uint256 posId = _mint(tickLower, tickUpper, usdcAmount, intentId);
 
-        (address owner,,,, uint128 liq) = vault.positions(posId);
+        (address owner,,,, uint128 liq,) = vault.positions(posId);
         assertEq(owner, lp, "position owner should be the LP's Safe");
         // liquidity = 300 * 1e18 / 30 = 10e18
         assertEq(liq, uint128(10e18), "liquidity should be correct");
@@ -277,12 +277,12 @@ contract MintPositionExistingTickTest is MintPositionTestBase {
 
     // SC-T7AJ: second position accumulates liquidityGross on shared tick
     function test_liquidityGrossAccumulatesOnExistingTick() public {
-        (uint128 liqGrossBefore,,) = vault.ticks(int24(20));
+        (uint128 liqGrossBefore,,,) = vault.ticks(int24(20));
 
         _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, intentId2);
 
         // Second position liquidity: 600 * 1e18 / 60 = 10e18
-        (uint128 liqGrossAfter,,) = vault.ticks(int24(20));
+        (uint128 liqGrossAfter,,,) = vault.ticks(int24(20));
         assertEq(liqGrossAfter, liqGrossBefore + uint128(10e18), "liquidityGross should accumulate");
     }
 
@@ -315,7 +315,7 @@ contract MintTickClampTest is MintPositionTestBase {
     }
 
     function _mintTickOf(uint256 posId) internal view returns (int24 mintTick) {
-        (,,, mintTick,) = vault.positions(posId);
+        (,,, mintTick,,) = vault.positions(posId);
     }
 
     // SC-AFPN: below the range, the mint tick clamps up to tickLower
@@ -337,7 +337,7 @@ contract MintTickClampTest is MintPositionTestBase {
         uint256 posId = _escrowAndMint(vault, operatorAddr, LP_PK, int24(20), int24(80), 600, keccak256("inside"));
 
         assertEq(_mintTickOf(posId), int24(50), "mintTick should be currentTick");
-        (,,,, uint128 liquidity) = vault.positions(posId);
+        (,,,, uint128 liquidity,) = vault.positions(posId);
         assertEq(vault.activeLiquidity(), liquidity, "only the in-range position counts toward activeLiquidity");
     }
 
@@ -530,7 +530,7 @@ contract MintPositionFirstMintFloorTest is MintPositionTestBase {
         _escrowIntent(int24(0), int24(10), 1, intentId);
         uint256 posId = _mint(int24(0), int24(10), 1, intentId);
 
-        (,,,, uint128 liquidity) = vault.positions(posId);
+        (,,,, uint128 liquidity,) = vault.positions(posId);
         assertEq(liquidity, uint128(1e17), "the small position must exist with its computed liquidity");
         assertEq(vault.activeLiquidity(), 0, "the small position is out of range, so activeLiquidity stays 0");
     }
@@ -551,7 +551,7 @@ contract MintPositionFirstMintFloorTest is MintPositionTestBase {
 
         // The failed mint left the escrow in place, so the same intent mints now
         uint256 posId = _mint(int24(0), int24(10), usdcAmount, intentId);
-        (,,,, uint128 liquidity) = vault.positions(posId);
+        (,,,, uint128 liquidity,) = vault.positions(posId);
         assertEq(
             liquidity, uint128(usdcAmount * LIQUIDITY_PRECISION / 10), "the small mint must succeed after the first"
         );
@@ -674,7 +674,7 @@ contract MintPositionEscrowChecksTest is MintPositionTestBase {
         vm.prank(operatorAddr);
         uint256 posId = vault.mintPositionFor(lp, int24(20), int24(80), 600, lateIntent, deadline);
 
-        (address owner,,,,) = vault.positions(posId);
+        (address owner,,,,,) = vault.positions(posId);
         assertEq(owner, lp, "the mint should succeed after the deposit's deadline passed");
     }
 }

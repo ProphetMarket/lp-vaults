@@ -41,6 +41,7 @@ contract MergeCompleteSetsTestBase is LPVaultFixture {
     uint256 constant VAULT_USDC = 500e6;
 
     event CompleteSetsMerged(address indexed caller, uint256 amount);
+    event SpreadCredited(uint256 amount, uint256 spreadGrowthGlobalX128);
     event PositionsMerge(
         address indexed stakeholder,
         address collateralToken,
@@ -480,18 +481,30 @@ contract DonationMergesNothingTest is MergeCompleteSetsTestBase, KeeperFillFixtu
         ctf.safeTransferFrom(stranger, address(vault), noId, 50e6, "");
     }
 
-    // SC-DFDW: no free pair, so no merge call and no event
+    // SC-DFDW: no free pair, so no merge call and no CompleteSetsMerged event. Since R18 the
+    // call still credits the USDC the vault holds above what the ledger owes, which here is the
+    // base's donated 500 USDC plus the fall's margin, because the position is in range and both
+    // token balances cover their owed totals (FEAT-E943 FR-E946). The donated NO is not credited:
+    // a token is not USDC and no pair is free.
     function test_whenNoPairIsFreeThenADonatedTokenMergesNothing() public {
         vm.recordLogs();
         vm.prank(stranger);
         vault.mergeCompleteSets();
 
-        assertEq(vm.getRecordedLogs().length, 0, "no mergePositions call and no CompleteSetsMerged event");
+        Vm.Log[] memory logs = vm.getRecordedLogs();
+        uint256 credits;
+        for (uint256 i = 0; i < logs.length; i++) {
+            assertTrue(logs[i].topics[0] != CompleteSetsMerged.selector, "no CompleteSetsMerged event");
+            if (logs[i].topics[0] == SpreadCredited.selector) credits++;
+        }
+        assertEq(logs.length, credits, "no mergePositions call: the only log is the spread credit");
+        assertEq(credits, 1, "the surplus above the owed totals is credited");
         assertEq(_vaultYes(), 90e6, "the owed YES stay");
         assertEq(_vaultNo(), 50e6, "the donated NO stay");
     }
 
-    // SC-DFDW: the position's burn still pays its 90 YES in full
+    // SC-DFDW: the position's burn still pays its 90 YES in full, and as the last live position
+    // it also takes the donated NO through the closing sweep (FEAT-E943 FR-E94C)
     function test_whenNoPairIsFreeThenTheBurnPaysTheBandInFull() public {
         vm.prank(stranger);
         vault.mergeCompleteSets();
@@ -501,6 +514,7 @@ contract DonationMergesNothingTest is MergeCompleteSetsTestBase, KeeperFillFixtu
 
         assertEq(ctf.balanceOf(safeA, vault.yesTokenId()), 90e6, "the Safe receives the whole band");
         assertEq(_vaultYes(), 0, "no YES left in the vault");
-        assertEq(_vaultNo(), 50e6, "the donation stays in the vault");
+        assertEq(_vaultNo(), 0, "the sweep takes the donation to the last live position");
+        assertEq(ctf.balanceOf(safeA, vault.noTokenId()), 50e6, "the donation reaches the last live position");
     }
 }

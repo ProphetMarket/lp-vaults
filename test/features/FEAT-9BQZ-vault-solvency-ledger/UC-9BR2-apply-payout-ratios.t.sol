@@ -50,6 +50,8 @@ contract PayoutRatioTestBase is LPVaultFixture {
         address indexed owner,
         uint256 usdcOwed,
         uint256 usdcPaid,
+        uint256 spreadOwed,
+        uint256 spreadPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
@@ -111,7 +113,7 @@ contract PayoutRatioTestBase is LPVaultFixture {
     ///      SC-7G44 claim.
     function _expectFellBurn(uint256 id, uint256 usdcPaid, uint256 yesPaid) internal {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(id, safe, FELL_USDC, usdcPaid, vault.yesTokenId(), BAND_TOKENS, yesPaid);
+        emit PositionBurned(id, safe, FELL_USDC, usdcPaid, 0, 0, vault.yesTokenId(), BAND_TOKENS, yesPaid);
     }
 
     /// @dev Reports the result, winds the vault down, and has the Oracle redeem: the switch
@@ -131,13 +133,14 @@ contract PayoutRatioTestBase is LPVaultFixture {
         }
     }
 
-    /// @dev The one PositionBurned log's usdcPaid + tokenPaid, the USDC a resolved burn sent.
+    /// @dev The one PositionBurned log's usdcPaid + spreadPaid + tokenPaid, the USDC a resolved
+    ///      burn sent in its single transfer (FR-CYS4, with the spread leg since R18).
     function _paidSum(Vm.Log[] memory logs) internal pure returns (uint256) {
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != PositionBurned.selector) continue;
-            (, uint256 usdcPaid,,, uint256 tokenPaid) =
-                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
-            return usdcPaid + tokenPaid;
+            (, uint256 usdcPaid,, uint256 spreadPaid,,, uint256 tokenPaid) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256, uint256));
+            return usdcPaid + spreadPaid + tokenPaid;
         }
         revert("no PositionBurned log");
     }
@@ -207,7 +210,8 @@ contract ThreeBurnsAfterSwitchTest is PayoutRatioTestBase {
         uint256 tokenPaid;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] != PositionBurned.selector) continue;
-            (, usdcPaid,,, tokenPaid) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
+            (, usdcPaid,,,,, tokenPaid) =
+                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256, uint256));
         }
         // floor(247,354,500 x 641,031,750 / 1,012,063,500) = 156,672,650; the token leg is the rest
         assertEq(usdcPaid, uint256(FELL_USDC) * 641_031_750 / 1_012_063_500, "usdcPaid is the prorated principal");
@@ -237,19 +241,26 @@ contract LateTokensRedeemedByPayoutTest is PayoutRatioTestBase {
         _fundVault(5e6, 5e6);
     }
 
-    // SC-CYSC: the redemption event, then the burn; the vault keeps the 5 USDC and no token
+    // SC-CYSC: the redemption event, then the burn. Since R18 the late tokens' USDC is above
+    // what the ledger owes, so the burn's own credit attributes it to the only liquidity in range
+    // and the Safe receives it as a spread leg (FEAT-E943 FR-E945). The growth floor drops one
+    // unit, which the closing sweep pays back in the same burn.
     function test_burnRedeemsTheLateTokensFirst() public {
+        uint256 credited = 5e6 - 1;
+
         vm.expectEmit(true, false, false, true, address(vault));
         emit OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6);
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, FELL_USDC, FELL_USDC, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS);
+        emit PositionBurned(
+            positionId, safe, FELL_USDC, FELL_USDC, credited, credited, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS
+        );
 
         vm.recordLogs();
         _burn(positionId);
         Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        assertEq(mockUsdc.balanceOf(safe), FELL_USDC + BAND_TOKENS, "the whole claim in USDC");
-        assertEq(mockUsdc.balanceOf(address(vault)), 5e6, "the vault keeps the late tokens' USDC");
+        assertEq(mockUsdc.balanceOf(safe), FELL_USDC + BAND_TOKENS + 5e6, "the claim plus the late tokens' USDC");
+        assertEq(mockUsdc.balanceOf(address(vault)), 0, "the vault keeps nothing above escrow");
         assertEq(_yesOf(address(vault)), 0, "no YES left");
         assertEq(ctf.balanceOf(address(vault), vault.noTokenId()), 0, "no NO left");
         assertEq(_countLogs(logs, address(vault), CompleteSetsMerged.selector), 0, "no merge after the switch");
@@ -275,23 +286,53 @@ contract CoveredVaultTest is PayoutRatioTestBase {
         mockUsdc.mint(address(vault), 1_000e6);
     }
 
-    // SC-9BSC: the whole claim
+    // The USDC the vault holds above what it owes, which the burn's own credit attributes to the
+    // only liquidity in range. The growth is stored per unit of liquidity and floored, so the
+    // position's claim reads one unit below the measurement; the closing sweep pays that unit
+    // back in the same burn (FEAT-E943 FR-E946, FR-E94C).
+    uint256 constant SURPLUS = 1_300e6 - FELL_USDC;
+    uint256 constant CREDITED = SURPLUS - 1;
+
+    // SC-9BSC: the whole claim, and the credited spread beside it
     function test_whenTheVaultCoversTheClaimThenTheBurnPaysInFull() public {
-        _expectFellBurn(positionId, FELL_USDC, BAND_TOKENS);
+        vm.expectEmit(true, true, false, true, address(vault));
+        emit PositionBurned(
+            positionId, safe, FELL_USDC, FELL_USDC, CREDITED, CREDITED, vault.yesTokenId(), BAND_TOKENS, BAND_TOKENS
+        );
         _burn(positionId);
 
-        assertEq(mockUsdc.balanceOf(safe), FELL_USDC, "the claim's USDC");
-        assertEq(_yesOf(safe), BAND_TOKENS, "the claim's YES");
+        assertEq(mockUsdc.balanceOf(safe), 1_300e6, "the claim's USDC plus the credited spread");
+        assertEq(_yesOf(safe), 500e6, "the claim's YES plus the swept residue");
     }
 
-    // SC-9BSC: the surplus stays
-    function test_whenTheVaultCoversTheClaimThenTheSurplusStays() public {
+    // SC-9BSC: the surplus is attributed, not kept. It reaches this LP as owed spread, and the
+    // closing sweep takes what the credit could not attribute, because this is the last live
+    // position (FEAT-E943 FR-E94C). A surplus is still never a bonus through the ratio, which
+    // stays capped at 1 (FR-9BRP).
+    function test_whenTheVaultCoversTheClaimThenTheSurplusIsAttributed() public {
+        vm.recordLogs();
         _burn(positionId);
+        Vm.Log[] memory logs = vm.getRecordedLogs();
 
-        assertEq(_yesOf(address(vault)), 500e6 - BAND_TOKENS, "the vault keeps the YES it did not owe");
+        uint256 swept;
+        uint256 yesSwept;
+        for (uint256 i = 0; i < logs.length; i++) {
+            if (logs[i].topics[0] != ResidueSwept.selector) continue;
+            (swept, yesSwept,) = abi.decode(logs[i].data, (uint256, uint256, uint256));
+        }
+        assertEq(swept, 1, "the sweep carries the one unit the growth floor dropped");
+        assertEq(yesSwept, 500e6 - BAND_TOKENS, "the sweep carries the YES no claim was owed");
+
+        assertEq(_yesOf(address(vault)), 0, "the vault keeps no YES");
+        assertEq(mockUsdc.balanceOf(address(vault)), 0, "the vault keeps nothing above escrow");
         assertEq(vault.totalUsdcOwedScaled(), 0, "the ledger settled the claim");
         assertEq(vault.totalYesOwedScaled(), 0, "the ledger settled the claim");
+        assertEq(vault.totalSpreadOwedX128(), 0, "the ledger settled the spread");
     }
+
+    event ResidueSwept(
+        uint256 indexed positionId, address indexed owner, uint256 usdcResidue, uint256 yesResidue, uint256 noResidue
+    );
 }
 
 // ──────────────────────────────────────────────
@@ -322,6 +363,9 @@ contract ThreeBurnsSameRatioTest is PayoutRatioTestBase {
     // SC-9BSD: case A — short of YES, each burn pays 5/9 of its band
     function test_whenShortOfYesThenThreeBurnsPayTheSameShare() public {
         _fundVault(150e6, 0);
+        // The fills that bought the 150 YES spent the USDC the three claims no longer name, so
+        // the vault holds exactly what it owes and nothing is creditable as spread (FEAT-E943)
+        _drainThroughExchange(3 * PRINCIPAL - 3 * FELL_USDC);
 
         _expectFellBurn(a, FELL_USDC, 50e6);
         _burn(a);
@@ -387,7 +431,7 @@ contract EscrowSeniorTest is PayoutRatioTestBase {
     // SC-9BSE: the burn pays zero USDC and settles
     function test_whenBelowEscrowThenTheBurnPaysZeroAndSettles() public {
         vm.expectEmit(true, true, false, true, address(vault));
-        emit PositionBurned(positionId, safe, PRINCIPAL, 0, 0, 0, 0);
+        emit PositionBurned(positionId, safe, PRINCIPAL, 0, 0, 0, 0, 0, 0);
         _burn(positionId);
 
         assertEq(mockUsdc.balanceOf(safe), 0, "nothing paid");
@@ -501,18 +545,37 @@ contract FullDebitOnShortPayoutTest is PayoutRatioTestBase {
 //       6000 → 5500 → 5700 → 6300 → 5800, each filled by the keeper at the board's bid, at a
 //       spread of 0 and of 2,000 bps. Run A burns every position before the switch; run B
 //       reports [1, 0], the Oracle winds down and redeems, then every position burns. In
-//       every run every PositionBurned reports paid == owed on every leg, and the vault ends
-//       with 0 YES, 0 NO, and exactly totalEscrowed plus the summed spread income, which is
-//       0 at a spread of 0.
+//       every run every PositionBurned reports paid == owed on every leg, the spread leg
+//       included, the Safes together receive their deposits plus the summed spread income,
+//       and the vault ends with 0 YES, 0 NO, and exactly totalEscrowed.
 // Why:  Finding CV-02 of audits/code-validation-round-1.md: no test modeled the keeper, so a
-//       merge rule that was wrong for the claim model (CV-01) passed every test. The spread
-//       income is asserted as held, not paid: FR-9BRP caps every ratio at 1, and the income
-//       decision (O1b) splits the pool later. On the source before R14 run A failed at both
-//       spreads: the merge took every pair, the last burns paid a cut token leg, and the
-//       vault kept USDC above the spread income.
+//       merge rule that was wrong for the claim model (CV-01) passed every test. Since R18 the
+//       spread income is asserted as paid, not held: the credit turns it into an obligation the
+//       ledger carries (FEAT-E943), and the closing sweep leaves nothing behind, so the income
+//       decision (O1b) is answered on chain. On the source before R14 run A failed at both
+//       spreads: the merge took every pair, the last burns paid a cut token leg, and the vault
+//       kept USDC above the spread income. On the source before R18 both runs fail at 2,000
+//       bps: the income stays in the vault after the last burn instead of reaching the Safes.
 // ──────────────────────────────────────────────
 contract DriftFreeConservationTest is PayoutRatioTestBase, KeeperFillFixture {
     uint256[] ids;
+
+    /// @dev The spread every burn paid, summed across a run (FEAT-E943 NFR-E94E).
+    uint256 spreadOut;
+
+    /// @dev The residue the last live position's burn swept, beyond its own claim.
+    uint256 usdcResidue;
+
+    /// @dev The USDC the ledger owed the four claims, read just before the first burn.
+    uint256 claimsBefore;
+
+    event ResidueSwept(
+        uint256 indexed positionId,
+        address indexed owner,
+        uint256 usdcResidueAmount,
+        uint256 yesResidue,
+        uint256 noResidue
+    );
 
     /// @dev The mints and the filled moves of the scenario, from the vault at 6000. Returns the
     ///      spread income the fills left in the vault.
@@ -543,11 +606,26 @@ contract DriftFreeConservationTest is PayoutRatioTestBase, KeeperFillFixture {
         uint256 burns;
         for (uint256 i = 0; i < logs.length; i++) {
             if (logs[i].topics[0] == CompleteSetsMerged.selector) merged += abi.decode(logs[i].data, (uint256));
+            if (logs[i].topics[0] == ResidueSwept.selector) {
+                (uint256 u, uint256 y, uint256 n) = abi.decode(logs[i].data, (uint256, uint256, uint256));
+                usdcResidue = u;
+                assertEq(y, 0, "the sweep leaves no YES behind");
+                assertEq(n, 0, "the sweep leaves no NO behind");
+            }
             if (logs[i].topics[0] != PositionBurned.selector) continue;
             burns++;
-            (uint256 usdcOwed, uint256 usdcPaid, uint256 tokenId, uint256 tokenOwed, uint256 tokenPaid) =
-                abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256));
+            (
+                uint256 usdcOwed,
+                uint256 usdcPaid,
+                uint256 spreadOwed,
+                uint256 spreadPaid,
+                uint256 tokenId,
+                uint256 tokenOwed,
+                uint256 tokenPaid
+            ) = abi.decode(logs[i].data, (uint256, uint256, uint256, uint256, uint256, uint256, uint256));
             assertEq(usdcPaid, usdcOwed, "the USDC leg is paid in full");
+            assertEq(spreadPaid, spreadOwed, "the spread leg is paid in full");
+            spreadOut += spreadPaid;
             uint256 tokenExpected = afterSwitch ? (tokenId == vault.yesTokenId() ? tokenOwed : 0) : tokenOwed;
             assertEq(tokenPaid, tokenExpected, "the token leg is paid in full");
         }
@@ -567,17 +645,38 @@ contract DriftFreeConservationTest is PayoutRatioTestBase, KeeperFillFixture {
 
         if (afterSwitch) _resolveAndRedeem(1, 0);
 
+        // After the switch the token legs are USDC too, at the reported payout [1, 0], so the
+        // YES the ledger owes is part of what the Safes receive
+        claimsBefore = vault.totalUsdcOwed() + (afterSwitch ? vault.totalYesOwed() : 0);
+        uint256 safeBefore = mockUsdc.balanceOf(safe);
+
         uint256 merged = _burnAllInFull(afterSwitch);
 
         assertEq(merged, afterSwitch ? 0 : freeYes, "the burns merge exactly the round-trip pairs");
         assertEq(_yesOf(address(vault)), 0, "the vault ends with no YES");
         assertEq(ctf.balanceOf(address(vault), vault.noTokenId()), 0, "the vault ends with no NO");
+
+        // R18: the income reaches the Safes instead of staying in the vault (FEAT-E943)
+        assertEq(mockUsdc.balanceOf(address(vault)), vault.totalEscrowed(), "the vault keeps nothing above escrow");
+        assertEq(vault.totalUsdcOwed() + vault.totalYesOwed() + vault.totalNoOwed(), 0, "every principal total is zero");
+        assertEq(vault.totalSpreadOwedX128(), 0, "the spread total is zero");
+
+        // Every unit the fills left reaches a Safe, as a spread leg or as the closing sweep's
+        // residue. The two together are the income exactly, because the sweep takes whatever the
+        // credits could not attribute (FEAT-E943 FR-E94C).
+        assertEq(spreadOut + usdcResidue, income, "every unit of spread income reaches a Safe");
+        if (spreadBps == 0) {
+            assertEq(usdcResidue, 0, "no residue at a spread of 0");
+        } else {
+            assertGt(spreadOut, 0, "the Safes are paid a spread leg at 2,000 bps");
+            assertLt(usdcResidue, 3, "the residue is dust under drift-free fills");
+        }
+
+        // The Safes together receive every USDC the vault held above escrow, which is the sum of
+        // what the ledger owed them and the income the fills left
         assertEq(
-            mockUsdc.balanceOf(address(vault)),
-            vault.totalEscrowed() + income,
-            "the vault keeps exactly the spread income"
+            mockUsdc.balanceOf(safe) - safeBefore, claimsBefore + income, "the Safes receive the claims plus the income"
         );
-        assertEq(vault.totalUsdcOwed() + vault.totalYesOwed() + vault.totalNoOwed(), 0, "every total is zero");
     }
 
     // SC-DFDY: run A at a spread of 0, every burn in full and nothing above escrow

@@ -123,13 +123,13 @@ contract FreezeChangesOnlyPhaseTest is EmergencyCancelTestBase {
 
     // SC-JXQX: the position record is untouched
     function test_positionRecordUnchanged() public {
-        (address ownerBefore, int24 lowerBefore, int24 upperBefore, int24 mintBefore, uint128 liqBefore) =
+        (address ownerBefore, int24 lowerBefore, int24 upperBefore, int24 mintBefore, uint128 liqBefore,) =
             vault.positions(positionIdA);
 
         vm.prank(lpA);
         vault.emergencyCancelAll();
 
-        (address owner, int24 lower, int24 upper, int24 mintTick, uint128 liq) = vault.positions(positionIdA);
+        (address owner, int24 lower, int24 upper, int24 mintTick, uint128 liq,) = vault.positions(positionIdA);
         assertEq(owner, ownerBefore, "owner must not move");
         assertEq(lower, lowerBefore, "tickLower must not move");
         assertEq(upper, upperBefore, "tickUpper must not move");
@@ -139,16 +139,16 @@ contract FreezeChangesOnlyPhaseTest is EmergencyCancelTestBase {
 
     // SC-JXQX: both boundary tick records and their bitmap bits are untouched
     function test_tickRecordsAndBitmapUnchanged() public {
-        (uint128 grossLowBefore, int128 netLowBefore,) = vault.ticks(int24(0));
-        (uint128 grossUpBefore, int128 netUpBefore,) = vault.ticks(int24(100));
+        (uint128 grossLowBefore, int128 netLowBefore,,) = vault.ticks(int24(0));
+        (uint128 grossUpBefore, int128 netUpBefore,,) = vault.ticks(int24(100));
         uint256 wordBefore = vault.tickBitmap(int16(0));
         assertTrue(grossLowBefore > 0 && grossUpBefore > 0, "precondition: both ticks initialized");
 
         vm.prank(lpA);
         vault.emergencyCancelAll();
 
-        (uint128 grossLow, int128 netLow,) = vault.ticks(int24(0));
-        (uint128 grossUp, int128 netUp,) = vault.ticks(int24(100));
+        (uint128 grossLow, int128 netLow,,) = vault.ticks(int24(0));
+        (uint128 grossUp, int128 netUp,,) = vault.ticks(int24(100));
         assertEq(grossLow, grossLowBefore, "ticks[0].liquidityGross must not move");
         assertEq(netLow, netLowBefore, "ticks[0].liquidityNet must not move");
         assertEq(grossUp, grossUpBefore, "ticks[100].liquidityGross must not move");
@@ -252,8 +252,8 @@ contract AnyAddressFreezesTest is EmergencyCancelTestBase {
 
     function _assertFrozenBy(address caller) internal {
         uint128 activeLiqBefore = vault.activeLiquidity();
-        (,,,, uint128 liqABefore) = vault.positions(positionIdA);
-        (,,,, uint128 liqBBefore) = vault.positions(positionIdB);
+        (,,,, uint128 liqABefore,) = vault.positions(positionIdA);
+        (,,,, uint128 liqBBefore,) = vault.positions(positionIdB);
 
         vm.expectEmit(true, false, false, false, address(vault));
         emit EmergencyCancelExecuted(caller);
@@ -262,8 +262,8 @@ contract AnyAddressFreezesTest is EmergencyCancelTestBase {
 
         assertEq(vault.phase(), 3, "phase should be Cancelled");
         assertEq(vault.activeLiquidity(), activeLiqBefore, "activeLiquidity must not move");
-        (,,,, uint128 liqA) = vault.positions(positionIdA);
-        (,,,, uint128 liqB) = vault.positions(positionIdB);
+        (,,,, uint128 liqA,) = vault.positions(positionIdA);
+        (,,,, uint128 liqB,) = vault.positions(positionIdB);
         assertEq(liqA, liqABefore, "LP-A's position must not move");
         assertEq(liqB, liqBBefore, "LP-B's position must not move");
     }
@@ -318,6 +318,8 @@ contract BurnAfterFreezeTest is LPVaultFixture {
         address indexed owner,
         uint256 usdcOwed,
         uint256 usdcPaid,
+        uint256 spreadOwed,
+        uint256 spreadPaid,
         uint256 tokenId,
         uint256 tokenOwed,
         uint256 tokenPaid
@@ -361,7 +363,7 @@ contract BurnAfterFreezeTest is LPVaultFixture {
 
         assertEq(mockUsdc.balanceOf(safeA) - before_, 300_000_000, "Safe A receives 300 USDC");
         assertEq(vault.activeLiquidity(), LIQ_B, "activeLiquidity falls to Safe B's liquidity");
-        (address owner,,,, uint128 liq) = vault.positions(posAIn);
+        (address owner,,,, uint128 liq,) = vault.positions(posAIn);
         assertEq(owner, address(0), "the record is deleted");
         assertEq(liq, 0, "the record is deleted");
         assertEq(vault.phase(), 3, "phase stays Cancelled");
