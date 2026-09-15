@@ -3,7 +3,7 @@ id: UC-REQ1
 name: Create Vault for Market
 feature: FEAT-REPZ
 status: implemented
-version: 10
+version: 11
 actor: Oracle
 ---
 
@@ -239,7 +239,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditio
 
 **Side Effects:**
 - `MinimumFirstLiquidityUpdated(oldMin, newMin)` event emitted by the vault
-- No state changes to positions, ticks, or fee accumulators
+- No state changes to positions or ticks
 
 ---
 
@@ -372,7 +372,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditio
 - The same holds for a transfer of `noTokenId`
 
 **Side Effects:**
-- No change to `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, or any position or tick record
+- No change to `activeLiquidity`, `currentTick`, `nextPositionId`, or any position or tick record
 - No USDC transferred
 - No merge
 - No vault events emitted -- only the ConditionalTokens `TransferSingle` event
@@ -398,7 +398,7 @@ Oracle calls `createVault(marketId, tickSpacing, minimumFirstLiquidity, conditio
 - The vault's ERC-1155 balances for both token IDs increased by the transferred amounts
 
 **Side Effects:**
-- No change to `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, or any position or tick record
+- No change to `activeLiquidity`, `currentTick`, `nextPositionId`, or any position or tick record
 - No USDC transferred
 - No merge
 - No vault events emitted -- only the ConditionalTokens `TransferBatch` event

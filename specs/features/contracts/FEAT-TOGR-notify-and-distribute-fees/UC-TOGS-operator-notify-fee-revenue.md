@@ -2,12 +2,14 @@
 id: UC-TOGS
 name: Operator Notify Fee Revenue
 feature: FEAT-TOGR
-status: implemented
-version: 4
+status: deprecated
+version: 5
 actor: Operator
 ---
 
 # UC-TOGS: Operator Notify Fee Revenue
+
+Deprecated on 2026-09-14 (step R17 in `audits/audit-fixes-ranged.md`): the Prophet server computes and pays each maker's fees off-chain, so the vault carries no fee accounting. The text below is the audit trail of the deleted code.
 
 > The Operator distributes newly arrived fee revenue across all in-range LP positions by updating the vault's global fee accumulator, and the vault takes that revenue from the Operator wallet in the same call.
 

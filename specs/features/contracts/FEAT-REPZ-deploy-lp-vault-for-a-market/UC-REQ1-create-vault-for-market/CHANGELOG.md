@@ -1,6 +1,7 @@
 TODO:
 
 DONE:
+- 20260915T041747 [implemented] command:change plan:20260915T041517-remove-lp-fee-accounting-r17 — The fee accounting left the vault, so the creation specs name no fee state: FR-3WLI says the bookkeeping is driven by mint, burn, and updateTick, the fee Non-Goal points at FEAT-TVS0 and FEAT-7G40, and SC-RG75, SC-3WLL, and SC-3WLM drop the fee accumulator and feeGrowthGlobalX128 from their side effects. ADR-RFS9 and ADR-3WLP gain their dated lines, and the architecture entities lose their three fee rows. Source: exploration 20260915T041240-remove-lp-fee-accounting-r17.
 - 20260915T014745 [implemented] command:change plan:20260915T014229-close-cv-findings-r15 — initialize checks msg.sender == factory_ inline because factory is not yet stored, and the unused onlyFactory modifier is deleted (finding CV-05 of audits/code-validation-round-1.md, audit-fix step R15): FR-REQQ's fit criterion, SC-REQA, and two architecture rows name the inline check.
 - 20260915T014745 [implemented] command:fix plan:20260915T014229-close-cv-findings-r15 — createVault reverts InvalidTickSpacing when tickSpacing <= 0 (finding CV-12 of audits/code-validation-round-1.md, audit-fix step R15): SC-DU2Y and FR-DU2Z added.
 - 20260914T143708 [implemented] command:change plan:20260914T142629-redemption-after-resolution-r13 — The outcome-token identity decision (ADR-6HBU) names the redemption as built in audit-fix step R13 instead of a later Part 6. Wording only; no scenario changes. Source: exploration 20260914T140852-redemption-after-resolution-r13.

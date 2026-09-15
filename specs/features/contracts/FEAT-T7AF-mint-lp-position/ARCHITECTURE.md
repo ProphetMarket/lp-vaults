@@ -2,7 +2,7 @@
 id: FEAT-T7AF
 name: Mint LP Position
 use_cases: [UC-T7AG]
-scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AR, SC-3XU5, SC-3XU6, SC-8L1C, SC-3Z9J, SC-45IE, SC-3Z9K, SC-AFPM, SC-AFPN]
+scenarios: [SC-T7AH, SC-T7AI, SC-T7AJ, SC-T7AK, SC-T7AL, SC-T7AM, SC-T7AN, SC-T7AO, SC-T7AP, SC-T7AR, SC-3XU5, SC-3XU6, SC-3Z9J, SC-45IE, SC-3Z9K, SC-AFPM, SC-AFPN]
 last_update: 2026-09-14
 ---
 
@@ -54,7 +54,6 @@ C4Container
 erDiagram
     LPVAULT {
         uint128 activeLiquidity "sum of in-range position liquidity"
-        uint256 feeGrowthGlobalX128 "Q128 cumulative fees per unit active L"
         int24 currentTick "last-known market mid-price tick"
         uint256 nextPositionId "auto-increment counter; the first mint must meet minimumFirstLiquidity"
         int24 tickSpacing "storage, would be immutable in non-clone"
@@ -81,14 +80,11 @@ erDiagram
         int24 tickUpper "must align to tickSpacing, > tickLower"
         int24 mintTick "currentTick at mint, clamped into [tickLower, tickUpper] (C26)"
         uint128 liquidity "usdcAmount * PRECISION / (tickUpper - tickLower)"
-        uint256 feeGrowthInsideLastX128 "snapshot at mint time (Q128)"
-        uint256 tokensOwed "0 at mint; accumulates on collect"
     }
     TICK_INFO {
         int24 tick PK "tick index"
         uint128 liquidityGross "total L referencing this tick"
         int128 liquidityNet "L added crossing up, subtracted crossing down"
-        uint256 feeGrowthOutsideX128 "fees on the other side of this tick (Q128)"
     }
     USED_INTENTS {
         bytes32 intentId PK "unique per mint intent"
@@ -107,7 +103,6 @@ erDiagram
 **Invariants:**
 - `tickLower < tickUpper` for every position
 - `tickLower % tickSpacing == 0` and `tickUpper % tickSpacing == 0`
-- `position.feeGrowthInsideLastX128` is set to feeGrowthInside at mint time -- no retroactive claims
 - `ticks[t].liquidityGross == sum of |liquidity| of all positions referencing tick t` as `tickLower`, as `tickUpper`, or as an interior mint tick, and `ticks[t].noLiquidityNet` equals the net of the NO sub-ranges `[mintTick, tickUpper)` at t (FEAT-TVS0 FR-A2ZS)
 - `activeLiquidity == sum of position.liquidity for all positions where tickLower <= currentTick < tickUpper`
 - `usedIntents[intentId] == true` after a successful mint -- never reset to false
@@ -115,7 +110,6 @@ erDiagram
 - `position.owner == pendingDeposits[intentId].lp` at the moment of the mint
 - When `nextPositionId == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` (FEAT-REPZ invariant); a later mint is not floored, even when `activeLiquidity == 0`
 - `tickLower <= position.mintTick <= tickUpper` for every position, and the value never changes after the mint
-- Newly initialized tick: `feeGrowthOutsideX128 = (tick <= currentTick) ? feeGrowthGlobalX128 : 0`
 
 ## Component Inventory
 
@@ -123,9 +117,9 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | Per-market vault -- position minting from an escrow, tick initialization, fee growth computation | `mintPositionFor()`, `_requireValidRange()`, `_mintIntentHash()`, `_initializeTick()`, `_computeFeeGrowthInside()`, `MINT_INTENT_TYPEHASH`, `IntentMismatch`, `DepositNotEscrowed` |
+| `src/LPVault.sol` | Per-market vault -- position minting from an escrow, tick initialization | `mintPositionFor()`, `_requireValidRange()`, `_mintIntentHash()`, `_addTickReference()`, `MINT_INTENT_TYPEHASH`, `IntentMismatch`, `DepositNotEscrowed` |
 | `test/fixtures/LPVaultFixture.sol` | Test fixture -- `_escrowAndMint` is the one way every test mints | `_escrowAndMint()`, `_signMintIntent()` |
-| `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp.t.sol` | Integration tests for all 16 scenarios | SC-T7AH through SC-T7AR, SC-8L1C, SC-3Z9J, SC-45IE, SC-3Z9K |
+| `test/features/FEAT-T7AF-mint-lp-position/UC-T7AG-operator-mint-position-for-lp.t.sol` | Integration tests for all 17 scenarios | SC-T7AH through SC-T7AR, SC-3Z9J, SC-45IE, SC-3Z9K |
 | `test/invariants/TickState.t.sol` | Invariant test for the tick state machine: the two liquidity invariants this Data Model states, over random mints, tick moves, and merges, plus the merge conservation invariant (FEAT-K1M2) | `TickStateHandler`, `invariant_activeLiquidityEqualsInRangeLiquidity`, `invariant_liquidityGrossEqualsReferencingLiquidity`, `invariant_updateTickRevertsOnlyForDocumentedReasons`, `invariant_zeroCrossingMoveGasStaysBounded`, `invariant_mergeConservesLiquidity`, `invariant_duplicateMergeAlwaysRejected` |
 
 ## Event Topology
@@ -163,12 +157,11 @@ erDiagram
 | Spec ID | Spec Name | Implementation Files |
 |---------|-----------|---------------------|
 | UC-T7AG | Operator Mint Position for LP | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_mintIntentHash()`, `src/LPVault.sol:_requireValidRange()` |
-| SC-T7AH | Successful in-range mint with fresh ticks | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_initializeTick()`, `src/LPVault.sol:_computeFeeGrowthInside()` |
+| SC-T7AH | Successful in-range mint with fresh ticks | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_addTickReference()` |
 | SC-3XU5 | Successful mint refreshes silence timer | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-3XU6 | Reverted mint leaves silence timer untouched | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:touchesHeartbeat` |
-| SC-T7AI | Successful out-of-range mint | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_initializeTick()` |
-| SC-T7AJ | Second position on existing tick | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_initializeTick()` |
-| SC-8L1C | Mint over a stale shared tick succeeds | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_initializeTick()`, `src/LPVault.sol:_computeFeeGrowthInside()` |
+| SC-T7AI | Successful out-of-range mint | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_addTickReference()` |
+| SC-T7AJ | Second position on existing tick | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_addTickReference()` |
 | SC-T7AK | Inverted range revert | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_requireValidRange()` |
 | SC-T7AL | Misaligned tick revert | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:_requireValidRange()` |
 | SC-T7AM | Non-active vault revert | `src/LPVault.sol:mintPositionFor()` |
@@ -188,7 +181,7 @@ erDiagram
 In the context of representing LP price ranges on a prediction market with bounded [0, 1] price space, facing the design choice between Uniswap v3's log-spaced ticks (based on sqrt(1.0001)^i) and linear ticks, we decided to use linear ticks matching the CLOB's price granularity to achieve simpler arithmetic and direct mapping between tick indices and probability values, accepting that this departs from v3's constant-product AMM math (which we don't use -- the CLOB handles matching, not an AMM curve).
 
 **ADR-T7CE:** Liquidity formula: L = usdcAmount * PRECISION / rangeWidth
-In the context of computing position liquidity from a USDC deposit, facing the choice between v3's sqrt-price-based formula and a linear USDC-per-tick model, we decided to use `liquidity = usdcAmount * PRECISION / (tickUpper - tickLower)` to achieve a direct, auditable relationship between USDC deposited and liquidity weight, accepting that this is simpler than v3's model because the CLOB handles trade execution -- the vault only needs liquidity for fee-accounting weight, not for swap output computation. See `research/lp-provisioning-engine.md` section "Mapping L (liquidity) to USDC capital" for the derivation. Under the claim model (decision C26), the same number is the token count on every tick of the range, each tick funded with 1 USDC per token, so a burn values a claim without a loop; the liquidity unit decision (ADR-7G5F in FEAT-7G40) records the choice and the formula.
+In the context of computing position liquidity from a USDC deposit, facing the choice between v3's sqrt-price-based formula and a linear USDC-per-tick model, we decided to use `liquidity = usdcAmount * PRECISION / (tickUpper - tickLower)` to achieve a direct, auditable relationship between USDC deposited and liquidity weight, accepting that this is simpler than v3's model because the CLOB handles trade execution -- the vault only needs liquidity for fee-accounting weight, not for swap output computation. See `research/lp-provisioning-engine.md` section "Mapping L (liquidity) to USDC capital" for the derivation. Under the claim model (decision C26), the same number is the token count on every tick of the range, each tick funded with 1 USDC per token, so a burn values a claim without a loop; the liquidity unit decision (ADR-7G5F in FEAT-7G40) records the choice and the formula. Since 2026-09-14 (step R17) liquidity is the claim's weight, not a fee-accounting weight.
 
 **ADR-T7CF:** EIP-712 signed intent for operator-gated minting
 In the context of LP onboarding under the operator-executes-all model (ADR-RFS9 from FEAT-REPZ), facing the need for the LP to authorize specific mint parameters without directly calling the vault, we decided to use EIP-712 typed structured data (MintIntent struct) signed by the LP and submitted by the Operator, with intentId-based replay protection, to achieve cryptographic authorization verifiable on-chain while keeping the execution path operator-gated, accepting that the LP must pre-approve the vault for USDC (ERC-20 approve) and trust the Operator to submit their intent in a timely manner -- a trust assumption bounded by the reclaimDeposit escape hatch planned in feature 7.
@@ -205,7 +198,7 @@ In the context of Uniswap v3 lazy fee accounting compiled under Solidity 0.8.20 
 
 The mechanism: a tick initialized late assumes all past growth sits on one side of it, so `below + above` can exceed `global`, and `global - below - above` must wrap modulo 2^256. A position stores that wrapped value as its snapshot. Later, `inside_now - snapshot` must also wrap, because both values wrapped by the same offset and the subtraction cancels the offset to the true small delta. That subtraction is the load-bearing part. On a correct delta, `liquidity * delta` fits in 256 bits for every reachable value, so `_mulDiv` and the unchecked product return the same number. On a wrong delta, both return a wrong number. The no-`_mulDiv` rule is therefore a convention that keeps one shape at every fee site and keeps the shape the auditors reviewed, not a safety claim.
 
-Rejected: signed integers, because `feeGrowthGlobalX128` itself can approach 2^256. Rejected: a fee model without wraparound, because it would replace an audited pattern with a new one. The sites at the time of this decision: `_computeFeeGrowthInside()`, `_crossTick()`, `collect()`, `mergePositions()` (survivor and consumed), and `emergencyCancelAll()`. A burn (R9 in `audits/audit-fixes-ranged.md`) adds a sixth site with the same shape. The freeze (R10) removed the cancel's site on 2026-09-13, so five sites remain: `_computeFeeGrowthInside()`, `_crossTick()`, `_collect()`, `mergePositions()`, and `_burnAmounts()`.
+Rejected: signed integers, because `feeGrowthGlobalX128` itself can approach 2^256. Rejected: a fee model without wraparound, because it would replace an audited pattern with a new one. The sites at the time of this decision: `_computeFeeGrowthInside()`, `_crossTick()`, `collect()`, `mergePositions()` (survivor and consumed), and `emergencyCancelAll()`. A burn (R9 in `audits/audit-fixes-ranged.md`) adds a sixth site with the same shape. The freeze (R10) removed the cancel's site on 2026-09-13, so five sites remain: `_computeFeeGrowthInside()`, `_crossTick()`, `_collect()`, `mergePositions()`, and `_burnAmounts()`. Superseded on 2026-09-14 (step R17 in `audits/audit-fixes-ranged.md`): every fee-growth site is deleted with the fee accounting, so the exception to `CLAUDE.md` checklist item 3 ends with it, and audit issue 6.5 closes by deletion.
 
 **ADR-AFPP:** The mint tick is clamped into the range at mint
 In the context of the claim model (decision C26 in `audits/audit-fixes-ranged.md`), where a claim's assets follow the price from the tick at which it was minted, facing a mint whose `currentTick` sits outside its own range, we decided to store `mintTick = currentTick` clamped into `[tickLower, tickUpper]` inside `mintPositionFor` (`tickLower` when the price is below the range, `tickUpper` when it is at or above it), to achieve one stored value that R9 reads as settled and that gives two positions minted on the same side of their range the same mint tick so they can merge under decision C16, accepting that R9 must still decide what the level exactly at the mint tick holds, a question an in-range mint poses in the same form, and that the Operator sets the value through the order of its `updateTick` and `mintPositionFor` calls, which the mint's OPERATOR TRUST ASSUMPTION states. The field sits after `tickUpper` in the `Position` struct, so it packs into the first storage slot and the mint writes no new slot. The user chose this on 2026-09-12. Under the solvency ledger (FEAT-9BQZ, R11) the clamp is also what makes the ledger's split exact: with the mint tick inside the range, the YES sub-range `[tickLower, mintTick)` and the NO sub-range `[mintTick, tickUpper)` partition the range, so the vault books the NO side as a `noLiquidityNet` pair at the mint tick and at `tickUpper`.

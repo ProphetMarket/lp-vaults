@@ -4,8 +4,8 @@ name: Burn LP Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 6
-refs: [FEAT-T7AF, FEAT-U079, FEAT-TVS0, FEAT-JGE7, FEAT-6HBN, FEAT-3ZRI, FEAT-9BQZ]
+version: 7
+refs: [FEAT-T7AF, FEAT-TVS0, FEAT-JGE7, FEAT-6HBN, FEAT-3ZRI, FEAT-9BQZ]
 ---
 
 # Burn LP Position
@@ -16,7 +16,6 @@ refs: [FEAT-T7AF, FEAT-U079, FEAT-TVS0, FEAT-JGE7, FEAT-6HBN, FEAT-3ZRI, FEAT-9B
 
 - Does not keep the running totals or compute the ratios itself -- see FEAT-9BQZ, whose totals every burn reads and debits
 - Does not place an order, and does not convert the outcome leg to USDC before the switch -- after the Oracle's redemption (FEAT-6HBN UC-6HBP) the burn redeems the vault's tokens first and pays the token leg in USDC at the reported payout, see FR-CYS4
-- Does not withdraw fees without closing the position -- see FEAT-U079
 - Does not create positions or initialize ticks -- see FEAT-T7AF
 - Does not cross ticks or move `currentTick` -- see FEAT-TVS0
 - Does not transition the vault between phases -- see FEAT-JGE7 (wind-down) and FEAT-JXQO (emergency cancel)
@@ -59,12 +58,8 @@ Linked to: UC-7G41
 Fit Criterion: Given `tickLower <= currentTick < tickUpper`, `activeLiquidity` decreases by exactly the position's liquidity. Given `currentTick` outside the range, `activeLiquidity` is identical before and after the call.
 Linked to: UC-7G41, UC-7G42
 
-**FR-7G4R** `When a position is burned, the system shall compute the position's accrued fees from feeGrowthInside and pay them with the USDC leg in the same call.`
-Fit Criterion: Given a position that has accrued F in fees since its last collect or mint, one burn call pays the claim's USDC plus F in one USDC transfer, `PositionBurned.feesOwed == F`, and no separate `collect` is required. The product is the sixth `unchecked` fee site (ADR-8L1F in FEAT-T7AF). Given zero accrued fees, only the claim is paid.
-Linked to: UC-7G41, UC-7G42
-
 **FR-7G4S** `When a burn completes, the system shall delete the position record.`
-Fit Criterion: Given a burned positionId, its stored `owner`, `tickLower`, `tickUpper`, `mintTick`, `liquidity`, `feeGrowthInsideLastX128`, and `tokensOwed` all read as zero, so no residual claim survives the burn.
+Fit Criterion: Given a burned positionId, its stored `owner`, `tickLower`, `tickUpper`, `mintTick`, and `liquidity` all read as zero, so no residual claim survives the burn.
 Linked to: UC-7G41, UC-7G42
 
 **FR-7G4T** `The system shall never assign a burned position's positionId to a new position.`
@@ -83,12 +78,12 @@ Linked to: UC-7G41, UC-7G42
 Fit Criterion: Given a never-minted id, an already-burned id, or a position that `mergePositions` consumed, the call reverts `PositionNotFound` through either entry point, and no asset leaves the vault. A consumed position's liquidity already moved to a survivor; burning it would touch the ticks by zero and could clear a bit a survivor needs.
 Linked to: UC-7G41
 
-**FR-COEX** `When a burn pays, the system shall pay each asset's owed amount times that asset's ratio (FEAT-9BQZ FR-9BRM to FR-9BRR), rounded down and never above what the vault holds, debit the four totals by the position's full scaled claim and scaled fees, and never revert on the comparison.`
-Fit Criterion: Given three positions owed 90 YES each and a vault that holds 150 YES, three burns in a row pay 50 YES each and their full USDC (SC-9BSD). Given one position with a claim of 247.3545 USDC plus 90 YES and a vault that holds 200 USDC above escrow and 60 YES, the burn pays 200 USDC and 60 YES, does not revert, emits `PositionBurned` with `usdcOwed = 247,354,500`, `usdcPaid = 200,000,000`, `tokenOwed = 90,000,000`, and `tokenPaid = 60,000,000`, leaves the position deleted, and takes `totalUsdcOwed()` and `totalYesOwed()` to zero. Given a vault whose USDC balance is below `totalEscrowed`, the burn pays zero USDC and does not revert. Given a vault that holds more than the claim, the burn pays the claim exactly. Decisions C6, C7, and O2 (ADR-COEY). After the switch, the three amounts share one USDC ratio and one transfer (FEAT-9BQZ FR-CYS5): the burn prorates `usdcOwed + feesOwed + tokenUsdc` once, reports `usdcPaid` as the prorated `usdcOwed + feesOwed` and `tokenPaid` as the rest, so `usdcPaid + tokenPaid` never exceeds what the vault holds, even after a saturated ledger debit.
+**FR-COEX** `When a burn pays, the system shall pay each asset's owed amount times that asset's ratio (FEAT-9BQZ FR-9BRM to FR-9BRR), rounded down and never above what the vault holds, debit the three totals by the position's full scaled claim, and never revert on the comparison.`
+Fit Criterion: Given three positions owed 90 YES each and a vault that holds 150 YES, three burns in a row pay 50 YES each and their full USDC (SC-9BSD). Given one position with a claim of 247.3545 USDC plus 90 YES and a vault that holds 200 USDC above escrow and 60 YES, the burn pays 200 USDC and 60 YES, does not revert, emits `PositionBurned` with `usdcOwed = 247,354,500`, `usdcPaid = 200,000,000`, `tokenOwed = 90,000,000`, and `tokenPaid = 60,000,000`, leaves the position deleted, and takes `totalUsdcOwed()` and `totalYesOwed()` to zero. Given a vault whose USDC balance is below `totalEscrowed`, the burn pays zero USDC and does not revert. Given a vault that holds more than the claim, the burn pays the claim exactly. Decisions C6, C7, and O2 (ADR-COEY). After the switch, the two amounts share one USDC ratio and one transfer (FEAT-9BQZ FR-CYS5): the burn prorates `usdcOwed + tokenUsdc` once, reports `usdcPaid` as the prorated `usdcOwed` and `tokenPaid` as the rest, so `usdcPaid + tokenPaid` never exceeds what the vault holds, even after a saturated ledger debit.
 Linked to: UC-7G41
 
-**FR-CYS4** `When a burn runs while payoutNumerators() is non-zero, the system shall redeem the vault's whole YES and NO balances through the ConditionalTokens contract before it pays, value the band's token leg at tokenOwed × the side's numerator ÷ the numerators' sum in USDC, rounded down, pay the claim's USDC, the fees, and the token leg's USDC at the one USDC ratio of FEAT-9BQZ in one USDC transfer, make no ERC-1155 transfer, and report the token leg's USDC as PositionBurned.tokenPaid.`
-Fit Criterion: Given the R9 example (300 USDC over `[5500, 6500)` minted at 6000, the vault at 5700, so the claim is 247,354,500 USDC units plus 90 YES), the vault holding 90 YES, and the Oracle's redemption after `[1, 0]`: the burn pays 337,354,500 USDC units in one transfer and emits `PositionBurned(id, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 90000000)`, with no `TransferSingle` from the ConditionalTokens contract. After `[0, 1]`: 247,354,500 USDC units and `tokenPaid = 0`. After `[1, 1]`: 292,354,500 USDC units and `tokenPaid = 45000000`. Given the result reported and the switch off, the burn pays 247,354,500 USDC units and 90 YES in kind, as before the resolution. Given 5 YES and 5 NO that arrived after the Oracle's redemption, the burn redeems them first and emits `OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6)` before `PositionBurned`. The USDC is in the vault, and one transfer costs less than one transfer plus an ERC-1155 transfer.
+**FR-CYS4** `When a burn runs while payoutNumerators() is non-zero, the system shall redeem the vault's whole YES and NO balances through the ConditionalTokens contract before it pays, value the band's token leg at tokenOwed × the side's numerator ÷ the numerators' sum in USDC, rounded down, pay the claim's USDC and the token leg's USDC at the one USDC ratio of FEAT-9BQZ in one USDC transfer, make no ERC-1155 transfer, and report the token leg's USDC as PositionBurned.tokenPaid.`
+Fit Criterion: Given the R9 example (300 USDC over `[5500, 6500)` minted at 6000, the vault at 5700, so the claim is 247,354,500 USDC units plus 90 YES), the vault holding 90 YES, and the Oracle's redemption after `[1, 0]`: the burn pays 337,354,500 USDC units in one transfer and emits `PositionBurned(id, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)`, with no `TransferSingle` from the ConditionalTokens contract. After `[0, 1]`: 247,354,500 USDC units and `tokenPaid = 0`. After `[1, 1]`: 292,354,500 USDC units and `tokenPaid = 45000000`. Given the result reported and the switch off, the burn pays 247,354,500 USDC units and 90 YES in kind, as before the resolution. Given 5 YES and 5 NO that arrived after the Oracle's redemption, the burn redeems them first and emits `OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6)` before `PositionBurned`. The USDC is in the vault, and one transfer costs less than one transfer plus an ERC-1155 transfer.
 Linked to: UC-7G41
 
 ### Self-Service Path
@@ -115,8 +110,8 @@ Linked to: UC-7G41
 Fit Criterion: Given a valid `BurnIntent` signed by the owner key of `lp`, the observable outcomes are identical to FR-7G4X, with the Operator paying gas and the assets going to `position.owner`.
 Linked to: UC-7G42
 
-**FR-7G52** `When verifying a burn authorization, the system shall use an EIP-712 typehash distinct from the MintIntent, ReclaimIntent, and CollectIntent typehashes.`
-Fit Criterion: A signature produced over a `MintIntent`, a `ReclaimIntent`, or a `CollectIntent` is rejected by `burnPositionFor` with `InvalidSignature`, and a `BurnIntent` signature is rejected by `depositForIntent`, `reclaimDepositFor`, and `collectFor`. Without domain separation, the signature an LP produces to open a position would double as authorization to close it (FEAT-JAIJ ADR-4029).
+**FR-7G52** `When verifying a burn authorization, the system shall use an EIP-712 typehash distinct from the MintIntent and ReclaimIntent typehashes.`
+Fit Criterion: A signature produced over a `MintIntent` or a `ReclaimIntent` is rejected by `burnPositionFor` with `InvalidSignature`, and a `BurnIntent` signature is rejected by `depositForIntent` and `reclaimDepositFor`. Without domain separation, the signature an LP produces to open a position would double as authorization to close it (FEAT-JAIJ ADR-4029).
 Linked to: UC-7G42
 
 **FR-7G53** `The system shall verify the signature with _verifySafeOwnerSignature(lp, structHash, signature) and shall revert NotPositionOwner when position.owner != lp.`
@@ -148,7 +143,7 @@ Linked to: UC-7G42
 **NFR-7G58** Security: `The system shall apply an inline nonReentrant modifier to both burnPosition and burnPositionFor.`
 Rationale: both paths make external calls, the merge, a USDC transfer, and an ERC-1155 `safeTransferFrom` whose receiver hook hands control to the recipient. A Safe owner can replace the Safe's fallback handler, so the ERC-1155 callback is a live reentrancy surface.
 
-**NFR-7G59** Security: `The shared burn shall run its checks and reads first (the claim, the fees, both token balances, the switch, the USDC balance, and the two amounts to pay), then the tick, bitmap, activeLiquidity, ledger, and position effects, then the settlement call and the transfers last: before the switch the merge, the USDC transfer, and the ERC-1155 transfer as the final call; after the switch the redemption and then the USDC transfer as the final call.`
+**NFR-7G59** Security: `The shared burn shall run its checks and reads first (the claim, both token balances, the switch, the USDC balance, and the two amounts to pay), then the tick, bitmap, activeLiquidity, ledger, and position effects, then the settlement call and the transfers last: before the switch the merge, the USDC transfer, and the ERC-1155 transfer as the final call; after the switch the redemption and then the USDC transfer as the final call.`
 Fit Criterion: the position record is deleted and both boundary ticks are updated before the first external call, so a recipient re-entering through the ERC-1155 receive hook finds no live position. The amounts are computable before the merge, because the burn computes the free pairs from view reads before any effect and the ConditionalTokens contract pays exactly that many USDC and burns that many of each token; the merge receives the number the burn computed, never a fresh read, because after the ledger debit the exiting position's own band would count as free (FEAT-6HBN ADR-DFE2). After the switch the amounts are computable before the redemption, because `redeemPositions` pays exactly `balance × numerator ÷ denominator` per side, rounded down, which `_atPayout` reproduces.
 
 **NFR-7G5A** Security: `The system shall use the inline _safeTransfer helper for the USDC payout, the ConditionalTokens safeTransferFrom for an outcome-token payout before the switch, and the ConditionalTokens redeemPositions after it, importing no SafeERC20 implementation.`
@@ -157,10 +152,10 @@ Fit Criterion: the position record is deleted and both boundary ticks are update
 Fit Criterion: an LP completes `burnPosition` in a vault whose entire operator set the Admin removed.
 
 **NFR-7G5C** Gas: `When an LP burns a single position, including tick deinitialization, a merge of pairs, and both transfers, the total gas shall remain below 250,000 gas against the mock USDC.`
-Rationale: measured cold on the prototype at 103,318 to 162,900 call gas, plus the 21,000 base. Measured cold on the R13 prototype on 2026-09-14, with the vault, the factory, the ConditionalTokens contract, and the USDC mock all cold: 203,449 for a burn before the switch that pays USDC plus YES in kind (200,777 before R13, so the switch read costs about 2,650), 167,974 for a burn after the switch with nothing to redeem, and 233,488 for a burn after the switch that redeems 5 YES and 5 NO that arrived late. Re-measured on the R14 build (2026-09-14): 246,913 for a burn before the switch with a merge of 50 free pairs and both legs, up from 244,339 for the two ledger reads of the free-pairs rule. The forked-Polygon test in Part 6 measures the real USDC.
+Rationale: measured cold on the prototype at 103,318 to 162,900 call gas, plus the 21,000 base. Measured cold on the R13 prototype on 2026-09-14, with the vault, the factory, the ConditionalTokens contract, and the USDC mock all cold: 203,449 for a burn before the switch that pays USDC plus YES in kind (200,777 before R13, so the switch read costs about 2,650), 167,974 for a burn after the switch with nothing to redeem, and 233,488 for a burn after the switch that redeems 5 YES and 5 NO that arrived late. Re-measured on the R14 build (2026-09-14): 246,913 for a burn before the switch with a merge of 50 free pairs and both legs, up from 244,339 for the two ledger reads of the free-pairs rule. Measured cold on the R17 build (2026-09-14): a burn paying all USDC costs 125,295 gas and a burn paying USDC plus YES 169,320, against 140,706 and 188,800 on the R16 build with the same probe, so the bound holds with more room. The forked-Polygon test in Part 6 measures the real USDC.
 
 **NFR-7G5D** Security: `burnPositionFor shall carry an OPERATOR TRUST ASSUMPTION NatSpec block including an MEV analysis section.`
-Fit Criterion: the block states that the Operator can censor, reorder, or delay a relayed exit and chooses which block it lands in, so which `currentTick` values the claim, bounded by the deadline the LP signed; that it cannot start a burn without the owner key's `BurnIntent`, cannot replay a mint, reclaim, or collect signature, cannot redirect the payout, and cannot burn a position for another Safe; and that the LP's remedy is `burnPosition`. The MEV analysis states that the burn reads a price but places no order and moves no tick, so no third party can sandwich it.
+Fit Criterion: the block states that the Operator can censor, reorder, or delay a relayed exit and chooses which block it lands in, so which `currentTick` values the claim, bounded by the deadline the LP signed; that it cannot start a burn without the owner key's `BurnIntent`, cannot replay a mint or reclaim signature, cannot redirect the payout, and cannot burn a position for another Safe; and that the LP's remedy is `burnPosition`. The MEV analysis states that the burn reads a price but places no order and moves no tick, so no third party can sandwich it.
 
 ## Acceptance
 
@@ -174,10 +169,9 @@ Fit Criterion: the block states that the Operator can censor, reorder, or delay 
 - After the switch a burn pays the winning leg at par, the losing leg nothing, and a cancelled market's leg at half, in one USDC transfer with no ERC-1155 transfer; before the switch it pays the token in kind, resolved or not
 - Burning the last position at a tick deletes the tick and clears its bitmap bit
 - `activeLiquidity` decreases only for positions that were in range
-- Accrued fees ride the USDC leg in the same call
 - A burned positionId is never reassigned
 - `burnPosition` succeeds with zero registered operators, with no declared emergency, and in Active and WindDown
-- A non-owner cannot burn through either entry point, and a `MintIntent`, `ReclaimIntent`, or `CollectIntent` signature is rejected by `burnPositionFor`
+- A non-owner cannot burn through either entry point, and a `MintIntent` or `ReclaimIntent` signature is rejected by `burnPositionFor`
 - `burnPositionFor` refreshes `lastOperatorActivityTimestamp`; `burnPosition` does not
 - OPERATOR TRUST ASSUMPTION NatSpec block with an MEV analysis present on `burnPositionFor`
 - Inline nonReentrant guard on both entry points; checks-effects-interactions ordering with the ERC-1155 transfer last before the switch and the USDC transfer last after it

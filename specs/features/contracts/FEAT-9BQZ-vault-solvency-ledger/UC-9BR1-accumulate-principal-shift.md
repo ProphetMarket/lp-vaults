@@ -3,7 +3,7 @@ id: UC-9BR1
 name: Accumulate Principal Shift
 feature: FEAT-9BQZ
 status: implemented
-version: 2
+version: 3
 actor: Operator
 ---
 
@@ -46,7 +46,6 @@ Operator calls `updateTick(newTick)` with a tick different from `currentTick`.
 
 **Side Effects:**
 - `totalUsdcOwedScaled`, `totalYesOwedScaled`, `totalNoOwedScaled` storage: each written once with the sum of its segment deltas
-- `ticks[6000].feeGrowthOutsideX128` and `ticks[5800].feeGrowthOutsideX128` storage: flipped
 - `activeLiquidity` storage: 9e23; `noSideLiquidity` storage: 0
 - `currentTick` storage: 5700
 - `TickUpdated(6000, 5700, 2)` emitted
@@ -72,7 +71,7 @@ Operator calls `updateTick(newTick)` with a tick different from `currentTick`.
 
 **Side Effects:**
 - `totalNoOwedScaled` and `totalUsdcOwedScaled` storage: shifted once per call
-- No tick crossed, so no `feeGrowthOutsideX128` write, no `activeLiquidity` write, and no `noSideLiquidity` write
+- No tick crossed, so no `activeLiquidity` write and no `noSideLiquidity` write
 - `TickUpdated(6000, 6300, 0)` then `TickUpdated(6300, 6100, 0)` emitted
 
 ---
@@ -124,7 +123,7 @@ Operator calls `updateTick(newTick)` with a tick different from `currentTick`.
 ### SC-COEQ: Three chunks equal one call, and a reversal restores the mint totals
 
 **Given:**
-- Position A alone, the vault at 6000, the four scaled totals at their mint values
+- Position A alone, the vault at 6000, the three scaled totals at their mint values
 
 **Steps:**
 1. Operator calls `updateTick(5700)` and the totals read the SC-7G44 claim
@@ -158,7 +157,6 @@ Operator calls `updateTick(newTick)` with a tick different from `currentTick`.
 - `TickUpdated.ticksCrossed` counts the mint tick each time
 
 **Side Effects:**
-- `ticks[6000].feeGrowthOutsideX128` storage: flipped on each crossing, which no position reads, because no position bounds tick 6000
 - `noSideLiquidity` storage: 0 after step 1, 3e23 after step 3
 - `TickUpdated(6000, 5990, 1)` then `TickUpdated(5990, 6000, 1)` emitted
 

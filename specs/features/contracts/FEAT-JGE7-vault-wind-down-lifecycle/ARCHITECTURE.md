@@ -3,7 +3,7 @@ id: FEAT-JGE7
 name: Vault Wind-Down Lifecycle
 use_cases: [UC-JGEE]
 scenarios: [SC-JGEF, SC-JGEG, SC-JGEH, SC-JGEI, SC-JGEJ, SC-JGEK]
-last_update: 2026-09-13
+last_update: 2026-09-14
 ---
 
 # Architecture: Vault Wind-Down Lifecycle
@@ -16,12 +16,12 @@ last_update: 2026-09-13
 C4Context
     title Vault Wind-Down Lifecycle -- System Context
     Person(oracle, "Oracle", "Transitions vault phase when market resolves")
-    Person(lp, "LP", "Exits positions via burn/collect/reclaim")
+    Person(lp, "LP", "Exits positions via burn/reclaim")
     Person(operator, "Operator", "Mint paths gated off in WindDown")
     System(vault, "LPVault (clone)", "Per-market vault with phase state machine")
     System(factory, "LPVaultFactory", "Oracle authorization delegation")
     Rel(oracle, vault, "startWindDown()", "contract call")
-    Rel(lp, vault, "collect/burnPosition/reclaimDeposit", "contract call")
+    Rel(lp, vault, "burnPosition/reclaimDeposit", "contract call")
     Rel(operator, vault, "depositForIntent and mintPositionFor (revert in WindDown)", "contract call")
     Rel(vault, factory, "onlyOracle check", "cross-contract call")
 ```
@@ -55,7 +55,7 @@ erDiagram
 **Invariants:**
 - `phase` transitions only from Active(1) to WindDown(2) -- never reverses
 - Once `phase == WindDown`, `depositForIntent` and `mintPositionFor` always revert (the `VaultNotActive` guard at the top of each)
-- Once `phase == WindDown`, `collect`, `collectFor`, `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, and `mergeCompleteSets` continue to succeed, and `depositForIntent` reverts
+- Once `phase == WindDown`, `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, and `mergeCompleteSets` continue to succeed, and `depositForIntent` reverts
 - `startWindDown()` is callable only by the Oracle and only when `phase == Active`
 
 ## Component Inventory
@@ -108,7 +108,7 @@ stateDiagram-v2
     s1 --> s2 : startWindDown() by Oracle
     note right of s2 : No reverse transition
     note right of s2 : Mints blocked
-    note right of s2 : Burns/collects/reclaims allowed
+    note right of s2 : Burns/reclaims allowed
 ```
 
 ## Code Map
@@ -123,7 +123,7 @@ stateDiagram-v2
 | SC-JGEH | Revert when non-Oracle calls | `src/LPVault.sol:startWindDown()`, `src/LPVaultFactory.sol:oracle()` |
 | SC-JGEI | depositForIntent reverts in WindDown | `src/LPVault.sol:depositForIntent()` (phase guard) |
 | SC-JGEJ | mintPositionFor reverts in WindDown | `src/LPVault.sol:mintPositionFor()` |
-| SC-JGEK | Exit paths succeed in WindDown | `src/LPVault.sol:collect()`, `src/LPVault.sol:burnPosition()`, `src/LPVault.sol:reclaimDeposit()`, `src/LPVault.sol:reclaimDepositFor()`, `src/LPVault.sol:depositForIntent()` (VaultNotActive) |
+| SC-JGEK | Exit paths succeed in WindDown | `src/LPVault.sol:burnPosition()`, `src/LPVault.sol:reclaimDeposit()`, `src/LPVault.sol:reclaimDepositFor()`, `src/LPVault.sol:depositForIntent()` (VaultNotActive) |
 
 ## Architecture Decisions
 

@@ -6,4 +6,4 @@
 
 | ID | Name | Status | Description | File |
 |----|------|--------|-------------|------|
-| UC-TVS1 | Update Current Tick | implemented | Operator synchronizes the vault's price tick with the off-chain CLOB mid-price, crossing initialized ticks to maintain correct fee distribution | [UC-TVS1-update-current-tick.md](UC-TVS1-update-current-tick.md) |
+| UC-TVS1 | Update Current Tick | implemented | Operator synchronizes the vault's price tick with the off-chain CLOB mid-price, crossing initialized ticks to keep the claim model's liquidity split correct | [UC-TVS1-update-current-tick.md](UC-TVS1-update-current-tick.md) |

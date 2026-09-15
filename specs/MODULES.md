@@ -7,4 +7,4 @@
 
 | ID | Module | Description | Directory | Tests | Driving Ports |
 |----|--------|-------------|-----------|-------|---------------|
-| contracts | LP Vault Contracts | Solidity smart contracts: LPVaultFactory (EIP-1167 clone deployer + registry), LPVault (per-market vault with v3-style positions and fee accumulators), and supporting libraries (Tick, Position, TickBitmap) | `.` | `test/features` | contract-call |
+| contracts | LP Vault Contracts | Solidity smart contracts: LPVaultFactory (EIP-1167 clone deployer + registry), LPVault (per-market vault with v3-style positions and a solvency ledger), and supporting libraries (Tick, Position, TickBitmap) | `.` | `test/features` | contract-call |

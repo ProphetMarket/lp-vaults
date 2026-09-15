@@ -4,22 +4,20 @@ name: Mint LP Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 6
+version: 7
 refs: [FEAT-REPZ, FEAT-3ZRI, FEAT-JAIJ]
 ---
 
 # Mint LP Position
 
-> Enables operator-gated creation of concentrated-liquidity LP positions that consume a per-intent escrow, with v3-style tick initialization and fee-snapshot anchoring to prevent retroactive fee claims.
+> Enables operator-gated creation of concentrated-liquidity LP positions that consume a per-intent escrow, with v3-style tick initialization and a clamped mint tick on every position.
 
 ## Non-Goals
 
-- Does not handle fee collection -- see feature 5
 - Does not handle position burning -- see feature 6
 - Does not take USDC or verify a signature -- the escrow does both, see FEAT-3ZRI
 - Does not refund an escrow -- see FEAT-JAIJ
 - Does not handle tick crossing / updateTick -- see feature 4
-- Does not handle fee notification / notifyFees -- see feature 3
 - Does not handle vault wind-down or emergency cancel -- see feature 8
 - Does not manage vault-level role registries -- see FEAT-REPZ
 
@@ -34,8 +32,8 @@ refs: [FEAT-REPZ, FEAT-3ZRI, FEAT-JAIJ]
 
 ### Position Creation
 
-**FR-T7AS** `When the Operator submits a mint intent whose escrow the vault holds for the named Safe, the system shall consume that escrow, subtract its amount from totalEscrowed, compute liquidity as usdcAmount * PRECISION / (tickUpper - tickLower), create a position record owned by the Safe with a feeGrowthInsideLastX128 snapshot and the clamped mintTick, and emit a PositionMinted event that carries the mintTick.`
-Fit Criterion: Given an escrowed intent, the vault's USDC balance does not change, `pendingDeposits[intentId]` is deleted, `totalEscrowed` falls by the escrowed amount, a position record exists at the assigned positionId with owner = the Safe and correct tickLower, tickUpper, mintTick, liquidity, and feeGrowthInsideLastX128, and a PositionMinted event is emitted with the correct fields, mintTick included.
+**FR-T7AS** `When the Operator submits a mint intent whose escrow the vault holds for the named Safe, the system shall consume that escrow, subtract its amount from totalEscrowed, compute liquidity as usdcAmount * PRECISION / (tickUpper - tickLower), create a position record owned by the Safe with the clamped mintTick, and emit a PositionMinted event that carries the mintTick.`
+Fit Criterion: Given an escrowed intent, the vault's USDC balance does not change, `pendingDeposits[intentId]` is deleted, `totalEscrowed` falls by the escrowed amount, a position record exists at the assigned positionId with owner = the Safe and correct tickLower, tickUpper, mintTick, and liquidity, and a PositionMinted event is emitted with the correct fields, mintTick included.
 Linked to: UC-T7AG
 
 **FR-3Z9W** `If the Operator submits a mint intent whose recomputed struct hash (lp, tickLower, tickUpper, usdcAmount, intentId, deadline) does not equal the hash recorded in the intent's escrow, then the system shall revert.`
@@ -50,19 +48,11 @@ Linked to: UC-T7AG
 Fit Criterion: The mint performs no external call at all. The escrow is deleted in the same call that reads it, so a reclaim of the same intentId after the mint reverts (ADR-JAIY).
 Linked to: UC-T7AG
 
-**FR-T7AT** `When a position is minted, the system shall set feeGrowthInsideLastX128 to the current feeGrowthInside computed for the position's [tickLower, tickUpper] range, preventing the position from claiming pre-existing fees.`
-Fit Criterion: Given a position minted at time T with accumulated feeGrowthGlobalX128 = G, the position's tokensOwed is 0 immediately after minting, and fees distributed before T produce zero claimable tokens for this position.
-Linked to: UC-T7AG
-
 **FR-AFPO** `When a position is minted, the system shall record mintTick as currentTick clamped into the position's range: tickLower when currentTick < tickLower, tickUpper when currentTick > tickUpper, and currentTick otherwise.`
 Fit Criterion: Given currentTick = 50, a mint over [20, 80) stores mintTick = 50, a mint over [60, 90) stores mintTick = 60, and a mint over [0, 30) stores mintTick = 30. The stored value never changes after the mint. The `PositionMinted` event carries the stored value. The mint tick anchors which levels of the range hold USDC and which hold outcome tokens under the claim model (decision C26 in `audits/audit-fixes-ranged.md`), and `mergePositions` requires it equal across merged positions (FEAT-K1M2, FR-AFPT). The clamp is the user's choice of 2026-09-12 (ADR-AFPP).
 Linked to: UC-T7AG
 
 ### Tick State
-
-**FR-T7AU** `When a position references a tick with liquidityGross == 0, the system shall initialize the tick's feeGrowthOutsideX128 to feeGrowthGlobalX128 if tick <= currentTick, else to 0.`
-Fit Criterion: Given a freshly initialized tick at or below currentTick, feeGrowthOutsideX128 == feeGrowthGlobalX128. Given a tick above currentTick, feeGrowthOutsideX128 == 0.
-Linked to: UC-T7AG
 
 **FR-T7AV** `When a position is minted, the system shall increment liquidityGross on both tickLower and tickUpper by the position's liquidity, add the position's liquidity to liquidityNet on tickLower, subtract it from liquidityNet on tickUpper, book the position's NO sub-range [mintTick, tickUpper) by adding its liquidity to noLiquidityNet on mintTick and subtracting it on tickUpper, and, when mintTick lies strictly inside the range, initialize mintTick and increment its liquidityGross by the position's liquidity.`
 Fit Criterion: Given a mint with liquidity L, ticks[tickLower].liquidityGross increases by L, ticks[tickLower].liquidityNet increases by L, ticks[tickUpper].liquidityGross increases by L, ticks[tickUpper].liquidityNet decreases by L; when mintTick < tickUpper, ticks[mintTick].noLiquidityNet increases by L and ticks[tickUpper].noLiquidityNet decreases by L; when tickLower < mintTick < tickUpper, ticks[mintTick].liquidityGross increases by L and its bitmap bit is set, so `updateTick` crosses it (FEAT-TVS0 ADR-COEW). A mint at its upper bound books no NO sub-range, because that side is empty.
@@ -142,7 +132,6 @@ Linked to: UC-T7AG
 - Non-operator callers cannot mint (FR-RFS6 from FEAT-REPZ verified in scenario SC-T7AN)
 - First mint below minimumFirstLiquidity reverts when nextPositionId == 0, and a later small mint succeeds after activeLiquidity returns to zero (FR-RFS7 from FEAT-REPZ verified in scenarios SC-T7AO and SC-AFPM)
 - Every position records its clamped mintTick and the PositionMinted event carries it (FR-AFPO verified in scenario SC-AFPN)
-- Positions minted at time T cannot claim fees from before T (fuzz test on feeGrowthInsideLastX128 snapshot)
 - Tick initialization is correct for both below-current and above-current ticks (fuzz test)
 - The mint consumes exactly the recorded escrow and reverts `DepositNotEscrowed`, `NotIntentOwner`, and `IntentMismatch` in that order of precedence
 - The owner-key signature check at the deposit rejects malleability and a key that derives a different Safe

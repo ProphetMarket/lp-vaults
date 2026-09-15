@@ -17,12 +17,12 @@ C4Context
     title Emergency Cancel All Positions -- System Context
     Person(anyone, "Any address", "Freezes the vault after operator silence")
     Person(operator, "Operator", "Activity resets silence timer")
-    Person(lp, "LP Safe", "Exits alone after the freeze through the burn, the collect, or the reclaim")
+    Person(lp, "LP Safe", "Exits alone after the freeze through the burn or the reclaim")
     System(vault, "LPVault (clone)", "Per-market vault with the freeze, the silence timer, and the terminal state")
     System(factory, "LPVaultFactory", "Holds the default emergency-cancel timelock that each vault copies at creation")
     Rel(anyone, vault, "emergencyCancelAll()", "contract call")
     Rel(operator, vault, "any Operator call or heartbeat() (refreshes timer)", "contract call")
-    Rel(lp, vault, "burnPosition / collect / reclaimDeposit after the freeze", "contract call")
+    Rel(lp, vault, "burnPosition / reclaimDeposit after the freeze", "contract call")
     Rel(vault, factory, "defaultEmergencyCancelTimelock() read once at initialize()", "view call")
 ```
 
@@ -54,7 +54,7 @@ erDiagram
     POSITION {
         uint256 id PK "0..nextPositionId-1"
         address owner "exits alone after the freeze"
-        uint128 liquidity "unchanged by the freeze; paid by the burn, the collect, or the reclaim"
+        uint128 liquidity "unchanged by the freeze; paid by the burn or the reclaim"
     }
 ```
 
@@ -63,7 +63,7 @@ erDiagram
 - Once `phase == 3`, every trading entry point reverts, and every LP exit and the complete-set merge succeed and pay in full
 - `emergencyCancelTimelock` is written once, at `initialize`, and never again
 - `lastOperatorActivityTimestamp` increases monotonically (reset = set to current block.timestamp)
-- The freeze writes `phase` and nothing else, so `activeLiquidity` equals the in-range position liquidity in phase 3 as in every phase (`invariant_activeLiquidityEqualsInRangeLiquidity` in `test/invariants/TickState.t.sol`), and the four totals of the solvency ledger equal the sum of the live claims after it (FEAT-9BQZ SC-COEP, `invariant_ledgerEqualsSumOfClaims`)
+- The freeze writes `phase` and nothing else, so `activeLiquidity` equals the in-range position liquidity in phase 3 as in every phase (`invariant_activeLiquidityEqualsInRangeLiquidity` in `test/invariants/TickState.t.sol`), and the three totals of the solvency ledger equal the sum of the live claims after it (FEAT-9BQZ SC-COEP, `invariant_ledgerEqualsSumOfClaims`)
 
 ## Component Inventory
 
@@ -87,7 +87,7 @@ erDiagram
 
 **Non-events (explicit):**
 - Failed `emergencyCancelAll` (timelock not elapsed, already Cancelled): no events emitted
-- The freeze: no `Transfer`, no `PositionBurned`, no `FeesCollected`
+- The freeze: no `Transfer`, no `PositionBurned`
 - State-changing trading calls after the Cancelled phase: no events emitted (revert)
 
 ## API Surface
@@ -103,7 +103,7 @@ erDiagram
 
 > External services, event streams, and infrastructure dependencies.
 
-**Not applicable:** the freeze makes no external call. The exits it enables have their own tables in FEAT-7G40, FEAT-U079, FEAT-JAIJ, and FEAT-6HBN.
+**Not applicable:** the freeze makes no external call. The exits it enables have their own tables in FEAT-7G40, FEAT-JAIJ, and FEAT-6HBN.
 
 ## State Transitions
 
@@ -134,7 +134,7 @@ stateDiagram-v2
 | SC-BZBW | Any address freezes the vault | `src/LPVault.sol:emergencyCancelAll()` |
 | SC-BZBX | An in-range burn after the freeze pays in full | `src/LPVault.sol:emergencyCancelAll()`, `src/LPVault.sol:burnPosition()`, `src/LPVault.sol:_burn()` |
 | SC-JXR1 | Terminal state gates operations | `src/LPVault.sol:emergencyCancelAll()`, phase guards on all functions |
-| SC-JXR2 | Operator activity resets timelock | `src/LPVault.sol:touchesHeartbeat`, `src/LPVault.sol:notifyFees()`, `src/LPVault.sol:updateTick()` |
+| SC-JXR2 | Operator activity resets timelock | `src/LPVault.sol:touchesHeartbeat`, `src/LPVault.sol:updateTick()` |
 | SC-3XTZ | Heartbeat defers emergency cancel | `src/LPVault.sol:heartbeat()`, `src/LPVault.sol:updateTick()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-3XU0 | Mint and merge reset the timelock | `src/LPVault.sol:mintPositionFor()`, `src/LPVault.sol:mergePositions()`, `src/LPVault.sol:touchesHeartbeat` |
 | SC-3XU1 | Non-Operator cannot heartbeat | `src/LPVault.sol:heartbeat()`, `src/LPVault.sol:onlyOperator` |
@@ -166,7 +166,7 @@ In the context of who can trigger the emergency cancel, facing the choice betwee
 Superseded on 2026-09-13 (audit issues 6.7, 6.11, and 6.17, decision C9 in `audits/audit-fixes-ranged.md`): the freeze (ADR-BZBY) is open to any address. The ownership check was the same unbounded loop that audit issue 6.11 names, and once the function moves no funds, caller identity protects nothing (audit-solutions.md, Finding 4).
 
 **ADR-BZBY:** The emergency cancel is an O(1) freeze that any address may call after the timelock
-In the context of the emergency exit after Operator silence, facing three audit issues that share one cause (a loop that pays everyone in one call: a pending escrow has no position so the loop skipped it (6.7), a large vault ran out of gas (6.11), and one USDC-blacklisted owner reverted the payment for everyone (6.17)), we decided that `emergencyCancelAll` is an O(1) freeze that any address may call after the vault's emergency-cancel timelock, which writes `phase = 3` and nothing else, so that each LP exits alone through the paths that work in every phase (`burnPosition`, `burnPositionFor`, `collect`, `collectFor`, `reclaimDeposit`, `reclaimDepositFor`, and `mergeCompleteSets`, opened by R5 and R9), accepting that an LP must send one transaction to leave (the app relays it, or the Safe sends it) and that the freeze keeps `activeLiquidity` and every record, which the burn's checked arithmetic (`activeLiquidity -= liquidity`) and the claim model both require. The freeze carries no `nonReentrant`, because it makes no external call and moves no token, which is the condition under which `CLAUDE.md` checklist item 1 requires the guard, and the other phase flips (`startWindDown`, `pauseTrading`, `heartbeat`) carry none either. The user chose this on 2026-09-13.
+In the context of the emergency exit after Operator silence, facing three audit issues that share one cause (a loop that pays everyone in one call: a pending escrow has no position so the loop skipped it (6.7), a large vault ran out of gas (6.11), and one USDC-blacklisted owner reverted the payment for everyone (6.17)), we decided that `emergencyCancelAll` is an O(1) freeze that any address may call after the vault's emergency-cancel timelock, which writes `phase = 3` and nothing else, so that each LP exits alone through the paths that work in every phase (`burnPosition`, `burnPositionFor`, `collect`, `collectFor`, `reclaimDeposit`, `reclaimDepositFor`, and `mergeCompleteSets`, opened by R5 and R9), accepting that an LP must send one transaction to leave (the app relays it, or the Safe sends it) and that the freeze keeps `activeLiquidity` and every record, which the burn's checked arithmetic (`activeLiquidity -= liquidity`) and the claim model both require. The freeze carries no `nonReentrant`, because it makes no external call and moves no token, which is the condition under which `CLAUDE.md` checklist item 1 requires the guard, and the other phase flips (`startWindDown`, `pauseTrading`, `heartbeat`) carry none either. The user chose this on 2026-09-13. Since 2026-09-14 (step R17) the exits are `burnPosition`, `burnPositionFor`, `reclaimDeposit`, `reclaimDepositFor`, and `mergeCompleteSets`.
 
 **Rejected alternative -- block the cancel while an escrow exists:** the auditors' first option for 6.7. It lets one pending intent hold every LP hostage.
 

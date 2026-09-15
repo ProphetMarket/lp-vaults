@@ -3,7 +3,7 @@ id: FEAT-3ZRI
 name: Escrow Deposit for Mint Intent
 use_cases: [UC-3Z92]
 scenarios: [SC-3Z94, SC-45IB, SC-3Z95, SC-3Z96, SC-3Z97, SC-3Z98, SC-3Z99, SC-3Z9A, SC-3Z9B, SC-9OY9, SC-9OYA, SC-9OYB, SC-9OYC, SC-9OYD]
-last_update: 2026-09-12
+last_update: 2026-09-14
 ---
 
 # Architecture: Escrow Deposit for Mint Intent
@@ -162,7 +162,7 @@ The bare-amount version is unsafe. `intentId` is not bound to any Safe by the si
 The record also holds the intent's struct hash, so the mint can bind the range, the amount, and the deadline without a second signature check (round 2 finding V2-03 of the plan validation).
 
 **ADR-3Z9Z:** Deposit is Operator-executed with no permissionless fallback
-In the context of where the escrow step sits relative to the Operator chokepoint, facing the project-wide policy that the Operator mediates every value-moving action to block front-running and inflation attacks (an attacker seeding a tiny position ahead of a real LP's deposit to skew tick-initialization and fee-growth state in their own favor), we decided to gate `depositForIntent` with `onlyOperator` and deliberately ship no direct-LP twin, to achieve one consistent chokepoint across the whole entry path, accepting that an uncooperative Operator can refuse to onboard an LP. That refusal is benign in a way an exit-path refusal is not: nothing is pulled until `depositForIntent` runs, so the LP's funds stay in the LP's own Safe and there is nothing to rescue. Every exit path (reclaim, and later burn and collect) still ships a permissionless direct-call twin, because there the funds are already inside the vault.
+In the context of where the escrow step sits relative to the Operator chokepoint, facing the project-wide policy that the Operator mediates every value-moving action to block front-running and inflation attacks (an attacker seeding a tiny position ahead of a real LP's deposit to skew tick-initialization and fee-growth state in their own favor), we decided to gate `depositForIntent` with `onlyOperator` and deliberately ship no direct-LP twin, to achieve one consistent chokepoint across the whole entry path, accepting that an uncooperative Operator can refuse to onboard an LP. That refusal is benign in a way an exit-path refusal is not: nothing is pulled until `depositForIntent` runs, so the LP's funds stay in the LP's own Safe and there is nothing to rescue. Every exit path (reclaim, and later burn and collect) still ships a permissionless direct-call twin, because there the funds are already inside the vault. Since 2026-09-14 (step R17) the exit paths with a direct-call twin are the reclaim and the burn.
 
 ## Testing Decisions
 

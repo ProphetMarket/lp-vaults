@@ -3,7 +3,7 @@ id: UC-9BR0
 name: Maintain Solvency Totals
 feature: FEAT-9BQZ
 status: implemented
-version: 3
+version: 4
 actor: Operator
 ---
 
@@ -15,12 +15,12 @@ actor: Operator
 
 - Vault is deployed and initialized, with its outcome-token identity set (`yesTokenId`, `noTokenId`)
 - The vault's phase is Active unless a scenario states otherwise
-- The four scaled totals and the four truncating getters are readable through public views
+- The three scaled totals and the three truncating getters are readable through public views
 - USDC and every outcome token have six decimals in every amount below
 
 ## Trigger
 
-Any vault operation that creates, discharges, or transforms an obligation: a mint, a burn, a collect, a fee report, a merge, or a freeze. A tick move is the trigger of UC-9BR1.
+Any vault operation that creates, discharges, or transforms an obligation: a mint, a burn, a merge, or a freeze. A tick move is the trigger of UC-9BR1.
 
 ---
 
@@ -37,14 +37,13 @@ Any vault operation that creates, discharges, or transforms an obligation: a min
 
 **Outcomes:**
 - `totalUsdcOwed()` reads 300,000,000, the whole deposit
-- `totalYesOwed()`, `totalNoOwed()`, and `totalFeesOwed()` read zero, because the band is empty at the mint
+- `totalYesOwed()` and `totalNoOwed()` read zero, because the band is empty at the mint
 - Reading a total costs no iteration over `positions`
 
 **Side Effects:**
 - `totalUsdcOwedScaled` storage: increased by `3e23 × 10,000,000`
 - `noSideLiquidity` storage: increased by `3e23`, because an in-range mint enters on the NO side (`mintTick == currentTick`)
 - No token total written
-- No fee total written
 - No price or oracle read
 
 ---
@@ -67,77 +66,26 @@ Any vault operation that creates, discharges, or transforms an obligation: a min
 
 **Side Effects:**
 - `totalUsdcOwedScaled` and `totalYesOwedScaled` storage: each decreased by the scaled claim
-- `totalFeesOwedX128` storage: decreased by the position's scaled fee claim in the same call
 - `noSideLiquidity` storage: unchanged, because the position sat on the YES side of its mint tick at 5700
-- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted
 
 ---
 
-### SC-9BS1: A collect leaves the principal totals unchanged and settles the fee total
+### SC-9BS6: A merge leaves every total unchanged
 
 **Given:**
-- The position of SC-9BRZ is live and in range, and the Operator reported 10 USDC of fees over it
-- `totalFeesOwed()` reads 10,000,000 less the mulDiv dust
-
-**Steps:**
-1. The Safe calls `collect` for the position
-2. System pays the fees and leaves the position open
-3. System debits `totalFeesOwedX128` by the position's full scaled fee claim
-
-**Outcomes:**
-- `totalUsdcOwedScaled`, `totalYesOwedScaled`, and `totalNoOwedScaled` read identically before and after
-- `totalFeesOwedX128` reads zero, because the position was the only in-range claim
-- The position keeps its liquidity, its range, and its mint tick, so its principal claim is unchanged
-
-**Side Effects:**
-- `totalFeesOwedX128` storage: decreased by `liquidity × (feeGrowthInside − feeGrowthInsideLast) + tokensOwed × 2^128`
-- No principal total written
-- No `activeLiquidity` or `noSideLiquidity` write
-- No tick state write
-
----
-
-### SC-9BS2: A fee report credits the fee total by what the in-range positions can claim
-
-**Given:**
-- The position of SC-9BRZ is live and in range, so `activeLiquidity == 3e23`
-- `totalFeesOwedX128` is zero
-
-**Steps:**
-1. Operator calls `notifyFees(10e6)`
-2. System computes `growth = mulDiv(10e6, 2^128, 3e23)` and adds it to `feeGrowthGlobalX128`
-3. System raises `totalFeesOwedX128` by `growth × 3e23`
-
-**Outcomes:**
-- `totalFeesOwed()` reads 10,000,000 less the mulDiv dust, which stays in the vault outside every total
-- The credit equals what the in-range positions' fee claims grew by, so a collect of every in-range position would bring the total back to zero
-
-**Side Effects:**
-- `totalFeesOwedX128` storage: increased by `growth × activeLiquidity`
-- No principal total written
-- `FeesNotified(10000000, feeGrowthGlobalX128)` emitted
-
----
-
-### SC-9BS6: A merge leaves the principal totals unchanged and debits the fee dust
-
-**Given:**
-- Two live positions of the same Safe over `[5500, 6500)` minted at 6000, with liquidities whose fee products `liquidity × (feeGrowthInside − feeGrowthInsideLast)` do not divide by 2^128
+- Two live positions of the same Safe over `[5500, 6500)` minted at 6000
 - Every total at a known value
 
 **Steps:**
 1. Operator calls `mergePositions` for the two positions
-2. System computes each position's fee product once, floors it into the survivor's `tokensOwed`, and sums the two remainders modulo 2^128
-3. System debits `totalFeesOwedX128` by that sum
+2. System sums the liquidity into the survivor and zeroes the consumed record's liquidity
 
 **Outcomes:**
 - `totalUsdcOwedScaled`, `totalYesOwedScaled`, and `totalNoOwedScaled` read identically before and after, because the claim is linear in liquidity and both positions share the range and the mint tick
-- The survivor's `tokensOwed` is the sum of the two floors
-- `totalFeesOwedX128` falls by the two remainders, so it still equals the survivor's scaled fee claim `survivor.liquidity × 0 + tokensOwed × 2^128`
 
 **Side Effects:**
-- `totalFeesOwedX128` storage: decreased by `Σ (liquidity × delta) mod 2^128` over both positions
-- No principal total written
+- No total written
 - No token transfer
 - `PositionsMerged(positionIds, survivorId)` emitted
 
@@ -180,7 +128,7 @@ Any vault operation that creates, discharges, or transforms an obligation: a min
 - A ledger held in truncated units would have drifted by up to one unit per booking; the scaled unit cancels exactly (FR-9BR4)
 
 **Side Effects:**
-- The four scaled totals storage: back at zero
+- The three scaled totals storage: back at zero
 - `PositionBurned` emitted with the claim at 6120
 
 ---
@@ -188,8 +136,8 @@ Any vault operation that creates, discharges, or transforms an obligation: a min
 ### SC-COEP: The freeze leaves every total unchanged
 
 **Given:**
-- Two live positions, one in range on the NO side of its mint tick, with fees reported
-- The four scaled totals and `noSideLiquidity` at known nonzero values
+- Two live positions, one in range on the NO side of its mint tick
+- The three scaled totals and `noSideLiquidity` at known nonzero values
 - The Operator has been silent for the vault's emergency-cancel timelock
 
 **Steps:**
@@ -197,7 +145,7 @@ Any vault operation that creates, discharges, or transforms an obligation: a min
 2. System sets the phase to Cancelled and changes nothing else (FEAT-JXQO FR-JXQP)
 
 **Outcomes:**
-- `totalUsdcOwedScaled`, `totalYesOwedScaled`, `totalNoOwedScaled`, `totalFeesOwedX128`, and `noSideLiquidity` read as before
+- `totalUsdcOwedScaled`, `totalYesOwedScaled`, `totalNoOwedScaled`, and `noSideLiquidity` read as before
 - A burn after the freeze debits the totals as in Active phase
 
 **Side Effects:**

@@ -4,17 +4,17 @@ name: Pause Trading
 module: contracts
 domain: "@vault"
 status: implemented
-version: 2
+version: 3
 refs: [FEAT-REPZ]
 ---
 
 # Pause Trading
 
-> Admin-callable circuit breaker that halts all vault trading entry points (mintPositionFor, notifyFees, updateTick, mergePositions) while keeping LP exit paths (collect, reclaimDeposit) live so capital is never trapped.
+> Admin-callable circuit breaker that halts all vault trading entry points (depositForIntent, mintPositionFor, updateTick, mergePositions) while keeping LP exit paths (burnPosition, reclaimDeposit) live so capital is never trapped.
 
 ## Non-Goals
 
-- Does not pause `collect` or `reclaimDeposit` -- LP exit paths are always open
+- Does not pause `burnPosition` or `reclaimDeposit` -- LP exit paths are always open
 - Does not pause `emergencyCancelAll` -- the safety net must work even when paused
 - Does not auto-unpause -- Admin must explicitly call `unpauseTrading()`
 
@@ -32,8 +32,8 @@ refs: [FEAT-REPZ]
 Fit Criterion: Given an unpaused vault, after `pauseTrading()`, `paused == true` and `TradingPaused(caller)` emitted.
 Linked to: UC-K1MK
 
-**FR-K1MF** `While the vault is paused, when any address calls mintPositionFor, notifyFees, updateTick, or mergePositions, the system shall revert.`
-Fit Criterion: Given paused vault, all four functions revert.
+**FR-K1MF** `While the vault is paused, when any address calls mintPositionFor, updateTick, or mergePositions, the system shall revert.`
+Fit Criterion: Given paused vault, all three functions revert.
 Linked to: UC-K1MK
 
 ### Unpause
@@ -50,8 +50,8 @@ Linked to: UC-K1MK
 
 ### LP Exit Paths
 
-**FR-K1MI** `While the vault is paused, when the position owner calls collect, or the recorded Safe calls reclaimDeposit, or the Operator calls reclaimDepositFor, the system shall succeed.`
-Fit Criterion: Given a paused vault with an existing position and an escrow, `collect`, `reclaimDeposit`, and `reclaimDepositFor` succeed, while `depositForIntent` reverts `TradingIsPaused`.
+**FR-K1MI** `While the vault is paused, when the position owner calls burnPosition, or the recorded Safe calls reclaimDeposit, or the Operator calls reclaimDepositFor, the system shall succeed.`
+Fit Criterion: Given a paused vault with an existing position and an escrow, `burnPosition` (FEAT-7G40 SC-7G49 case C), `reclaimDeposit`, and `reclaimDepositFor` succeed, while `depositForIntent` reverts `TradingIsPaused`.
 Linked to: UC-K1MK
 
 ## Non-Functional Requirements
@@ -65,7 +65,7 @@ Linked to: UC-K1MK
 - All UC scenarios pass with full coverage
 - Admin can pause and unpause
 - Trading functions revert while paused
-- LP exit paths (collect, reclaimDeposit) succeed while paused
+- LP exit paths (burnPosition, reclaimDeposit) succeed while paused
 - Non-Admin callers rejected
 - Pause is independent of phase state machine
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`

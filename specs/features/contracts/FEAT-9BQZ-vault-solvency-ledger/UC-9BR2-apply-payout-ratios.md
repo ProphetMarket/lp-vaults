@@ -3,7 +3,7 @@ id: UC-9BR2
 name: Apply Payout Ratios
 feature: FEAT-9BQZ
 status: implemented
-version: 4
+version: 5
 actor: LP
 ---
 
@@ -14,34 +14,34 @@ actor: LP
 ## Preconditions
 
 - Vault is deployed and initialized, with its outcome-token identity set
-- The four totals are maintained per UC-9BR0 and UC-9BR1
+- The three totals are maintained per UC-9BR0 and UC-9BR1
 - The Safe holds a live position; unless a scenario says otherwise it is the R9 example (300 USDC over `[5500, 6500)` minted at 6000, `liquidity = 3e23`), and a shortfall is made the way a fill makes one: the exchange's standing approval moves USDC out of the vault
-- No scenario requires the vault to be paused, wound down, or frozen; every payout works the same in every phase (FEAT-7G40 FR-7G4V, FEAT-U079 FR-U07O)
+- No scenario requires the vault to be paused, wound down, or frozen; every payout works the same in every phase (FEAT-7G40 FR-7G4V)
 
 ## Trigger
 
-The Safe calls `burnPosition` or `collect` on a position it owns, or the Operator relays the owner key's `BurnIntent` or `CollectIntent` through `burnPositionFor` or `collectFor`.
+The Safe calls `burnPosition` on a position it owns, or the Operator relays the owner key's `BurnIntent` through `burnPositionFor`.
 
 ---
 
 ### SC-9BSC: A covered vault pays every claim in full
 
 **Given:**
-- The vault at 5700 holds 500 YES and 1,300 USDC against one position owed 247.3545 USDC plus 90 YES, and 9,999,999 units of fees (a 10 USDC report over its liquidity, after the Q128 floor)
+- The vault at 5700 holds 500 YES and 1,300 USDC against one position owed 247.3545 USDC plus 90 YES
 
 **Steps:**
 1. The Safe calls `burnPosition`
 2. System reads the totals and computes the USDC ratio and the YES ratio, both 1
-3. System pays the claim and the fees in full
+3. System pays the claim in full
 
 **Outcomes:**
-- The Safe receives 257,354,499 USDC units and 90 YES
+- The Safe receives 247,354,500 USDC units and 90 YES
 - The vault keeps the 410 YES and the USDC it did not owe: a surplus is never a bonus
 
 **Side Effects:**
 - USDC and YES transferred to the Safe
-- The totals storage: debited by the scaled claim and the scaled fees, to zero
-- `PositionBurned(positionId, safe, 247354500, 9999999, 257354499, yesTokenId, 90000000, 90000000)` emitted
+- The totals storage: debited by the scaled claim, to zero
+- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted
 
 ---
 
@@ -69,7 +69,7 @@ The Safe calls `burnPosition` or `collect` on a position it owns, or the Operato
 
 ---
 
-### SC-9BSE: Escrowed USDC never pays a burn or a collect
+### SC-9BSE: Escrowed USDC never pays a burn
 
 **Given:**
 - The Safe's position is at its mint tick, so its claim is 300 USDC only
@@ -85,7 +85,7 @@ The Safe calls `burnPosition` or `collect` on a position it owns, or the Operato
 - The pending depositor's later reclaim pays the recorded 500 USDC, because escrowed USDC is senior (decision C7) and the reclaim applies no ratio
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 300000000, 0, 0, 0, 0, 0)` emitted
+- `PositionBurned(positionId, safe, 300000000, 0, 0, 0, 0)` emitted
 - No USDC transfer
 - `totalEscrowed` unchanged
 - `totalUsdcOwedScaled` storage: debited by the full scaled claim
@@ -107,7 +107,7 @@ The Safe calls `burnPosition` or `collect` on a position it owns, or the Operato
 - The vault does not report itself covered on the strength of the asset it can pay in full
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 45000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 45000000)` emitted
 - USDC transferred in full; YES transferred at the reduced amount
 - No revert
 
@@ -134,28 +134,6 @@ The Safe calls `burnPosition` or `collect` on a position it owns, or the Operato
 
 ---
 
-### SC-COET: A collect at a ratio pays its share, zeroes tokensOwed, and emits both amounts
-
-**Given:**
-- The Safe's in-range position is owed 10 USDC of fees, and the USDC ratio is 0.4: the vault's USDC above escrow is 40 percent of `totalUsdcOwed() + totalFeesOwed()`
-
-**Steps:**
-1. The Safe calls `collect`
-2. System pays `10 × 0.4 = 4` USDC, sets `tokensOwed` to zero, and debits `totalFeesOwedX128` by the whole scaled claim
-3. The Operator later reports more fees and the Safe collects again
-
-**Outcomes:**
-- The Safe receives 4 USDC, and `positions[positionId].tokensOwed` reads zero
-- The later collect owes only the fees that grew since: the 6 USDC not paid are not owed any more, because a cut is final and the LP chose the moment (ADR-COEN)
-
-**Side Effects:**
-- `FeesCollected(positionId, safe, 10000000, 4000000)` emitted
-- USDC transferred: 4,000,000 units
-- `totalFeesOwedX128` storage: decreased by the full scaled fee claim
-- Position storage: `feeGrowthInsideLastX128` advanced, `tokensOwed = 0`
-
----
-
 ### SC-COEU: A burn debits the full owed amount when it pays less
 
 **Given:**
@@ -171,7 +149,7 @@ The Safe calls `burnPosition` or `collect` on a position it owns, or the Operato
 - `totalUsdcOwed()` and `totalYesOwed()` read zero, not the 47.3545 USDC and 30 YES that went unpaid: no phantom claim lowers the next claimant's ratio
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 0, 200000000, yesTokenId, 90000000, 60000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 200000000, yesTokenId, 90000000, 60000000)` emitted
 - `totalUsdcOwedScaled` and `totalYesOwedScaled` storage: debited by the full scaled claim
 - No revert
 
@@ -191,7 +169,7 @@ The Safe calls `burnPosition` or `collect` on a position it owns, or the Operato
 
 **Outcomes:**
 - Each burn pays `floor(337,354,500 × 641,031,750 ÷ 1,012,063,500) = 213,677,250` USDC units in one transfer, the same ratio each time
-- After the third, `totalUsdcOwed()`, `totalYesOwed()`, and `totalFeesOwed()` read zero and the vault holds `totalEscrowed`
+- After the third, `totalUsdcOwed()` and `totalYesOwed()` read zero and the vault holds `totalEscrowed`
 
 **Side Effects:**
 - Three `PositionBurned` events, each with `usdcPaid + tokenPaid = 213677250`

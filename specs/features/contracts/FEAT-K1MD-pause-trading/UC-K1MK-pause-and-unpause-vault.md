@@ -3,13 +3,13 @@ id: UC-K1MK
 name: Pause and Unpause Vault
 feature: FEAT-K1MD
 status: implemented
-version: 2
+version: 3
 actor: Admin
 ---
 
 # UC-K1MK: Pause and Unpause Vault
 
-> Admin toggles the vault's pause flag to halt all trading entry points as a circuit breaker, while keeping LP exit paths (collect, reclaimDeposit) live so capital is never trapped.
+> Admin toggles the vault's pause flag to halt all trading entry points as a circuit breaker, while keeping LP exit paths (burnPosition, reclaimDeposit) live so capital is never trapped.
 
 ## Preconditions
 
@@ -30,8 +30,7 @@ Admin calls `pauseTrading()` or `unpauseTrading()` on the vault.
 **Steps:**
 1. Admin calls `pauseTrading()`
 2. Operator calls `mintPositionFor(...)` -- reverts
-3. Operator calls `notifyFees(amount)` -- reverts
-4. Operator calls `updateTick(newTick)` -- reverts
+3. Operator calls `updateTick(newTick)` -- reverts
 
 **Outcomes:**
 - All gated functions revert with paused error
@@ -50,7 +49,7 @@ Admin calls `pauseTrading()` or `unpauseTrading()` on the vault.
 
 **Steps:**
 1. Admin calls `unpauseTrading()`
-2. Operator calls `notifyFees(amount)` -- succeeds
+2. Operator calls `updateTick(newTick)` with a changed tick -- succeeds
 
 **Outcomes:**
 - `paused == false`
@@ -77,25 +76,6 @@ Admin calls `pauseTrading()` or `unpauseTrading()` on the vault.
 **Side Effects:**
 - No state change
 - No events emitted
-
----
-
-### SC-K1MO: Collect works while paused
-
-**Given:**
-- Vault is paused
-- LP has a position with accrued fees
-
-**Steps:**
-1. LP calls `collect(positionId)`
-
-**Outcomes:**
-- Fees transferred to LP successfully
-
-**Side Effects:**
-- USDC transferred to LP
-- Position snapshot updated
-- No revert
 
 ---
 

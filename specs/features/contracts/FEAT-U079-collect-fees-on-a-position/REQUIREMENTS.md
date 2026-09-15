@@ -3,12 +3,14 @@ id: FEAT-U079
 name: Collect Fees on a Position
 module: contracts
 domain: "@positions"
-status: implemented
-version: 6
+status: deprecated
+version: 7
 refs: [FEAT-TVS0, FEAT-6HBN, FEAT-3ZRI, FEAT-JAIJ, FEAT-9BQZ]
 ---
 
 # Collect Fees on a Position
+
+Deprecated on 2026-09-14 (step R17 in `audits/audit-fixes-ranged.md`): the Prophet server computes and pays each maker's fees off-chain, so the vault carries no fee accounting. The text below is the audit trail of the deleted code.
 
 > Enables an LP to withdraw accumulated trading fees from their position without removing it, in one call by the LP's Safe or one relayed call with the owner key's signature, using the v3 feeGrowthInside accumulator to compute what is owed, merging the vault's free pairs first and paying its share of what the vault holds above escrow under the solvency ledger (FEAT-9BQZ).
 

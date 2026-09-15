@@ -3,13 +3,13 @@ id: UC-T7AG
 name: Operator Mint Position for LP
 feature: FEAT-T7AF
 status: implemented
-version: 7
+version: 8
 actor: Operator
 ---
 
 # UC-T7AG: Operator Mint Position for LP
 
-> An Operator mints the concentrated-liquidity position that an escrowed mint intent authorizes, initializing tick state and anchoring the fee snapshot so the position earns only future fees.
+> An Operator mints the concentrated-liquidity position that an escrowed mint intent authorizes, with v3-style tick initialization and the clamped mint tick.
 
 ## Preconditions
 
@@ -27,7 +27,7 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 ### SC-T7AH: Successful in-range mint with fresh ticks
 
 **Given:**
-- Vault with currentTick = 50, tickSpacing = 10, feeGrowthGlobalX128 = 1000
+- Vault with currentTick = 50, tickSpacing = 10
 - The Operator escrowed 600 USDC from the LP's Safe against intentId (UC-3Z92), so `pendingDeposits[intentId] = (Safe, 600, hash)` and the vault holds the 600 USDC
 - The MintIntent: lp = the Safe, tickLower = 20, tickUpper = 80, usdcAmount = 600, intentId = unique value, deadline = the signed deadline
 - Ticks 20 and 80 have never been used (liquidityGross == 0 on both)
@@ -37,16 +37,16 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 2. System validates: phase == Active, usdcAmount > 0, tickLower (20) < tickUpper (80), both divisible by tickSpacing (10)
 3. System checks `usedIntents[intentId]` is false, that the escrow's recorded Safe equals `lp`, and that the recorded hash equals the hash recomputed from the six arguments
 4. System records intentId as used, deletes the escrow, and subtracts 600 from totalEscrowed
-5. System initializes tick 20: feeGrowthOutsideX128 = feeGrowthGlobalX128 (1000), since tick 20 <= currentTick (50)
-6. System initializes tick 80: feeGrowthOutsideX128 = 0, since tick 80 > currentTick (50)
+5. System initializes tick 20: sets its bitmap bit
+6. System initializes tick 80: sets its bitmap bit
 7. System updates tick state: liquidityGross += liquidity on ticks 20 and 80; liquidityNet += liquidity on tick 20, liquidityNet -= liquidity on tick 80
 8. System computes liquidity = 600 * PRECISION / (80 - 20)
-9. System creates position at nextPositionId with owner = the Safe, tickLower = 20, tickUpper = 80, mintTick = 50 (currentTick is inside the range, so no clamp), computed liquidity, feeGrowthInsideLastX128 = feeGrowthInside([20, 80]), tokensOwed = 0
+9. System creates position at nextPositionId with owner = the Safe, tickLower = 20, tickUpper = 80, mintTick = 50 (currentTick is inside the range, so no clamp), computed liquidity
 10. System adds liquidity to activeLiquidity (position is in-range: 20 <= 50 < 80)
 11. System makes no external call
 
 **Outcomes:**
-- Position record exists at positionId with owner = the Safe, mintTick = 50, liquidity > 0, feeGrowthInsideLastX128 set
+- Position record exists at positionId with owner = the Safe, mintTick = 50, liquidity > 0
 - The vault's USDC balance is unchanged by the mint
 - `pendingDeposits[intentId]` is deleted and totalEscrowed decreased by 600
 - activeLiquidity increased by the position's liquidity
@@ -55,9 +55,9 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 **Side Effects:**
 - `PositionMinted(positionId, Safe, 20, 80, 50, liquidity, 600, intentId)` event emitted
 - `positions[positionId]` storage: new record created
-- `ticks[20]` storage: initialized with feeGrowthOutsideX128 = feeGrowthGlobalX128, liquidityGross and liquidityNet updated
-- `ticks[80]` storage: initialized with feeGrowthOutsideX128 = 0, liquidityGross and liquidityNet updated, noLiquidityNet decreased by liquidity
-- `ticks[50]` storage (the interior mint tick): initialized with feeGrowthOutsideX128 = feeGrowthGlobalX128, liquidityGross increased by liquidity, noLiquidityNet increased by liquidity, and its bitmap bit set (FEAT-TVS0 ADR-COEW)
+- `ticks[20]` storage: initialized: bitmap bit set, liquidityGross and liquidityNet updated
+- `ticks[80]` storage: initialized: bitmap bit set, liquidityGross and liquidityNet updated, noLiquidityNet decreased by liquidity
+- `ticks[50]` storage (the interior mint tick): initialized: bitmap bit set, liquidityGross increased by liquidity, noLiquidityNet increased by liquidity (FEAT-TVS0 ADR-COEW)
 - `noSideLiquidity` storage: increased by liquidity, because an in-range mint enters on the NO side of its mint tick
 - `totalUsdcOwedScaled` storage (FEAT-9BQZ): increased by liquidity × 60 × 10000
 - `usedIntents[intentId]` storage: set to true
@@ -67,7 +67,6 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 - `activeLiquidity` storage: increased by liquidity
 - `lastOperatorActivityTimestamp` storage: refreshed to `block.timestamp` -- a successful mint is proof the Operator is alive (FEAT-JXQO)
 - No USDC transferred
-- No fee distribution triggered
 - No tick crossing triggered
 
 ---
@@ -75,7 +74,7 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 ### SC-T7AI: Successful out-of-range mint (above current tick)
 
 **Given:**
-- Vault with currentTick = 50, tickSpacing = 10, feeGrowthGlobalX128 = 2000
+- Vault with currentTick = 50, tickSpacing = 10
 - The Operator escrowed 300 USDC from the LP's Safe against a unique intentId, and the MintIntent names the Safe, tickLower = 60, tickUpper = 90, 300, the intentId, and a deadline
 - Ticks 60 and 90 have never been used
 
@@ -83,17 +82,17 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 1. Operator calls `mintPositionFor` with the intent's six fields
 2. System validates inputs and requires the recorded Safe and the recorded hash
 3. System records intentId as used
-4. System initializes tick 60: feeGrowthOutsideX128 = 0 (tick 60 > currentTick 50)
-5. System initializes tick 90: feeGrowthOutsideX128 = 0 (tick 90 > currentTick 50)
+4. System initializes tick 60: sets its bitmap bit
+5. System initializes tick 90: sets its bitmap bit
 6. System updates tick state on both ticks
-7. System computes liquidity and creates position with feeGrowthInsideLastX128 snapshot and mintTick = 60 (currentTick 50 is below tickLower 60, so the mint tick clamps up to tickLower)
+7. System computes liquidity and creates position with mintTick = 60 (currentTick 50 is below tickLower 60, so the mint tick clamps up to tickLower)
 8. System does NOT modify activeLiquidity (currentTick 50 < tickLower 60, position is out-of-range)
 9. System deletes the escrow and subtracts 300 from totalEscrowed; no USDC moves
 
 **Outcomes:**
 - Position exists with owner = the Safe but is out-of-range
 - activeLiquidity unchanged
-- Position will start earning fees when currentTick enters [60, 90) via future updateTick calls
+- Position will enter range when currentTick enters [60, 90) via future updateTick calls
 
 **Side Effects:**
 - `PositionMinted(positionId, Safe, 60, 90, 60, liquidity, 300, intentId)` event emitted
@@ -109,7 +108,7 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 
 **Given:**
 - Vault with currentTick = 50, tickSpacing = 10
-- Tick 20 already initialized with liquidityGross = 100, feeGrowthOutsideX128 = 500 (from a previous mint)
+- Tick 20 already initialized with liquidityGross = 100 (from a previous mint)
 - Tick 60 never used
 - The Operator escrowed 400 USDC from the LP's Safe against a unique intentId, and the MintIntent names the Safe, tickLower = 20, tickUpper = 60, 400, the intentId, and a deadline
 
@@ -117,64 +116,25 @@ Operator calls `mintPositionFor(lp, tickLower, tickUpper, usdcAmount, intentId, 
 1. Operator calls `mintPositionFor` with the intent's six fields
 2. System validates inputs and requires the recorded Safe and the recorded hash
 3. System records intentId as used
-4. System finds tick 20 already initialized (liquidityGross > 0) -- skips feeGrowthOutsideX128 initialization
-5. System initializes tick 60 (feeGrowthOutsideX128 = 0, since 60 > currentTick 50)
+4. System finds tick 20 already initialized (liquidityGross > 0) -- skips tick initialization
+5. System initializes tick 60 (sets its bitmap bit)
 6. System accumulates liquidityGross on tick 20 (existing 100 + new liquidity)
-7. System creates position with feeGrowthInsideLastX128 snapshot and mintTick = 50
+7. System creates position with mintTick = 50
 8. System adds liquidity to activeLiquidity (20 <= 50 < 60)
 9. System deletes the escrow and subtracts 400 from totalEscrowed; no USDC moves
 
 **Outcomes:**
 - Tick 20's liquidityGross increased by the new position's liquidity
-- Tick 20's feeGrowthOutsideX128 unchanged (preserved at 500, not re-initialized)
-- New position created with correct feeGrowthInsideLastX128
+- Tick 20 stays initialized with its liquidityGross increased
+- New position created with mintTick = 50
 
 **Side Effects:**
 - `PositionMinted` event emitted
-- `ticks[20].liquidityGross` storage: increased additively; `feeGrowthOutsideX128` preserved
+- `ticks[20].liquidityGross` storage: increased additively
 - `ticks[60]` storage: initialized
 - Position and intent storage updated
 - `pendingDeposits[intentId]` deleted; `totalEscrowed` decreased by 400
 - No USDC transferred
-
----
-
-### SC-8L1C: Mint over a stale shared tick succeeds
-
-**Given:**
-- Vault with tickSpacing = 10 and currentTick = 0
-- LP holds P1 = [0, 300) and P2 = [100, 200), both minted at currentTick = 0, so ticks 100, 200, and 300 initialized with feeGrowthOutsideX128 = 0
-- The Operator called notifyFees, so feeGrowthGlobalX128 = G1 > 0
-- The Operator called updateTick(150), which crossed tick 100 and set ticks[100].feeGrowthOutsideX128 = G1
-- The Operator called notifyFees again, so feeGrowthGlobalX128 = G2 > G1
-- Tick 50 has never been used
-- The Operator escrowed 500 USDC from the LP's Safe against a unique intentId, and the MintIntent names the Safe, tickLower = 50, tickUpper = 100, 500, the intentId, and a deadline
-
-**Steps:**
-1. Operator calls `mintPositionFor` with the intent's six fields
-2. System validates inputs and requires the recorded Safe and the recorded hash
-3. System records intentId as used
-4. System initializes tick 50 with feeGrowthOutsideX128 = G2, since 50 <= currentTick (150)
-5. System finds tick 100 already initialized and keeps feeGrowthOutsideX128 = G1
-6. System computes feeGrowthInside([50, 100)) = G2 - G2 - (G2 - G1), which wraps modulo 2^256 to 2^256 - (G2 - G1), inside `unchecked`
-7. System creates the position with feeGrowthInsideLastX128 = that wrapped value and mintTick = 100 (currentTick 150 is above tickUpper 100, so the mint tick clamps down to tickUpper)
-8. System does NOT modify activeLiquidity (currentTick 150 >= tickUpper 100, position is out of range)
-9. System deletes the escrow and subtracts 500 from totalEscrowed; no USDC moves
-
-**Outcomes:**
-- The mint does not revert
-- Position exists with owner = the Safe, liquidity > 0, and feeGrowthInsideLastX128 = 2^256 - (G2 - G1)
-- activeLiquidity unchanged
-
-**Side Effects:**
-- `PositionMinted` event emitted
-- `ticks[50]` storage: initialized with feeGrowthOutsideX128 = G2
-- `ticks[100]` storage: feeGrowthOutsideX128 preserved at G1, liquidityGross increased
-- Position and intent storage updated
-- `pendingDeposits[intentId]` deleted; `totalEscrowed` decreased by 500
-- No USDC transferred
-- No fee distribution triggered
-- No tick crossing triggered
 
 ---
 

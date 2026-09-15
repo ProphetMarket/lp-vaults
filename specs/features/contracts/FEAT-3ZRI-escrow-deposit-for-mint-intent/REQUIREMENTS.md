@@ -4,7 +4,7 @@ name: Escrow Deposit for Mint Intent
 module: contracts
 domain: "@positions"
 status: implemented
-version: 2
+version: 3
 refs: [FEAT-REPZ, FEAT-T7AF, FEAT-JAIJ]
 ---
 
@@ -18,7 +18,7 @@ refs: [FEAT-REPZ, FEAT-T7AF, FEAT-JAIJ]
 - Does not create positions or touch tick state -- see FEAT-T7AF
 - Does not refund escrowed USDC -- see FEAT-JAIJ for both reclaim entry points
 - Does not accept a plain USDC transfer as a deposit -- see FR-9OYN
-- Does not handle fee collection, position burning, wind-down, or emergency cancel -- separate features
+- Does not handle position burning, wind-down, or emergency cancel -- separate features
 
 ## Actors
 
@@ -94,7 +94,7 @@ Fit Criterion: Given a successful escrow, `lastOperatorActivityTimestamp == bloc
 Linked to: UC-3Z92
 
 **FR-3Z9V** `The system shall not provide a permissionless direct-LP deposit entry point for escrow.`
-Fit Criterion: No function lets an LP escrow its own USDC without an Operator. Nothing is pulled until `depositForIntent` runs, so an uncooperative Operator leaves the LP's USDC in the Safe. Every exit path (reclaim, and later burn and collect) has a direct-call twin, because those funds are already inside the vault.
+Fit Criterion: No function lets an LP escrow its own USDC without an Operator. Nothing is pulled until `depositForIntent` runs, so an uncooperative Operator leaves the LP's USDC in the Safe. Every exit path (the reclaim and the later burn) has a direct-call twin, because those funds are already inside the vault.
 Linked to: UC-3Z92
 
 ## Non-Functional Requirements

@@ -2,12 +2,14 @@
 id: UC-BMF8
 name: Operator Collect Fees for LP
 feature: FEAT-U079
-status: implemented
-version: 2
+status: deprecated
+version: 3
 actor: Operator
 ---
 
 # UC-BMF8: Operator Collect Fees for LP
+
+Deprecated on 2026-09-14 (step R17 in `audits/audit-fixes-ranged.md`): the Prophet server computes and pays each maker's fees off-chain, so the vault carries no fee accounting. The text below is the audit trail of the deleted code.
 
 > The Operator relays the owner key's signed collect authorization to pay that Safe its accrued fees, so a fee withdrawal has the same gas-sponsored path as every other action on the platform.
 

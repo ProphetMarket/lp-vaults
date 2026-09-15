@@ -3,13 +3,13 @@ id: UC-7G41
 name: Burn Position
 feature: FEAT-7G40
 status: implemented
-version: 7
+version: 8
 actor: LP
 ---
 
 # UC-7G41: Burn Position
 
-> The LP's Safe closes a position it owns and receives what the claim holds under decision C26, USDC plus at most one outcome token plus fees before the switch, and USDC only after the Oracle's redemption, without needing the Operator to cooperate, or to exist.
+> The LP's Safe closes a position it owns and receives what the claim holds under decision C26, USDC plus at most one outcome token before the switch, and USDC only after the Oracle's redemption, without needing the Operator to cooperate, or to exist.
 
 ## Preconditions
 
@@ -28,7 +28,6 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 **Given:**
 - The Safe owns a position of 300 USDC over `[5500, 6500)`, minted with the vault at tick 6000, so `liquidity = 3e23` and `mintTick = 6000`
 - `currentTick == 6000`
-- The position has accrued no fees since mint
 
 **Steps:**
 1. The Safe calls `burnPosition` for the position
@@ -40,16 +39,16 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 **Outcomes:**
 - The Safe's USDC balance increases by 300,000,000 units (300 USDC)
 - The Safe receives no outcome token
-- The position no longer exists and cannot be burned or collected again
+- The position no longer exists and cannot be burned again
 - `activeLiquidity` decreases by `3e23`, because the position was in range
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 300000000, 0, 300000000, 0, 0, 0)` emitted
+- `PositionBurned(positionId, safe, 300000000, 300000000, 0, 0, 0)` emitted
 - `positions[positionId]` storage: deleted
 - `ticks[5500]` and `ticks[6500]` storage: `liquidityGross` decreased by `3e23`; `liquidityNet` decreased by `3e23` at 5500 and increased by `3e23` at 6500; `noLiquidityNet` increased by `3e23` at 6500
 - `ticks[6000]` storage (the interior mint tick): `liquidityGross` and `noLiquidityNet` decreased by `3e23`, the record deleted and its bitmap bit cleared, because nothing else references it
 - `noSideLiquidity` storage: decreased by `3e23`, because the position sat on the NO side of its mint tick
-- The four totals of the solvency ledger (FEAT-9BQZ): `totalUsdcOwedScaled` decreased by `3e23 × 10,000,000`
+- The three totals of the solvency ledger (FEAT-9BQZ): `totalUsdcOwedScaled` decreased by `3e23 × 10,000,000`
 - USDC transferred from vault to the Safe
 - No ERC-1155 transfer
 - No call to the CTF Exchange
@@ -78,7 +77,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The position no longer exists
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted
 - `positions[positionId]` storage: deleted
 - `ticks[5500]` and `ticks[6500]` storage: liquidity removed as in SC-7G43
 - USDC transferred from vault to the Safe
@@ -108,37 +107,12 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The position no longer exists
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 265345500, 0, 265345500, noTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 265345500, 265345500, noTokenId, 90000000, 90000000)` emitted
 - `positions[positionId]` storage: deleted
 - `ticks[5500]` and `ticks[6500]` storage: liquidity removed
 - USDC transferred from vault to the Safe
 - ERC-1155 NO transferred from vault to the Safe
 - No call to the CTF Exchange
-
----
-
-### SC-7G46: Burn pays accrued fees with the USDC leg
-
-**Given:**
-- The Safe owns an in-range position that has accrued F in fees through `notifyFees` since it was minted
-- The Safe has not called `collect` since the fees accrued
-
-**Steps:**
-1. The Safe calls `burnPosition` for the position
-2. System computes the position's accrued fees from the fee-growth accumulators for its range
-3. System values the claim for the current tick
-4. System clears the position and transfers the claim's USDC and the fees in one transfer
-
-**Outcomes:**
-- The Safe receives the claim's USDC plus F in one call; no separate `collect` is needed
-- A later `collect` on the same positionId reverts `PositionNotFound`
-- No fee is stranded in the vault by closing the position
-
-**Side Effects:**
-- `PositionBurned(positionId, safe, usdcOwed, F, usdcOwed + F, ...)` emitted
-- `positions[positionId]` storage: deleted, including `feeGrowthInsideLastX128` and `tokensOwed`
-- One USDC transfer from vault to the Safe covering the claim's USDC and the fees
-- No `FeesCollected` event emitted
 
 ---
 
@@ -157,7 +131,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 
 **Outcomes:**
 - Tick 6500 is deinitialized and its bitmap bit reads zero, so a later `updateTick` across it crosses nothing
-- Tick 5500 stays initialized with its bitmap bit set and its `feeGrowthOutsideX128` preserved for the other position
+- Tick 5500 stays initialized with its bitmap bit set for the other position
 - The Safe receives its payout as in the tick-dependent scenarios above
 
 **Side Effects:**
@@ -181,7 +155,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 
 **Outcomes:**
 - Call reverts with NotPositionOwner error
-- A's position is untouched and A can still burn or collect it
+- A's position is untouched and A can still burn it
 - B cannot force A's exit at a tick of B's choosing
 
 **Side Effects:**
@@ -209,29 +183,6 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 **Side Effects:**
 - `PositionBurned` emitted, `positions[positionId]` deleted, ticks and `activeLiquidity` updated as in Active phase, USDC transferred to the Safe, in both cases
 - No phase change in either case
-
----
-
-### SC-BZC6: A burn on a wrapped fee snapshot pays the growth since mint
-
-**Given:**
-- The Safe owns a position of 1,000 USDC over [0, 100) (liquidity 10e18) whose `feeGrowthInsideLastX128` was written to a wrapped value near 2^256 (`type(uint256).max - 1000`) through the storage fixture, as a late-initialized shared tick produces (FEAT-T7AF ADR-8L1F, FEAT-U079 SC-8L1E)
-- `currentTick == 0`, so the position is in range, beside the Safe's second, ordinary position of 9,000 USDC over [0, 300) (liquidity 30e18)
-- `notifyFees` then reported 501 USDC over the in-range liquidity, so the wrapped position's share is 125.25 USDC, which rounds down to 125. The report is 501 and not 500, because the wrapped snapshot models 1,001 growth units below zero, and that offset would push a share that sits within 10^-19 of an integer over it
-
-**Steps:**
-1. The Safe calls `burnPosition` for the wrapped position
-2. System computes `feeGrowthInsideX128 - feeGrowthInsideLastX128` inside `unchecked`, so the subtraction wraps modulo 2^256 and cancels the offset to the true delta
-3. System pays the claim's USDC plus the fees
-
-**Outcomes:**
-- The call does not revert with an arithmetic panic
-- `PositionBurned.feesOwed == 125` USDC (`liquidity × feeGrowthGlobalX128 / Q128`), the growth since the snapshot and nothing else
-- The Safe receives 1,000 USDC of principal plus the 125 USDC of fees
-- The ordinary position is untouched
-
-**Side Effects:**
-- `PositionBurned` emitted, the record deleted, both ticks updated, USDC transferred to the Safe
 
 ---
 
@@ -304,7 +255,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 
 **Side Effects:**
 - `CompleteSetsMerged(safe, 50)` emitted before `PositionBurned` in the log
-- `PositionBurned(positionId, safe, 300000000, 0, 300000000, 0, 0, 0)` emitted
+- `PositionBurned(positionId, safe, 300000000, 300000000, 0, 0, 0)` emitted
 - `PositionsMerge` emitted by ConditionalTokens
 - USDC transferred from ConditionalTokens to the vault, then from the vault to the Safe
 
@@ -353,7 +304,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - In every case `totalUsdcOwed()` falls by the claim's USDC and the band's token total by its tokens, whatever was paid: 247,354,500 and 90,000,000 in case A
 
 **Side Effects:**
-- Case A: `PositionBurned(positionId, safe, 247354500, 0, 200000000, yesTokenId, 90000000, 60000000)` emitted, so an indexer sees `paid < owed`
+- Case A: `PositionBurned(positionId, safe, 247354500, 200000000, yesTokenId, 90000000, 60000000)` emitted, so an indexer sees `paid < owed`
 - Case B: `PositionBurned` emitted with `usdcPaid == 0`, and no USDC transfer
 - `totalUsdcOwedScaled` and the band's token total storage: debited by the full scaled claim in every case
 - `totalEscrowed` unchanged in every case: escrowed USDC never pays a burn
@@ -379,7 +330,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - A mint below its range holds an empty YES side and a NO side that is the whole range, so a rise into the range fills `[tickLower, currentTick)` with NO
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 260845500, 0, 260845500, noTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 260845500, 260845500, noTokenId, 90000000, 90000000)` emitted
 - `positions[positionId]` storage: deleted
 - ERC-1155 NO transferred from vault to the Safe
 
@@ -403,7 +354,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The Safe receives no token
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 90000000)` emitted, where `tokenPaid` is the token leg's USDC after the switch
+- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted, where `tokenPaid` is the token leg's USDC after the switch
 - One `Transfer` from the vault to the Safe, of 337,354,500 units
 - No `TransferSingle`, no `PayoutRedemption`, no `OutcomeTokensRedeemed`
 
@@ -425,7 +376,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The Safe receives no token
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 0)` emitted; `tokenOwed` still reports the 90 tokens the claim held
+- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 0)` emitted; `tokenOwed` still reports the 90 tokens the claim held
 - No `TransferSingle`
 
 ---
@@ -445,7 +396,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The Safe's USDC balance increases by 292,354,500 units
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 45000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 45000000)` emitted
 - No `TransferSingle`
 
 ---
@@ -466,7 +417,7 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - The Safe redeems the 90 YES at the ConditionalTokens contract for 90 USDC in its own transaction, so no LP waits on the Oracle
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted
 - `TransferSingle` from the ConditionalTokens contract as the last external call
 - No `redeemPositions` call, no `OutcomeTokensRedeemed`
 
@@ -492,9 +443,9 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - In both cases the leftover YES belong to no claim and stay until the switch (decision C8, finding CV-08 of `audits/code-validation-round-1.md`, ADR-DYNK)
 
 **Side Effects:**
-- Case A: `PositionBurned(positionId, safe, 300000000, 0, 247354500, 0, 0, 0)` emitted, so an indexer sees `paid < owed`
+- Case A: `PositionBurned(positionId, safe, 300000000, 247354500, 0, 0, 0)` emitted, so an indexer sees `paid < owed`
 - Case A: no `TransferSingle` from the vault, and no `CompleteSetsMerged`, because the vault holds no NO
-- Case B: `PositionBurned(positionA, safeA, 300000000, 0, 251741625, 0, 0, 0)`, then `TickUpdated(6000, 5700, 1)` (the report crosses the second claim's interior mint tick), then `PositionBurned(positionB, safeB, 256128750, 0, 251741625, yesTokenId, 75000000, 75000000)`
+- Case B: `PositionBurned(positionA, safeA, 300000000, 251741625, 0, 0, 0)`, then `TickUpdated(6000, 5700, 1)` (the report crosses the second claim's interior mint tick), then `PositionBurned(positionB, safeB, 256128750, 251741625, yesTokenId, 75000000, 75000000)`
 - `totalUsdcOwedScaled` storage: debited by the full scaled claim at each burn
 - No `updateTick` before the first burn in either case
 

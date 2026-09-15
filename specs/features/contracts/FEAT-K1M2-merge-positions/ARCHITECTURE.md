@@ -2,7 +2,7 @@
 id: FEAT-K1M2
 name: Merge Positions
 use_cases: [UC-K1M8]
-scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-K1MC, SC-3XUP, SC-3XUQ, SC-AFPQ, SC-AFPR, SC-DU2W]
+scenarios: [SC-K1M9, SC-K1MA, SC-K1MB, SC-3XUP, SC-3XUQ, SC-AFPQ, SC-AFPR, SC-DU2W]
 last_update: 2026-09-14
 ---
 
@@ -24,7 +24,7 @@ C4Context
 C4Container
     title Merge Positions -- Container View
     Person(operator, "Operator")
-    Container(vault, "LPVault (clone)", "Solidity", "Position records + fee accumulators")
+    Container(vault, "LPVault (clone)", "Solidity", "Position records")
     Rel(operator, vault, "mergePositions()", "tx")
 ```
 
@@ -39,8 +39,6 @@ erDiagram
         int24 tickUpper "must match across merged positions"
         int24 mintTick "must match across merged positions (C26)"
         uint128 liquidity "summed into survivor; zeroed on consumed"
-        uint256 feeGrowthInsideLastX128 "reset to current on survivor"
-        uint256 tokensOwed "accumulated fees rolled into survivor"
     }
 ```
 
@@ -50,8 +48,6 @@ erDiagram
 - The sum of `position.liquidity` over every position is unchanged by a merge, which equals half the sum of `liquidityGross` over the distinct referenced ticks
 - After merge: tick `liquidityGross` unchanged (same total liquidity on same range)
 - After merge: consumed positions have `liquidity == 0`
-- `feeGrowthInsideLastX128` on survivor is set to current value to prevent double-counting
-- After merge: the three principal totals of FEAT-9BQZ are unchanged and `totalFeesOwedX128` fell by exactly the fee dust the floors dropped, so the ledger equals the survivor's scaled fee claim (FR-9BRH)
 
 ## Component Inventory
 
@@ -68,7 +64,7 @@ erDiagram
 
 **Non-events (explicit):**
 - Failed merge (mismatched ranges, insufficient positions): no events emitted
-- No USDC transferred during merge (fees stay in tokensOwed)
+- No USDC transferred during merge
 
 ## API Surface
 
@@ -93,14 +89,12 @@ _None — merge is a pure storage operation with no external calls._
 | SC-K1MB | Revert on empty/single input | `src/LPVault.sol:mergePositions()` |
 | SC-AFPQ | Revert on a repeated position ID | `src/LPVault.sol:mergePositions()` (the pairwise check) |
 | SC-AFPR | Revert on a different mint tick | `src/LPVault.sol:mergePositions()` (the mintTick compare) |
-| SC-K1MC | Fee accounting preserved | `src/LPVault.sol:mergePositions()` |
 
 ## Architecture Decisions
 
-The fee-growth subtraction in this feature (the fee deltas in `mergePositions()`, survivor and consumed) runs inside `unchecked` and never uses `_mulDiv`. See the fee-growth wraparound decision (ADR-8L1F) in FEAT-T7AF. The mint tick that a merge compares is the clamped value the mint stores; see the clamp decision (ADR-AFPP) in FEAT-T7AF.
+The mint tick that a merge compares is the clamped value the mint stores; see the clamp decision (ADR-AFPP) in FEAT-T7AF.
 
 ## Testing Decisions
 
 | Service/Pattern | Decision | Reason |
 |-----------------|----------|--------|
-| Fee accumulators | e2e | Use real notifyFees + collect flow to verify fee preservation |

@@ -3,7 +3,7 @@ id: UC-JGEE
 name: Start Wind Down
 feature: FEAT-JGE7
 status: implemented
-version: 4
+version: 5
 actor: Oracle
 ---
 
@@ -128,20 +128,17 @@ Oracle calls `startWindDown()` on the vault.
 
 **Given:**
 - Vault phase is WindDown
-- LP has an existing position with accumulated fees
+- LP has an existing position
 
 **Steps:**
-1. The LP's Safe calls `collect(positionId)` on the vault
-2. The vault merges any pairs, computes the fees owed, and transfers USDC to the Safe
-3. The Safe calls `burnPosition(positionId)` on the vault
-4. The vault removes the position's liquidity from both ticks, deletes the position, merges any pairs, and pays the Safe the claim's USDC plus its one outcome token
+1. The Safe calls `burnPosition(positionId)` on the vault
+2. The vault removes the position's liquidity from both ticks, deletes the position, merges the free pairs, and pays the Safe the claim's USDC plus its one outcome token
 
 **Outcomes:**
-- Fees collected and the position burned, the same as in Active phase
+- The position burned, the same as in Active phase
 - The Safe receives the USDC and any token
 
 **Side Effects:**
-- Position `tokensOwed` zeroed after collect
 - Position liquidity removed from tick state after burn, and `activeLiquidity` reduced by it
 - The position record is deleted after the burn
 - USDC transferred to the Safe

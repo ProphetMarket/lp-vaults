@@ -4,13 +4,13 @@ name: Merge Positions
 module: contracts
 domain: "@positions"
 status: implemented
-version: 5
+version: 6
 refs: [FEAT-T7AF]
 ---
 
 # Merge Positions
 
-> Operator-called housekeeping that combines two or more distinct positions with identical owner, tickLower, tickUpper, and mintTick into a single position record, preserving total liquidity and accrued fees. This merge joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC (`mergeCompleteSets()`, audit-fix step R9).
+> Operator-called housekeeping that combines two or more distinct positions with identical owner, tickLower, tickUpper, and mintTick into a single position record, preserving total liquidity. This merge joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC (`mergeCompleteSets()`, audit-fix step R9).
 
 ## Non-Goals
 
@@ -30,7 +30,7 @@ refs: [FEAT-T7AF]
 
 ### Merge Operation
 
-**FR-K1M3** `When the Operator calls mergePositions with two or more distinct position IDs that share the same owner, tickLower, tickUpper, and mintTick, the system shall combine them into one position with the summed liquidity and correctly computed fee state, zeroing the consumed positions.`
+**FR-K1M3** `When the Operator calls mergePositions with two or more distinct position IDs that share the same owner, tickLower, tickUpper, and mintTick, the system shall combine them into one position with the summed liquidity, zeroing the consumed positions' liquidity.`
 Fit Criterion: Given positions [A, B] with identical owner, range, and mintTick, after merge the surviving position holds `liquidityA + liquidityB`, consumed positions have `liquidity == 0`, tick state `liquidityGross` is unchanged.
 Linked to: UC-K1M8
 
@@ -60,12 +60,6 @@ Linked to: UC-K1M8
 Fit Criterion: The fuzz test in the UC-K1M8 test file asserts that the survivor's liquidity after a merge of a random set equals the sum of the merged positions before it, and `invariant_mergeConservesLiquidity` in `test/invariants/TickState.t.sol` asserts, after any sequence of mints, tick moves, and merges, that the sum of every position's liquidity equals half the sum of `liquidityGross` over every distinct referenced tick. The invariant reads vault state only and keeps no handler mirror, so a burn action (R9) changes no check. This is the auditors' requirement FR-2J6X in `audit-solutions.md`.
 Linked to: UC-K1M8
 
-### Fee Accounting
-
-**FR-K1M6** `When mergePositions completes, the surviving position's fee accounting shall reflect the sum of all consumed positions' uncollected fees with no loss or double-counting.`
-Fit Criterion: Given two positions with accrued fees, after merge the surviving position's `tokensOwed` includes both positions' uncollected fees and `feeGrowthInsideLastX128` is set to the current value. The fee total of FEAT-9BQZ falls by the remainders the two floors drop, Σ (liquidity × delta) mod 2^128, so it still equals the survivor's scaled fee claim; the three principal totals are unchanged (FR-9BRH).
-Linked to: UC-K1M8
-
 ### Operator Liveness
 
 **FR-3XU7** `When mergePositions completes successfully, the system shall reset lastOperatorActivityTimestamp to block.timestamp.`
@@ -84,7 +78,6 @@ Linked to: UC-K1M8
 - Operator can merge same-range same-owner positions
 - Mismatched ranges revert
 - Empty/single-item input reverts
-- Fee accounting preserved after merge (no loss, no double-counting)
 - A repeated position ID reverts before any liquidity is read
 - Positions with different mint ticks do not merge
 - A burned record never merges: the survivor's and every consumed record's owner is checked before any liquidity is read (FR-DU2X)

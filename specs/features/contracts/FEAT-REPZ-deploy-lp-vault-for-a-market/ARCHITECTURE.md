@@ -42,7 +42,7 @@ C4Container
     Person(oracle, "Oracle")
     Person(admin, "Admin")
     Container(factory, "LPVaultFactory", "Solidity", "Clone deployer + market registry + role registry")
-    Container(vault, "LPVault (clone)", "Solidity", "Per-market vault with position/tick/fee state")
+    Container(vault, "LPVault (clone)", "Solidity", "Per-market vault with position/tick state")
     Container(auth, "Auth (inlined)", "Solidity mixin", "Admin/Operator/Oracle role management")
     ContainerDb(registry, "vaultForMarket mapping", "Storage", "marketId -> vault address")
     System_Ext(usdc, "USDC", "ERC-20")
@@ -95,7 +95,6 @@ erDiagram
         uint32 emergencyCancelTimelock "storage, copied from the factory default at createVault, never written again"
         uint8 phase "Active or WindDown"
         bool initialized "one-shot guard"
-        uint256 feeGrowthGlobalX128 "starts at 0"
         uint128 activeLiquidity "starts at 0"
         int24 currentTick "starts at 0"
         uint256 nextPositionId "starts at 0; the first mint must meet minimumFirstLiquidity"
@@ -108,8 +107,6 @@ erDiagram
         int24 tickUpper "must align to tickSpacing"
         int24 mintTick "currentTick at mint, clamped into the range"
         uint128 liquidity "non-zero"
-        uint256 feeGrowthInsideLastX128 "snapshot at mint"
-        uint256 tokensOwed "unclaimed fees"
     }
     AUTH_REGISTRY {
         mapping_address_uint256 admins "1 = active"
@@ -133,7 +130,7 @@ erDiagram
 - When `nextPositionId == 0`, the next mint must produce `liquidity >= minimumFirstLiquidity` or revert -- the first position is always materially large, and the floor applies exactly once
 - `minimumFirstLiquidity > 0` always -- enforced at `createVault()` and on every `setMinimumFirstLiquidity()` call; the floor cannot be disabled
 - Every successful ERC-1155 receiver-hook invocation on a vault has `msg.sender == conditionalTokens` -- the vault never acknowledges tokens from any other ERC-1155 contract
-- The receiver hooks are pure with respect to vault state -- no position, tick, or fee-accumulator storage is written by an inbound transfer
+- The receiver hooks are pure with respect to vault state -- no position or tick storage is written by an inbound transfer
 - `adminCount` equals the number of addresses with `admins[x] == 1` on the factory
 - A removed or renounced address cannot regain the admin role without a new `transferAdmin` or `addAdmin` call by a current Admin
 - `conditionId != 0`, `yesTokenId != 0`, `noTokenId != 0`, and `yesTokenId != noTokenId` on every initialized vault
@@ -149,13 +146,13 @@ erDiagram
 | File | Role | Key Exports |
 |------|------|-------------|
 | `src/LPVaultFactory.sol` | Clone deployer + market registry + factory-level Auth + outcome-token identity check before clone deployment + the two Safe derivation inputs + the default emergency-cancel timelock | `createVault()`, `_validateOutcomeIdentity()`, `vaultForMarket`, `safeFactory`, `safeProxyBytecodeHash`, `defaultEmergencyCancelTimelock`, `MAX_EMERGENCY_CANCEL_TIMELOCK`, `setDefaultEmergencyCancelTimelock()`, admin/operator/oracle management, `ZeroConditionId`, `ZeroTokenId`, `DuplicateTokenId`, `NotBinaryCondition`, `TokenIdMismatch`, `ZeroBytecodeHash`, `ZeroTimelock`, `TimelockTooLong`, `InvalidTickSpacing` |
-| `src/LPVault.sol` | Per-market vault implementation (clone target), with the token ID restriction in the receiver hooks | `initialize()`, `conditionId`, `yesTokenId`, `noTokenId`, `emergencyCancelTimelock`, `_requireOwnTokenId()`, `UnknownTokenId`, inline `IConditionalTokens`, position/tick/fee state, vault-level Auth |
+| `src/LPVault.sol` | Per-market vault implementation (clone target), with the token ID restriction in the receiver hooks | `initialize()`, `conditionId`, `yesTokenId`, `noTokenId`, `emergencyCancelTimelock`, `_requireOwnTokenId()`, `UnknownTokenId`, inline `IConditionalTokens`, position/tick state, vault-level Auth |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ0-deploy-factory.t.sol` | Integration tests for Deploy Factory | Factory deployment, role-separation revert, implementation-not-initializable and clone-initializable scenarios, factory and vault modifier checks |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ1-create-vault-for-market.t.sol` | Integration tests for Create Vault for Market | Vault creation, duplicate-market and non-oracle reverts, initialization guards, minimum-first-liquidity floor, the tick-spacing check (SC-DU2Y), the default emergency-cancel timelock and its copy, ERC-1155 receiver hooks |
 | `test/features/FEAT-REPZ-deploy-lp-vault-for-a-market/UC-REQ2-manage-roles-on-factory.t.sol` | Integration tests for Manage Roles on Factory | Operator, oracle, and admin role management scenarios, and role propagation to vaults |
 | `test/fixtures/ConditionalTokensFixture.sol` | Test fixture -- real ConditionalTokens bytecode, binary condition setup, vault creation with a verified identity, complete-set minting for holders | `ITestConditionalTokens`, `_deployConditionalTokens()`, `_prepareBinaryCondition()`, `_createVault()`, `_mintCompleteSets()`, `_binaryPartition()` |
 | `test/fixtures/MockERC20.sol` | Test fixture -- the one USDC mock of the suite | `MockERC20` |
-| `test/fixtures/VaultStorage.sol` | Test fixture -- vault storage writes through forge-std `stdStorage`, with no slot numbers | `setFeeGrowthInsideLast()`, `setFeeGrowthOutside()` |
+| `test/fixtures/VaultStorage.sol` | Test fixture -- vault storage writes through forge-std `stdStorage`, with no slot numbers | `setPhase()`, `plantTick()`, `setCurrentTick()` |
 | `test/fixtures/LPVaultFixture.sol` | Test fixture -- factory deployment with the made-up Safe derivation constants, signing helpers, Safe derivation, escrow-then-mint | `SAFE_FACTORY`, `SAFE_PROXY_BYTECODE_HASH`, `_deployFactory()`, `_safeOf()`, `_signMintIntent()`, `_signReclaimIntent()`, `_fundSafe()`, `_escrow()`, `_escrowAndMint()` |
 
 ## Event Topology
@@ -228,7 +225,7 @@ stateDiagram-v2
     [*] --> s0 : factory deployed
     s0 --> s1 : createVault() → initialize() → phase = Active
     s1 --> s2 : startWindDown() (feature 8)
-    s2 --> [*] : all positions burned + collected
+    s2 --> [*] : all positions burned
 ```
 
 ## Code Map
@@ -298,11 +295,11 @@ In the context of role management, facing the pattern policy that forbids import
 
 **ADR-RFS9:** Operator-gated minting + per-vault minimum-first-liquidity floor for inflation-grief protection
 In the context of first-LP protection, facing the risk that a tiny first position can manipulate `feeGrowthGlobalX128` initialization (the v3 analog of the ERC-4626 first-depositor inflation attack), we decided to (a) route every position-creation entry point through an `onlyOperator` gate so no public mint path exists, and (b) enforce on-chain that the next mint while `activeLiquidity == 0` must produce `liquidity >= minimumFirstLiquidity`, where `minimumFirstLiquidity` is supplied per-market by the Oracle at `createVault` time and adjustable later via `setMinimumFirstLiquidity` (also `onlyOracle`). The floor cannot be set to zero. This achieves attack-resistance without locking capital per-vault while giving the Oracle per-market control to size the floor against expected market depth. We accept that the Operator is now in the path of every LP onboarding -- a trust assumption already established by the OPERATOR TRUST ASSUMPTION pattern in CLAUDE.md and mirrored from the CTF Exchange's operator-matched order flow -- and that lowering the floor requires a compromised Oracle to collude with a compromised Operator before an inflation grief becomes possible (two-of-two compromise).
-Superseded in part on 2026-09-12 (audit NM-0986 issue 6.9, decision C15 in `audits/audit-fixes-ranged.md`): the floor applies when `nextPositionId == 0`, not when `activeLiquidity == 0`. `activeLiquidity` returns to zero whenever the price enters a range with no position, so the old condition re-applied the floor long after the first mint and blocked small LPs. `nextPositionId` only grows and no ID is reused, so the floor now applies exactly once. The Operator gate in part (a) and the non-zero floor stay as decided.
+Superseded in part on 2026-09-12 (audit NM-0986 issue 6.9, decision C15 in `audits/audit-fixes-ranged.md`): the floor applies when `nextPositionId == 0`, not when `activeLiquidity == 0`. `activeLiquidity` returns to zero whenever the price enters a range with no position, so the old condition re-applied the floor long after the first mint and blocked small LPs. `nextPositionId` only grows and no ID is reused, so the floor now applies exactly once. The Operator gate in part (a) and the non-zero floor stay as decided. Since 2026-09-14 (step R17) no fee accumulator exists, so the floor guards against a dust first position only; removing it is its own decision.
 
 **ADR-3WLP:** Stateless ERC-1155 receiver hooks gated on the vault's own ConditionalTokens address
 In the context of the vault holding ERC-1155 outcome tokens acquired through exchange fills, facing the fact that ERC-1155 `safeTransferFrom` and `safeBatchTransferFrom` revert when the contract recipient does not return the receiver acknowledgement values, we decided to implement `onERC1155Received` and `onERC1155BatchReceived` as stateless hooks that return `0xf23a6e61` and `0xbc197c81`, gated by an `onlyConditionalTokens` modifier, plus an ERC-165 `supportsInterface`. This achieves the vault's core ability to receive outcome tokens -- without the hooks every normal trade settling tokens into the vault reverts, a permanent denial of the vault's purpose -- while turning the existing "no entry point exists for foreign token IDs" comment into an enforced on-chain check at near-zero marginal cost. We accept that the hooks perform no accounting: position, tick, and fee state stay driven by mint, burn, collect, and `notifyFees`, so an inbound transfer is invisible to vault bookkeeping by design, and any reconciliation between token balances and position accounting remains the Operator's off-chain responsibility.
-Note (2026-09-12, outcome-token identity): The hooks also revert on any token ID other than `yesTokenId` and `noTokenId` (FR-6HBT, ADR-6HBU). They still write no state and never merge, because a hook runs inside the exchange's settlement transaction and a revert there reverts the match. Position, tick, and fee state stay driven by `mintPositionFor`, `collect`, and `notifyFees`.
+Note (2026-09-12, outcome-token identity): The hooks also revert on any token ID other than `yesTokenId` and `noTokenId` (FR-6HBT, ADR-6HBU). They still write no state and never merge, because a hook runs inside the exchange's settlement transaction and a revert there reverts the match. Position, tick, and fee state stay driven by `mintPositionFor`, `collect`, and `notifyFees`. Since 2026-09-14 (step R17) the bookkeeping is driven by `mintPositionFor`, `burnPosition`, and `updateTick`.
 
 **Rejected alternative -- unguarded receiver hooks:** The plain `pure` receiver returning the magic value to any caller is the common pattern and is what the ERC-1155 spec requires at minimum. Rejected because it lets any ERC-1155 contract push arbitrary token IDs into the vault, weakening the assumption documented at the `setApprovalForAll` call site that the vault holds outcome tokens for exactly one market. The guard costs one SLOAD and one comparison.
 

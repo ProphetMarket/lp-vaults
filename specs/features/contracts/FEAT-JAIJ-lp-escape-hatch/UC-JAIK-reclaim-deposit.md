@@ -3,7 +3,7 @@ id: UC-JAIK
 name: Reclaim Deposit
 feature: FEAT-JAIJ
 status: implemented
-version: 3
+version: 4
 actor: LP
 ---
 
@@ -171,7 +171,7 @@ The Safe calls `reclaimDeposit(intentId)` on the vault, through a Safe transacti
 
 **Given:**
 - The Operator escrowed 600 USDC from Safe S against intentId X
-- The exchange's standing USDC allowance spent 400 of the vault's USDC on a fill, so the vault holds 200 USDC against 600 escrowed: escrow seniority (decision C7) binds burns and collects, not fills
+- The exchange's standing USDC allowance spent 400 of the vault's USDC on a fill, so the vault holds 200 USDC against 600 escrowed: escrow seniority (decision C7) binds burns, not fills
 - The vault holds 500 YES and 500 NO and no live position, so `totalYesOwed()` and `totalNoOwed()` are 0 and all 500 pairs are free (FEAT-6HBN ADR-DFE2)
 
 **Steps:**

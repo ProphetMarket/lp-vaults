@@ -2,8 +2,8 @@
 id: FEAT-K1MD
 name: Pause Trading
 use_cases: [UC-K1MK]
-scenarios: [SC-K1ML, SC-K1MM, SC-K1MN, SC-K1MO, SC-K1MP]
-last_update: 2026-07-02
+scenarios: [SC-K1ML, SC-K1MM, SC-K1MN, SC-K1MP]
+last_update: 2026-09-14
 ---
 
 # Architecture: Pause Trading
@@ -45,8 +45,8 @@ erDiagram
 
 **Invariants:**
 - `paused` does not affect the vault's phase (Active/WindDown/Cancelled)
-- While `paused == true`: `mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions` revert
-- While `paused == true`: `collect`, `reclaimDeposit`, `emergencyCancelAll` succeed
+- While `paused == true`: `mintPositionFor`, `updateTick`, `mergePositions` revert
+- While `paused == true`: `burnPosition`, `reclaimDeposit`, `emergencyCancelAll` succeed
 - `paused` is toggled only by Admin addresses
 
 ## Component Inventory
@@ -88,7 +88,6 @@ erDiagram
 | SC-K1ML | Admin pauses + gated reverts | `src/LPVault.sol:pauseTrading()`, `whenNotPaused` modifier |
 | SC-K1MM | Unpause returns to normal | `src/LPVault.sol:unpauseTrading()` |
 | SC-K1MN | Non-admin revert | `src/LPVault.sol:pauseTrading()`, `src/LPVault.sol:unpauseTrading()` |
-| SC-K1MO | Collect works while paused | `src/LPVault.sol:collect()` (no pause check) |
 | SC-K1MP | ReclaimDeposit works while paused | `src/LPVault.sol:reclaimDeposit()` (no pause check) |
 
 ## Architecture Decisions

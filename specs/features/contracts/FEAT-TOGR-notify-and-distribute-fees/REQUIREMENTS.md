@@ -3,12 +3,14 @@ id: FEAT-TOGR
 name: Notify and Distribute Fees
 module: contracts
 domain: "@fees"
-status: implemented
-version: 3
+status: deprecated
+version: 4
 refs: [FEAT-T7AF]
 ---
 
 # Notify and Distribute Fees
+
+Deprecated on 2026-09-14 (step R17 in `audits/audit-fixes-ranged.md`): the Prophet server computes and pays each maker's fees off-chain, so the vault carries no fee accounting. The text below is the audit trail of the deleted code.
 
 > Enables the Operator to distribute newly arrived fee revenue across all in-range LP positions by incrementing the vault's global Q128 fee accumulator proportionally to active liquidity, while the vault takes that revenue from the Operator wallet in the same call.
 

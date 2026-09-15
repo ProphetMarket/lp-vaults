@@ -4,8 +4,8 @@ name: Complete-Set Merge and Resolution Redemption
 module: contracts
 domain: "@vault"
 status: implemented
-version: 4
-refs: [FEAT-REPZ, FEAT-JXQO, FEAT-JGE7, FEAT-7G40, FEAT-U079, FEAT-9BQZ]
+version: 5
+refs: [FEAT-REPZ, FEAT-JXQO, FEAT-JGE7, FEAT-7G40, FEAT-9BQZ]
 ---
 
 # Complete-Set Merge and Resolution Redemption
@@ -18,7 +18,7 @@ refs: [FEAT-REPZ, FEAT-JXQO, FEAT-JGE7, FEAT-7G40, FEAT-U079, FEAT-9BQZ]
 - Does not read the payout from an argument -- the numerators come from the ConditionalTokens contract inside the call
 - Does not merge inside the ERC-1155 receiver hooks -- a hook runs inside the exchange's settlement transaction, so a revert there reverts the match (ADR-3WLP)
 - Does not split USDC into complete sets -- the exchange splits at fill time
-- Does not value, price, or pay a claim -- see FEAT-7G40 (burn) and FEAT-U079 (collect), which call the internal merge first and, after the switch, the internal redemption
+- Does not value, price, or pay a claim -- see FEAT-7G40 (burn), which calls the internal merge first and, after the switch, the internal redemption
 - Does not change the vault phase
 
 ## Actors
@@ -88,7 +88,7 @@ Rationale: measured on the prototype on 2026-09-14 at 140,623 call gas with YES 
 - A merge turns complete sets into the same number of USDC, never a token a claim is owed, and the caller receives nothing
 - A call with no free pair succeeds with no merge call and no event
 - Any wallet merges in Active, WindDown, and Cancelled, and while paused, and no merge refreshes the Operator heartbeat
-- The internal merge runs first in every burn and every paying collect before the switch, and the internal redemption after it
+- The internal merge runs first in every burn before the switch, and the internal redemption after it
 - The first redemption stores the payout read from the ConditionalTokens contract, and a redemption never accepts a payout argument
 - A redemption reverts while Active, before the result, and for every non-Oracle caller
 - A redemption with nothing to redeem makes no call and emits nothing

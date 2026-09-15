@@ -3,7 +3,7 @@ id: UC-7G42
 name: Operator Burn Position for LP
 feature: FEAT-7G40
 status: implemented
-version: 2
+version: 3
 actor: Operator
 ---
 
@@ -16,7 +16,7 @@ actor: Operator
 - Vault is deployed and initialized, with its outcome-token identity set (`conditionId`, `yesTokenId`, `noTokenId`)
 - The Operator is registered on the factory (`operators[operator] == 1`)
 - The position is live: `positions[positionId].owner` is the LP's Safe and `liquidity > 0`
-- The owner key has signed an EIP-712 `BurnIntent(address lp,uint256 positionId,uint256 deadline)` naming its Safe as `lp`, a struct with its own typehash, distinct from `MintIntent`, `ReclaimIntent`, and `CollectIntent`
+- The owner key has signed an EIP-712 `BurnIntent(address lp,uint256 positionId,uint256 deadline)` naming its Safe as `lp`, a struct with its own typehash, distinct from `MintIntent` and `ReclaimIntent`
 
 ## Trigger
 
@@ -43,7 +43,7 @@ The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the
 - `activeLiquidity` decreases by the position's liquidity
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 300000000, 0, 300000000, 0, 0, 0)` emitted
+- `PositionBurned(positionId, safe, 300000000, 300000000, 0, 0, 0)` emitted
 - `usedBurnAuthorizations[structHash]` storage: set to true
 - `positions[positionId]` storage: deleted
 - `ticks[5500]` and `ticks[6500]` storage: liquidity removed
@@ -71,7 +71,7 @@ The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the
 - Every asset lands with `position.owner`, never with `msg.sender`
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 247354500, 0, 247354500, yesTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 247354500, 247354500, yesTokenId, 90000000, 90000000)` emitted
 - `usedBurnAuthorizations[structHash]` storage: set to true
 - `positions[positionId]` storage: deleted
 - USDC and ERC-1155 YES transferred from vault to the Safe
@@ -97,7 +97,7 @@ The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the
 - The Operator's balances are unchanged
 
 **Side Effects:**
-- `PositionBurned(positionId, safe, 265345500, 0, 265345500, noTokenId, 90000000, 90000000)` emitted
+- `PositionBurned(positionId, safe, 265345500, 265345500, noTokenId, 90000000, 90000000)` emitted
 - `usedBurnAuthorizations[structHash]` storage: set to true
 - `positions[positionId]` storage: deleted
 - USDC and ERC-1155 NO transferred from vault to the Safe
@@ -175,11 +175,11 @@ The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the
 
 ---
 
-### SC-7G4I: Revert when a mint, reclaim, or collect authorization is reused as a burn
+### SC-7G4I: Revert when a mint or reclaim authorization is reused as a burn
 
 **Given:**
 - The Safe owns a live position minted through `mintPositionFor`
-- The Operator holds the owner key's `MintIntent` signature, a `ReclaimIntent` signature, or a `CollectIntent` signature
+- The Operator holds the owner key's `MintIntent` signature or a `ReclaimIntent` signature
 - The owner key has signed no `BurnIntent`
 
 **Steps:**
@@ -188,7 +188,7 @@ The Operator calls `burnPositionFor(lp, positionId, deadline, signature)` on the
 
 **Outcomes:**
 - Call reverts with InvalidSignature error
-- The four authorizations form four disjoint namespaces, and a `BurnIntent` signature is rejected by `depositForIntent`, `reclaimDepositFor`, and `collectFor`
+- The three authorizations form three disjoint namespaces, and a `BurnIntent` signature is rejected by `depositForIntent` and `reclaimDepositFor`
 
 **Side Effects:**
 - No state changes

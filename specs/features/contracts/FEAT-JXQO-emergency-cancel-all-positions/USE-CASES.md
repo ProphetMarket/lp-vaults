@@ -6,4 +6,4 @@
 
 | ID | Name | Status | Description | File |
 |----|------|--------|-------------|------|
-| UC-JXQW | Emergency Cancel All | implemented | Any address freezes the vault after the vault's operator-silence timelock; the freeze sets the terminal Cancelled phase and changes nothing else, so each LP exits alone through the burn, the collect, or the reclaim | [UC-JXQW-emergency-cancel-all.md](UC-JXQW-emergency-cancel-all.md) |
+| UC-JXQW | Emergency Cancel All | implemented | Any address freezes the vault after the vault's operator-silence timelock; the freeze sets the terminal Cancelled phase and changes nothing else, so each LP exits alone through the burn or the reclaim | [UC-JXQW-emergency-cancel-all.md](UC-JXQW-emergency-cancel-all.md) |

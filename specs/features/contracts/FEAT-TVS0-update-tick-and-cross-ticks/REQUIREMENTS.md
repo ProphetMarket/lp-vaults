@@ -4,20 +4,19 @@ name: Update Tick and Cross Ticks
 module: contracts
 domain: "@ticks"
 status: implemented
-version: 4
-refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR, FEAT-JXQO, FEAT-9BQZ]
+version: 5
+refs: [FEAT-REPZ, FEAT-T7AF, FEAT-JXQO, FEAT-9BQZ]
 ---
 
 # Update Tick and Cross Ticks
 
-> Operator-driven tick synchronization that crosses initialized ticks between the vault's current price and the CLOB mid-price, flipping per-tick fee accumulators and adjusting active liquidity so fee distributions split correctly between in-range and out-of-range positions.
+> Operator-driven tick synchronization that crosses initialized ticks between the vault's current price and the CLOB mid-price, adjusting active liquidity and the NO-side liquidity so the claim model values every position at the reported price.
 
 ## Non-Goals
 
-- Does not handle fee collection by individual LPs — see feature 5
 - Does not initialize or deinitialize ticks — tick lifecycle managed by mint (FEAT-T7AF) and burn (feature 6)
 - Does not implement off-chain Keeper logic (price monitoring, chunking decisions) — only the on-chain `updateTick` entry point
-- Does not move USDC or outcome tokens — only updates accounting state (feeGrowthOutside, activeLiquidity, noSideLiquidity, currentTick, and the four ledger totals of FEAT-9BQZ)
+- Does not move USDC or outcome tokens — only updates accounting state (activeLiquidity, noSideLiquidity, currentTick, and the three ledger totals of FEAT-9BQZ)
 
 ## Actors
 
@@ -29,10 +28,6 @@ refs: [FEAT-REPZ, FEAT-T7AF, FEAT-TOGR, FEAT-JXQO, FEAT-9BQZ]
 
 **FR-TVS9** `When the Operator calls updateTick(newTick), the system shall iterate from currentTick toward newTick, crossing each initialized tick encountered using the TickBitmap to skip uninitialized ticks.`
 Fit Criterion: Given currentTick=100, newTick=300, and initialized ticks at 150, 200, 250 with gaps elsewhere, exactly three ticks are crossed in order and currentTick is 300 after the call.
-Linked to: UC-TVS1
-
-**FR-TVSA** `When an initialized tick is crossed in either direction, the system shall flip its feeGrowthOutsideX128 by computing feeGrowthGlobalX128 - tick.feeGrowthOutsideX128 and storing the result.`
-Fit Criterion: Given feeGrowthGlobalX128=1000 and tick.feeGrowthOutsideX128=300, after crossing, tick.feeGrowthOutsideX128=700.
 Linked to: UC-TVS1
 
 **FR-TVSB** `When an initialized tick is crossed left-to-right (price increasing), the system shall add the tick's liquidityNet to activeLiquidity.`
@@ -60,7 +55,7 @@ Fit Criterion: Given a non-Operator address calls updateTick, the call reverts w
 Linked to: UC-TVS1
 
 **FR-TVSH** `If newTick equals currentTick, then the system shall record block.timestamp as lastOperatorActivityTimestamp and return without crossing a tick, reading the tick bitmap, or emitting an event, and with no storage write other than lastOperatorActivityTimestamp and the reentrancy guard toggle, which ends at its starting value.`
-Fit Criterion: Given currentTick=100 and initialized ticks on both sides of it, updateTick(100) succeeds, lastOperatorActivityTimestamp equals block.timestamp, no TickUpdated event is emitted, and currentTick, activeLiquidity, feeGrowthGlobalX128, and every tick record are unchanged.
+Fit Criterion: Given currentTick=100 and initialized ticks on both sides of it, updateTick(100) succeeds, lastOperatorActivityTimestamp equals block.timestamp, no TickUpdated event is emitted, and currentTick, activeLiquidity, and every tick record are unchanged.
 Linked to: UC-TVS1
 
 **FR-TVSI** `While the vault phase is not Active, when the Operator calls updateTick, the system shall revert.`
@@ -89,13 +84,12 @@ Linked to: UC-TVS1
 
 **NFR-TVSL** Security: `updateTick shall apply an inline nonReentrant guard following checks-effects-interactions ordering.`
 
-**NFR-TVSM** Security: OPERATOR TRUST ASSUMPTION — The Operator can report any tick value. LPs trust the Operator to report the CLOB mid-price accurately. A malicious or compromised Operator could report a false tick, causing incorrect fee distribution between positions. This matches the ProphetCTFExchange trust model.
+**NFR-TVSM** Security: OPERATOR TRUST ASSUMPTION — The Operator can report any tick value. LPs trust the Operator to report the CLOB mid-price accurately. A malicious or compromised Operator could report a false tick, which misvalues every claim's split between USDC and tokens and misclassifies which positions are in range. This matches the ProphetCTFExchange trust model.
 
 **NFR-5IDG** Security: `The gas cost of updateTick shall be bounded by the distance between currentTick and newTick, and shall be independent of where any other party has initialized ticks outside that range.` An LP can initialize a tick at any aligned position by signing a mint intent. An unbounded search lets one planted tick at the edge of the scale push a later legitimate updateTick past the block gas limit: 76,618,321 gas for a move of 200 ticks, measured on 2026-09-12. The bound is as tight as the Operator's reported newTick, which is a trusted input under NFR-TVSM. This requirement removes third-party control over the search cost. It does not change the Operator trust assumption. A large single jump across a real gap of uninitialized ticks still reads one word per 256 ticks, so the Operator chunks large jumps across several calls, as ADR-TVUW already requires for crossings. No on-chain enforcement of that chunking is specified.
 
 ## Acceptance
 
-- For any sequence of updateTick calls, feeGrowthInsideX128 computed for a position spanning ticks [a, b) correctly reflects fees accrued only while currentTick was in [a, b)
 - After any updateTick, activeLiquidity equals the sum of liquidity from all positions whose range contains the new currentTick
 - Multiple sequential chunked updateTick calls produce the same final state as a single hypothetical call crossing the same ticks (chunking equivalence)
 - TickBitmap correctly tracks initialization state including word-boundary edge cases

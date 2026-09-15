@@ -4,7 +4,7 @@ name: Deploy LP Vault for a Market
 module: contracts
 domain: "@vault"
 status: implemented
-version: 10
+version: 11
 refs: []
 ---
 
@@ -15,7 +15,7 @@ refs: []
 ## Non-Goals
 
 - Does not handle LP position minting -- see feature 2
-- Does not handle fee distribution, tick updates, or fee collection -- see features 3-5
+- Does not handle tick updates or position exits -- see FEAT-TVS0 and FEAT-7G40
 - Does not handle position burning or deposit-then-credit orchestration -- see features 6-7
 - Does not handle vault wind-down or emergency cancel -- see feature 8
 - Does not maintain vault-level role registries -- vaults delegate all operator, oracle, and admin authorization to the factory contract at call time
@@ -88,7 +88,7 @@ Linked to: UC-REQ1
 ### ERC-1155 Receiver Compatibility
 
 **FR-3WLI** `When the vault's configured ConditionalTokens contract transfers the vault's own outcome tokens (yesTokenId or noTokenId) to the vault via safeTransferFrom or safeBatchTransferFrom, the system shall accept the transfer by returning the ERC-1155 receiver acknowledgement values.`
-Fit Criterion: Given an initialized vault, `onERC1155Received(...)` called by `conditionalTokens` for `yesTokenId` or `noTokenId` returns `0xf23a6e61`, and `onERC1155BatchReceived(...)` called by `conditionalTokens` for a batch drawn from those two IDs returns `0xbc197c81`. A `safeTransferFrom` and a `safeBatchTransferFrom` of those IDs from the ConditionalTokens contract to the vault both complete without reverting, and the vault's token balances reflect the transferred amounts. Neither hook mutates position, tick, or fee-accumulator state, and neither hook merges tokens -- vault bookkeeping is driven by mint, collect, and notifyFees, not by inbound transfers, and a hook runs inside the exchange's settlement transaction, so a revert there reverts the match.
+Fit Criterion: Given an initialized vault, `onERC1155Received(...)` called by `conditionalTokens` for `yesTokenId` or `noTokenId` returns `0xf23a6e61`, and `onERC1155BatchReceived(...)` called by `conditionalTokens` for a batch drawn from those two IDs returns `0xbc197c81`. A `safeTransferFrom` and a `safeBatchTransferFrom` of those IDs from the ConditionalTokens contract to the vault both complete without reverting, and the vault's token balances reflect the transferred amounts. Neither hook mutates position or tick state, and neither hook merges tokens -- vault bookkeeping is driven by mint, burn, and updateTick, not by inbound transfers, and a hook runs inside the exchange's settlement transaction, so a revert there reverts the match.
 Linked to: UC-REQ1
 
 **FR-3WLJ** `If any address other than the vault's configured ConditionalTokens contract calls onERC1155Received or onERC1155BatchReceived, then the system shall revert.`

@@ -3,13 +3,13 @@ id: UC-JXQW
 name: Emergency Cancel All
 feature: FEAT-JXQO
 status: implemented
-version: 8
+version: 9
 actor: Any Wallet
 ---
 
 # UC-JXQW: Emergency Cancel All
 
-> Any address freezes the vault after the Operator has been silent beyond the vault's emergency-cancel timelock. The freeze sets the phase to Cancelled, a terminal state, and changes nothing else, so each LP exits alone through the burn, the collect, or the reclaim, which pay in full.
+> Any address freezes the vault after the Operator has been silent beyond the vault's emergency-cancel timelock. The freeze sets the phase to Cancelled, a terminal state, and changes nothing else, so each LP exits alone through the burn or the reclaim, which pay in full.
 
 ## Preconditions
 
@@ -21,14 +21,14 @@ actor: Any Wallet
 
 Any address calls `emergencyCancelAll()` on the vault.
 
-The silence timer this use case reads is refreshed by every successful Operator-gated call -- `mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`, and the dedicated `heartbeat()`. A call that reverts does not refresh it. On a quiet Active market the keeper's report with the unchanged tick refreshes the timer and does not revert (SC-TVS7). `heartbeat()` exists for a vault that is paused or wound down, where `updateTick` reverts, and for an Operator with no report to send. Every later Operator function carries `touchesHeartbeat` (`CLAUDE.md`, hard rules).
+The silence timer this use case reads is refreshed by every successful Operator-gated call -- `mintPositionFor`, `updateTick`, `mergePositions`, and the dedicated `heartbeat()`. A call that reverts does not refresh it. On a quiet Active market the keeper's report with the unchanged tick refreshes the timer and does not revert (SC-TVS7). `heartbeat()` exists for a vault that is paused or wound down, where `updateTick` reverts, and for an Operator with no report to send. Every later Operator function carries `touchesHeartbeat` (`CLAUDE.md`, hard rules).
 
 ---
 
 ### SC-JXQX: The freeze after the silence timelock changes only the phase
 
 **Given:**
-- Vault is in Active phase with one in-range LP position (1,000 USDC over [0, 100)) with accrued fees, and one pending escrow of 600 USDC
+- Vault is in Active phase with one in-range LP position (1,000 USDC over [0, 100)) and one pending escrow of 600 USDC
 - `block.timestamp - lastOperatorActivityTimestamp >= emergencyCancelTimelock`
 
 **Steps:**
@@ -39,7 +39,7 @@ The silence timer this use case reads is refreshed by every successful Operator-
 
 **Outcomes:**
 - Vault phase is Cancelled (3)
-- `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, and `totalEscrowed` are unchanged
+- `activeLiquidity`, `currentTick`, `nextPositionId`, and `totalEscrowed` are unchanged
 - The position record, both boundary tick records, and their bitmap bits are unchanged
 - The escrow record is unchanged
 - The vault's USDC balance is unchanged
@@ -101,25 +101,22 @@ The silence timer this use case reads is refreshed by every successful Operator-
 
 **Given:**
 - Vault holds three positions owned by two Safes, all minted with the vault at tick 6000: Safe A owns an in-range position (300 USDC over [5500, 6500)) and an out-of-range position (500 USDC over [7000, 8000)), and Safe B owns an in-range position (1,000 USDC over [5000, 7000))
-- Fees of 500 USDC were reported
 - The vault is frozen after the timelock (SC-JXQX)
 
 **Steps:**
 1. Safe A calls `burnPosition` for its in-range position
 2. System values the claim at the frozen tick, subtracts the position's liquidity from `activeLiquidity` and from both ticks, deletes the record, and pays Safe A
-3. Safe B calls `collect` for its position
-4. System pays Safe B its accrued fees
-5. Safe A calls `burnPosition` for its out-of-range position (500 USDC over [7000, 8000), minted with the vault at 6000, so its mint tick is 7000 and every level is still USDC)
-6. Safe B calls `burnPosition` for its position
+3. Safe A calls `burnPosition` for its out-of-range position (500 USDC over [7000, 8000), minted with the vault at 6000, so its mint tick is 7000 and every level is still USDC)
+4. Safe B calls `burnPosition` for its position
 
 **Outcomes:**
-- Safe A receives 300 USDC plus its share of the fees for the first burn, and the 500 USDC principal of the second
-- Safe B receives its fees from the collect, then its principal from the burn
+- Safe A receives 300 USDC for the first burn, and the 500 USDC principal of the second
+- Safe B receives its 1,000 USDC principal from the burn
 - After the first burn `activeLiquidity` equals Safe B's liquidity, and after every exit it is zero
 - The phase stays 3
 
 **Side Effects:**
-- `PositionBurned` three times and `FeesCollected` once
+- `PositionBurned` three times
 - All three positions deleted and their ticks updated
 - No `EmergencyCancelExecuted`
 
@@ -129,30 +126,26 @@ The silence timer this use case reads is refreshed by every successful Operator-
 
 **Given:**
 - Vault phase is Cancelled (3) after a successful `emergencyCancelAll()`
-- The LP's position has 499 USDC of accrued fees (500 reported over its liquidity, rounded down)
 - One escrow of 600 USDC is pending
 - The vault holds 10 YES and 10 NO
 
 **Steps:**
 1. Operator calls `mintPositionFor(...)` -- reverts
-2. LP's Safe calls `collect(positionId)` -- succeeds and pays the 499 USDC of fees
-3. Operator calls `notifyFees(amount)` -- reverts
-4. Operator calls `updateTick(newTick)` -- reverts
-5. Operator calls `mergePositions(...)` -- reverts
-6. Operator calls `heartbeat()` -- reverts
-7. Oracle calls `startWindDown()` -- reverts
-8. Any address calls `emergencyCancelAll()` again -- reverts
-9. Any wallet calls `mergeCompleteSets()` -- succeeds and merges the 10 pairs
-10. The escrow's Safe calls `reclaimDeposit(intentId)` -- succeeds and refunds 600 USDC
-11. The Operator calls `depositForIntent(...)` -- reverts
+2. Operator calls `updateTick(newTick)` -- reverts
+3. Operator calls `mergePositions(...)` -- reverts
+4. Operator calls `heartbeat()` -- reverts
+5. Oracle calls `startWindDown()` -- reverts
+6. Any address calls `emergencyCancelAll()` again -- reverts
+7. Any wallet calls `mergeCompleteSets()` -- succeeds and merges the 10 pairs
+8. The escrow's Safe calls `reclaimDeposit(intentId)` -- succeeds and refunds 600 USDC
+9. The Operator calls `depositForIntent(...)` -- reverts
 
 **Outcomes:**
 - Every trading call reverts with the phase error
-- The collect, the merge, and the reclaim succeed and pay in full
+- The merge and the reclaim succeed and pay in full
 
 **Side Effects:**
 - No state change from the trading calls, and no event from them
-- `FeesCollected(positionId, safe, 499)` from the collect
 - `CompleteSetsMerged(caller, 10)` emitted by the merge, and the vault gains 10 USDC
 - `DepositReclaimed(intentId, safe, 600)` from the reclaim
 
@@ -163,19 +156,20 @@ The silence timer this use case reads is refreshed by every successful Operator-
 **Given:**
 - Vault is in Active phase
 - `block.timestamp - lastOperatorActivityTimestamp >= emergencyCancelTimelock` (timelock would have elapsed)
+- A tick different from `currentTick` is available to report
 
 **Steps:**
-1. Operator calls `notifyFees(amount)` (resets `lastOperatorActivityTimestamp`)
+1. Operator calls `updateTick(newTick)` with a changed tick (resets `lastOperatorActivityTimestamp`)
 2. Position holder immediately calls `emergencyCancelAll()`
-3. System checks timelock -- it has NOT elapsed since the recent `notifyFees`
+3. System checks timelock -- it has NOT elapsed since the recent `updateTick`
 4. System reverts
 
 **Outcomes:**
 - Transaction reverts with timelock error
-- `lastOperatorActivityTimestamp` reflects the `notifyFees` call time
+- `lastOperatorActivityTimestamp` reflects the `updateTick` call time
 
 **Side Effects:**
-- Fee distribution from `notifyFees` succeeded
+- The tick report succeeded and moved `currentTick`
 - No emergency cancel occurred
 - No `EmergencyCancelExecuted` event emitted
 
@@ -185,7 +179,7 @@ The silence timer this use case reads is refreshed by every successful Operator-
 
 **Given:**
 - Vault is in Active phase, not paused, with at least one position
-- The market is quiet and stable: the tick has not moved and no fee revenue has arrived, so `notifyFees` would revert with `ZeroAmount`
+- The market is quiet and stable: the tick has not moved
 - `block.timestamp - lastOperatorActivityTimestamp >= emergencyCancelTimelock` (timelock would have elapsed)
 
 **Steps:**
@@ -209,7 +203,7 @@ The silence timer this use case reads is refreshed by every successful Operator-
 
 **Side Effects:**
 - `lastOperatorActivityTimestamp` updated to `block.timestamp` on each of the two Operator calls
-- No change to `activeLiquidity`, `currentTick`, `feeGrowthGlobalX128`, `nextPositionId`, `phase`, or any position or tick record
+- No change to `activeLiquidity`, `currentTick`, `nextPositionId`, `phase`, or any position or tick record
 - No `TickUpdated` event emitted
 - No USDC transferred
 - No emergency cancel occurred and no `EmergencyCancelExecuted` event emitted
@@ -265,7 +259,7 @@ The silence timer this use case reads is refreshed by every successful Operator-
 ### SC-3XUO: Heartbeat still works while trading is paused or the vault is wound down
 
 **Given:**
-- Case A: Vault is in Active phase and an Admin has called `pauseTrading()`, so `paused == true`. Every other Operator-gated function (`mintPositionFor`, `notifyFees`, `updateTick`, `mergePositions`) reverts on the `whenNotPaused` gate
+- Case A: Vault is in Active phase and an Admin has called `pauseTrading()`, so `paused == true`. Every other Operator-gated function (`mintPositionFor`, `updateTick`, `mergePositions`) reverts on the `whenNotPaused` gate
 - Case B: the Oracle has called `startWindDown()`, so `phase == 2`, and `updateTick` reverts with `VaultNotActive`, so the keeper's unchanged report cannot refresh the timer
 
 **Steps:**

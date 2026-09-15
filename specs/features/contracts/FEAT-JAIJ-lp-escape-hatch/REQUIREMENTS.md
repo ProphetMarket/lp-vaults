@@ -4,7 +4,7 @@ name: LP Escape Hatch
 module: contracts
 domain: "@positions"
 status: implemented
-version: 3
+version: 4
 refs: [FEAT-T7AF, FEAT-3ZRI, FEAT-REPZ, FEAT-6HBN]
 ---
 
@@ -15,7 +15,7 @@ refs: [FEAT-T7AF, FEAT-3ZRI, FEAT-REPZ, FEAT-6HBN]
 ## Non-Goals
 
 - Does not escrow USDC -- see FEAT-3ZRI
-- Does not handle position burning or fee withdrawal -- see FEAT-U079
+- Does not handle position burning -- see FEAT-7G40
 - Does not handle vault wind-down or emergency cancel -- separate features
 - Does not wait: no timelock exists on either reclaim path (ADR-9OYQ)
 - Does not refund gas costs
@@ -54,7 +54,7 @@ Fit Criterion: Given an escrow, `reclaimDeposit` and `reclaimDepositFor` succeed
 Linked to: UC-JAIK, UC-3Z93
 
 **FR-DU2U** `When a reclaim refunds an escrow, the system shall merge the vault's free pairs (FEAT-6HBN FR-6HBZ) into USDC before the USDC transfer, and shall pay the recorded amount unchanged.`
-Fit Criterion: Given a 600 USDC escrow, a vault balance of 200 after the exchange's allowance spent 400 on a fill, and 500 free pairs, the reclaim merges 500 pairs and pays 600 in one call; with no free pair the reclaim makes no merge call and emits no `CompleteSetsMerged`. Escrow seniority (decision C7) binds burns and collects, which read the balance less `totalEscrowed`, and not fills: the exchange holds an unlimited USDC allowance from `initialize` (FEAT-REPZ FR-REQO), so a fill can spend escrowed USDC, and the keeper must keep its quoted size below the vault's USDC balance minus `totalEscrowed`. The merge is what lets a reclaim recover without a keeper (finding CV-06 of `audits/code-validation-round-1.md`, ADR-DU2V).
+Fit Criterion: Given a 600 USDC escrow, a vault balance of 200 after the exchange's allowance spent 400 on a fill, and 500 free pairs, the reclaim merges 500 pairs and pays 600 in one call; with no free pair the reclaim makes no merge call and emits no `CompleteSetsMerged`. Escrow seniority (decision C7) binds burns, which read the balance less `totalEscrowed`, and not fills: the exchange holds an unlimited USDC allowance from `initialize` (FEAT-REPZ FR-REQO), so a fill can spend escrowed USDC, and the keeper must keep its quoted size below the vault's USDC balance minus `totalEscrowed`. The merge is what lets a reclaim recover without a keeper (finding CV-06 of `audits/code-validation-round-1.md`, ADR-DU2V).
 Linked to: UC-JAIK, UC-3Z93
 
 ### Signature Validation

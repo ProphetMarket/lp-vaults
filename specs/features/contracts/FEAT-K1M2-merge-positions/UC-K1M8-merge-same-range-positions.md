@@ -3,13 +3,13 @@ id: UC-K1M8
 name: Merge Same-Range Positions
 feature: FEAT-K1M2
 status: implemented
-version: 5
+version: 6
 actor: Operator
 ---
 
 # UC-K1M8: Merge Same-Range Positions
 
-> Operator combines two or more LP positions that share the same owner, tickLower, tickUpper, and mint tick into a single position, preserving total liquidity and accrued fees. This merge joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC, which is `mergeCompleteSets()` (decision C26, audit-fix step R9).
+> Operator combines two or more LP positions that share the same owner, tickLower, tickUpper, and mint tick into a single position, preserving total liquidity. This merge joins LP position records. It is not the complete-set merge of YES and NO tokens into USDC, which is `mergeCompleteSets()` (decision C26, audit-fix step R9).
 
 ## Preconditions
 
@@ -26,15 +26,13 @@ Operator calls `mergePositions(uint256[] calldata positionIds)` on the vault.
 
 **Given:**
 - Two positions owned by the same LP with range [0, 100), each with 500 liquidity, both minted at currentTick = 0, so both hold mintTick = 0
-- Fees have been distributed via `notifyFees`
 
 **Steps:**
 1. Operator calls `mergePositions([posA, posB])`
 2. System checks that no position ID repeats in the array
 3. System validates all positions share the same owner, tickLower, tickUpper, and mintTick
-4. System computes accrued fees for both positions
-5. System sums liquidity into the first position (posA)
-6. System zeroes the consumed position (posB)
+4. System sums liquidity into the first position (posA)
+5. System zeroes the consumed position (posB)
 
 **Outcomes:**
 - posA.liquidity == 1000 (sum of both)
@@ -44,7 +42,7 @@ Operator calls `mergePositions(uint256[] calldata positionIds)` on the vault.
 - `PositionsMerged(uint256[] positionIds, uint256 survivorId)` event emitted
 - Tick `liquidityGross` unchanged (net liquidity on the range is the same)
 - `lastOperatorActivityTimestamp` storage: refreshed to `block.timestamp` -- a successful merge is proof the Operator is alive (FEAT-JXQO)
-- No USDC transferred (fees rolled into tokensOwed on survivor)
+- No USDC transferred
 
 ---
 
@@ -130,30 +128,6 @@ Operator calls `mergePositions(uint256[] calldata positionIds)` on the vault.
 **Side Effects:**
 - No state change
 - No event emitted
-
----
-
-### SC-K1MC: Fee accounting preserved after merge
-
-**Given:**
-- Two positions with different accrued fees (posA has accrued ~300 USDC, posB has accrued ~200 USDC)
-- Both positions share the same range and owner
-
-**Steps:**
-1. Operator calls `mergePositions([posA, posB])`
-2. System computes uncollected fees for each position
-3. System rolls all uncollected fees into the survivor's tokensOwed
-4. System sets the survivor's feeGrowthInsideLastX128 to the current value
-
-**Outcomes:**
-- Survivor's tokensOwed includes both positions' accrued fees (~500 total)
-- Survivor's feeGrowthInsideLastX128 is set to the current feeGrowthInside value
-- Subsequent collect on survivor returns the correct total
-
-**Side Effects:**
-- No fees lost
-- No double-counting possible on next collect
-- `totalFeesOwedX128` storage (FEAT-9BQZ): decreased by the two remainders the floors dropped; the three principal totals unchanged (FR-K1M6, SC-9BS6)
 
 ---
 

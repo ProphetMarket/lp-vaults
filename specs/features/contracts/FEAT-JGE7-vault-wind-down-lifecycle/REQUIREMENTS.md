@@ -4,19 +4,19 @@ name: Vault Wind-Down Lifecycle
 module: contracts
 domain: "@vault"
 status: implemented
-version: 5
+version: 6
 refs: [FEAT-REPZ, FEAT-T7AF, FEAT-6HBN]
 ---
 
 # Vault Wind-Down Lifecycle
 
-> Oracle-driven phase transition that moves a vault from Active to WindDown when its underlying market resolves, gating off new position mints while keeping exit paths (burn, collect, reclaim) open for existing LPs.
+> Oracle-driven phase transition that moves a vault from Active to WindDown when its underlying market resolves, gating off new position mints while keeping exit paths (burn, reclaim) open for existing LPs.
 
 ## Non-Goals
 
 - Does not handle emergency cancel (`emergencyCancelAll`) -- separate feature
 - Does not handle position burning mechanics -- see burn position feature
-- Does not modify fee distribution behavior during WindDown -- Operator can still call `notifyFees` and `mergePositions`; `updateTick` reverts `VaultNotActive` in WindDown (FEAT-TVS0), which is what lets the redemption below fix every claim
+- Does not change the Operator's work during WindDown -- the Operator can still call `mergePositions`; `updateTick` reverts `VaultNotActive` in WindDown (FEAT-TVS0), which is what lets the redemption below fix every claim
 - Does not handle market resolution on the CTF Exchange -- `startWindDown` is a downstream Oracle signal, not a resolution mechanism
 - Does not redeem the vault's outcome tokens -- see FEAT-6HBN; the Oracle calls `startWindDown` first, because the redemption reverts while the vault is Active (ADR-6HCK)
 
@@ -48,8 +48,8 @@ Linked to: UC-JGEE
 Fit Criterion: Given a vault in WindDown phase, `depositForIntent(...)` and `mintPositionFor(...)` both revert with `VaultNotActive` regardless of caller authorization, and an escrow made before the wind-down stays reclaimable (FR-JGEC).
 Linked to: UC-JGEE
 
-**FR-JGEC** `While the vault phase is WindDown, when the position owner calls burnPosition, collect, or reclaimDeposit, or the Operator relays burnPositionFor, collectFor, or reclaimDepositFor, the system shall succeed as in Active phase.`
-Fit Criterion: Given a vault in WindDown phase with an existing position and an escrow, `burnPosition(posId)`, `collect(posId)`, `reclaimDeposit(intentId)`, `burnPositionFor(...)`, `collectFor(...)`, and `reclaimDepositFor(...)` succeed with the same behavior as Active phase. The burn pays the claim's USDC plus its one outcome token (FEAT-7G40 FR-7G4V).
+**FR-JGEC** `While the vault phase is WindDown, when the position owner calls burnPosition or reclaimDeposit, or the Operator relays burnPositionFor or reclaimDepositFor, the system shall succeed as in Active phase.`
+Fit Criterion: Given a vault in WindDown phase with an existing position and an escrow, `burnPosition(posId)`, `reclaimDeposit(intentId)`, `burnPositionFor(...)`, and `reclaimDepositFor(...)` succeed with the same behavior as Active phase. The burn pays the claim's USDC plus its one outcome token (FEAT-7G40 FR-7G4V).
 Linked to: UC-JGEE
 
 ## Non-Functional Requirements
@@ -64,6 +64,6 @@ Linked to: UC-JGEE
 - Phase transition is one-way (Active -> WindDown, no reverse path)
 - Non-Oracle callers revert on `startWindDown()`
 - Mints revert in WindDown for all callers
-- Burns, collects, reclaim deposits succeed in WindDown
+- Burns and reclaim deposits succeed in WindDown
 - Coverage gate met against `.molcajete/settings.json` `testing.threshold`
 - FEATURES.md status is `implemented`

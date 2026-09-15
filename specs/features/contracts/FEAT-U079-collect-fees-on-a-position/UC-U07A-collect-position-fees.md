@@ -2,12 +2,14 @@
 id: UC-U07A
 name: Collect Position Fees
 feature: FEAT-U079
-status: implemented
-version: 7
+status: deprecated
+version: 8
 actor: LP
 ---
 
 # UC-U07A: Collect Position Fees
+
+Deprecated on 2026-09-14 (step R17 in `audits/audit-fixes-ranged.md`): the Prophet server computes and pays each maker's fees off-chain, so the vault carries no fee accounting. The text below is the audit trail of the deleted code.
 
 > LP withdraws accumulated trading fees from their position without removing it.
 
