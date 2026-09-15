@@ -2,7 +2,7 @@
 id: FEAT-9BQZ
 name: Vault Solvency Ledger
 use_cases: [UC-9BR0, UC-9BR1, UC-9BR2]
-scenarios: [SC-9BRZ, SC-9BS0, SC-9BS1, SC-9BS2, SC-9BS6, SC-9BS7, SC-COEO, SC-COEP, SC-9BS8, SC-9BS9, SC-9BSA, SC-9BSB, SC-COEQ, SC-COER, SC-COES, SC-9BSC, SC-9BSD, SC-9BSE, SC-9BSF, SC-9BSG, SC-COET, SC-COEU, SC-CYSB, SC-CYSC]
+scenarios: [SC-9BRZ, SC-9BS0, SC-9BS1, SC-9BS2, SC-9BS6, SC-9BS7, SC-COEO, SC-COEP, SC-9BS8, SC-9BS9, SC-9BSA, SC-9BSB, SC-COEQ, SC-COER, SC-COES, SC-9BSC, SC-9BSD, SC-9BSE, SC-9BSF, SC-9BSG, SC-COET, SC-COEU, SC-CYSB, SC-CYSC, SC-DFDY]
 last_update: 2026-09-14
 ---
 
@@ -16,7 +16,7 @@ C4Context
     Person(operator, "Operator", "Mints, reports fees, moves the price, and merges positions")
     System(vault, "LPVault", "Keeps four scaled totals of what it owes and pays each asset at min(1, held / owed)")
     System_Ext(usdc, "USDC", "ERC-20 collateral; its balance above escrow is the USDC ratio's numerator")
-    System_Ext(ct, "ConditionalTokens", "ERC-1155 YES and NO; each balance less the pairs is a token ratio's numerator before the switch, and the balances valued at the stored payout join the USDC numerator after it")
+    System_Ext(ct, "ConditionalTokens", "ERC-1155 YES and NO; each balance less the free pairs is a token ratio's numerator before the switch, and the balances valued at the stored payout join the USDC numerator after it")
     System_Ext(monitor, "Off-chain monitoring", "Reads the totals; the only shortfall alarm that exists")
 
     Rel(lp, vault, "burnPosition / collect")
@@ -38,7 +38,7 @@ C4Container
         Component(tick, "Tick traversal", "internal", "updateTick: _accrueSegment per segment, _applyShift once; _crossTick moves noSideLiquidity")
         Component(subrange, "NO sub-range booking", "internal", "_addNoSubRange / _removeNoSubRange over _addTickReference / _removeTickReference")
         Component(prorate, "_prorate", "pure", "owed x min(1, held / totalOwed), rounded down, capped at held")
-        Component(ratio, "_usdcRatio", "view", "(held, total) of the USDC ratio: today's rule before the switch; after it the token balances and the token totals valued at the stored payout (FEAT-6HBN)")
+        Component(ratio, "_usdcRatio", "view", "(held, total) of the USDC ratio, given the free pairs the caller computed: the balance plus the free pairs less escrow before the switch; after it the token balances and the token totals valued at the stored payout (FEAT-6HBN)")
     }
     System_Ext(usdc, "USDC")
     System_Ext(ct, "ConditionalTokens")
@@ -90,7 +90,8 @@ erDiagram
 - `totalYesOwedScaled` and `totalNoOwedScaled` are independent; neither is ever reduced by the other (FR-9BR5)
 - No total is derived from a price other than `currentTick` (FR-9BR4), and none is computed by iterating `positions` (FR-9BR3)
 - A segment's shift conserves the claim: the USDC, YES, and NO deltas are the per-level derivative of the claim formula, so a move up and the same move down cancel exactly (FR-9BRL)
-- Each ratio is `min(1, held / total)` with the truncated getters as denominators, read before the debit; a zero total yields 1 (FR-9BRP)
+- Each ratio is `min(1, held / total)` with the truncated getters as denominators, read before the debit; a zero total yields 1 (FR-9BRP). Before the switch `held` counts the free pairs, `min(yes − min(yes, totalYesOwed()), no − min(no, totalNoOwed()))` with the totals read before the debit, as USDC for the USDC ratio and subtracts them from each token balance for the token ratios (FR-9BRM to FR-9BRO, FEAT-6HBN ADR-DFE2)
+- Under drift-free fills the USDC above escrow covers `totalUsdcOwed() + totalFeesOwed()` and each token balance covers its total, so every ratio is 1, every burn pays in full, and after the last burn the vault holds 0 YES, 0 NO, and the spread income within one unit per completed mint, move, burn, fee report, collect, redemption, and consumed merge position (`invariant_holdingsCoverTotals`, `invariant_burnsPayInFull`, and the `afterInvariant` of `SolvencyConservationInvariantTest`; SC-DFDY)
 - After the switch there is one USDC ratio: its numerator adds the USDC the vault's YES and NO balances redeem for at the stored payout, its denominator adds the USDC `totalYesOwed()` and `totalNoOwed()` redeem for, and a burn prorates its three legs as one sum (FR-CYS5); the totals themselves stay token-denominated (ADR-9BSJ)
 - A burn or a collect debits the full scaled owed amount, whatever it paid (FR-9BRR)
 - Before the switch `usdcPaid <= floor((usdcOwed + feesOwed) × usdcRatio)` and `tokenPaid <= floor(tokenOwed × tokenRatio)`, and neither exceeds what is held; after it `usdcPaid + tokenPaid == floor((usdcOwed + feesOwed + tokenUsdc) × usdcRatio)` and never exceeds what is held (NFR-9BRW, `invariant_payoutsNeverExceedHeld`)
@@ -106,12 +107,13 @@ erDiagram
 | File | Role | Key Exports |
 |------|------|-------------|
 | `src/LPVault.sol` | Business logic: the ledger state, the booking at every call site, the segment shift, the ratios | `totalUsdcOwedScaled`, `totalYesOwedScaled`, `totalNoOwedScaled`, `totalFeesOwedX128`, `noSideLiquidity`, `totalUsdcOwed()`, `totalYesOwed()`, `totalNoOwed()`, `totalFeesOwed()`, `USDC_CLAIM_SCALE`, `TickInfo.noLiquidityNet`, `_addTickReference`, `_removeTickReference`, `_addNoSubRange`, `_removeNoSubRange`, `Shift`, `_accrueSegment`, `_applyShift`, `_prorate`, `_saturatingSub` |
-| `src/LPVault.sol` | Reused from FEAT-7G40, FEAT-U079, FEAT-TOGR, FEAT-TVS0, FEAT-K1M2, FEAT-6HBN | `_claim` (returns the scaled claim), `_burnAmounts`, `_burn`, `_collect`, `notifyFees`, `updateTick`, `_crossTick`, `mergePositions`, `_availableUsdc`, `_usdcRatio`, `_tokenBalances`, `_pairs`, `_resolved`, `_atPayout`, `_settle` |
+| `src/LPVault.sol` | Reused from FEAT-7G40, FEAT-U079, FEAT-TOGR, FEAT-TVS0, FEAT-K1M2, FEAT-6HBN | `_claim` (returns the scaled claim), `_burnAmounts`, `_burn`, `_collect`, `notifyFees`, `updateTick`, `_crossTick`, `mergePositions`, `_availableUsdc`, `_usdcRatio`, `_tokenBalances`, `_freePairs`, `_resolved`, `_atPayout`, `_settle` |
 | `test/fixtures/VaultStorage.sol` | Test fixture | `setCurrentTick` writes only the packed `currentTick` bytes, so `noSideLiquidity` keeps its value |
 | `test/features/FEAT-9BQZ-vault-solvency-ledger/UC-9BR0-maintain-solvency-totals.t.sol` | Integration tests | UC-9BR0 scenarios |
 | `test/features/FEAT-9BQZ-vault-solvency-ledger/UC-9BR1-accumulate-principal-shift.t.sol` | Integration tests | UC-9BR1 scenarios |
-| `test/features/FEAT-9BQZ-vault-solvency-ledger/UC-9BR2-apply-payout-ratios.t.sol` | Integration tests | UC-9BR2 scenarios |
-| `test/invariants/SolvencyLedger.t.sol` | Invariant tests; the handler resolves the market one pick in three once two positions are live and the Oracle redeems, so about a third of the runs cross the switch and pay after it (measured on 2026-09-14: 7 of 24 sampled runs, 17 payouts after the switch) | `SolvencyLedgerHandler`, `invariant_ledgerEqualsSumOfClaims`, `invariant_noSideLiquidity`, `invariant_payoutsNeverExceedHeld`, `invariant_ledgerRevertsOnlyForDocumentedReasons` |
+| `test/features/FEAT-9BQZ-vault-solvency-ledger/UC-9BR2-apply-payout-ratios.t.sol` | Integration tests | UC-9BR2 scenarios, including the drift-free conservation runs at a spread of 0 and of 2,000 bps on both sides of the switch |
+| `test/fixtures/KeeperFillFixture.sol` | Test fixture: the keeper's drift-free fill for one tick move, priced as the house board prices its bids (`quotes.Board` in the Prophet server) | `_fillMove()`, `_boardBids()` |
+| `test/invariants/SolvencyLedger.t.sol` | Invariant tests; the handler resolves the market one pick in three once two positions are live and the Oracle redeems, so about a third of the runs cross the switch and pay after it (measured on 2026-09-14: 7 of 24 sampled runs, 17 payouts after the switch) | `SolvencyLedgerHandler`, `invariant_ledgerEqualsSumOfClaims`, `invariant_noSideLiquidity`, `invariant_payoutsNeverExceedHeld`, `invariant_ledgerRevertsOnlyForDocumentedReasons`; `DriftFreeLedgerHandler` (no donation and no drain, every range inside `[100, 9900]`, deposits that divide by the width, every move filled at 2,000 bps into a ghost `spreadIncome`) and `SolvencyConservationInvariantTest` with `invariant_holdingsCoverTotals`, `invariant_burnsPayInFull`, and an `afterInvariant` that burns every position and checks the residue |
 | `test/invariants/TickState.t.sol` | Invariant tests (FEAT-TVS0) | The per-mint-tick extensions of the tick invariants |
 
 ## API Surface
@@ -150,8 +152,8 @@ erDiagram
 
 | System | Protocol | Direction | Purpose |
 |--------|----------|-----------|---------|
-| USDC (ERC-20) | contract call | bidirectional | `balanceOf` supplies the USDC ratio's numerator with the pairs and less `totalEscrowed`; `transfer` pays the USDC leg |
-| ConditionalTokens (ERC-1155) | contract call | bidirectional | `balanceOf` supplies the YES and NO numerators less the pairs before the switch, and the balances the USDC numerator values at the payout after it; `mergePositions` turns the pairs into USDC; `safeTransferFrom` pays the token leg before the switch; `redeemPositions` turns every token into USDC after it |
+| USDC (ERC-20) | contract call | bidirectional | `balanceOf` supplies the USDC ratio's numerator with the free pairs and less `totalEscrowed`; `transfer` pays the USDC leg |
+| ConditionalTokens (ERC-1155) | contract call | bidirectional | `balanceOf` supplies the YES and NO numerators less the free pairs before the switch, and the balances the USDC numerator values at the payout after it; `mergePositions` turns the free pairs into USDC; `safeTransferFrom` pays the token leg before the switch; `redeemPositions` turns every token into USDC after it |
 | Off-chain monitoring | RPC read | outbound | Polls the totals; the only mechanism by which a shortfall becomes visible |
 
 ## State Transitions
@@ -195,7 +197,7 @@ stateDiagram-v2
 | SC-COEQ | Three chunks equal one call, and a reversal restores the mint totals | `src/LPVault.sol:_accrueSegment()`, `src/LPVault.sol:_applyShift()` |
 | SC-COER | A mint tick is crossed like a boundary | `src/LPVault.sol:_addNoSubRange()`, `src/LPVault.sol:_addTickReference()`, `src/LPVault.sol:_crossTick()` |
 | SC-COES | A clamped mint enters the range on the side its mint tick gives | `src/LPVault.sol:_addNoSubRange()`, `src/LPVault.sol:_crossTick()`, `src/LPVault.sol:_accrueSegment()` |
-| UC-9BR2 | Apply Payout Ratios | `src/LPVault.sol:_prorate()`, `src/LPVault.sol:_usdcRatio()`, `src/LPVault.sol:_burnAmounts()`, `src/LPVault.sol:_collect()` |
+| UC-9BR2 | Apply Payout Ratios | `src/LPVault.sol:_prorate()`, `src/LPVault.sol:_usdcRatio()`, `src/LPVault.sol:_freePairs()`, `src/LPVault.sol:_burnAmounts()`, `src/LPVault.sol:_collect()` |
 | SC-9BSC | A covered vault pays every claim in full | `src/LPVault.sol:_prorate()` (the `held >= totalOwed` branch) |
 | SC-9BSD | Three burns in a row each receive the same ratio | `src/LPVault.sol:_burnAmounts()`, `src/LPVault.sol:_burn()` (the full-owed debit) |
 | SC-9BSE | Escrowed USDC never pays a burn or a collect | `src/LPVault.sol:_availableUsdc()`, `src/LPVault.sol:_prorate()` |
@@ -205,6 +207,7 @@ stateDiagram-v2
 | SC-COEU | A burn debits the full owed amount when it pays less | `src/LPVault.sol:_burn()`, `src/LPVault.sol:_saturatingSub()` |
 | SC-CYSB | Three burns after the switch receive the same ratio | `src/LPVault.sol:_usdcRatio()`, `src/LPVault.sol:_atPayout()`, `src/LPVault.sol:_burnAmounts()` (one prorate of the sum) |
 | SC-CYSC | A payout after the switch redeems late tokens first | `src/LPVault.sol:_settle()`, `src/LPVault.sol:_redeemOutcomeTokens()`, `src/LPVault.sol:_burn()` |
+| SC-DFDY | Drift-free fills conserve value across claims on both sides of the price, before and after the switch | `src/LPVault.sol:_freePairs()`, `src/LPVault.sol:_burnAmounts()`, `src/LPVault.sol:_burn()`, `src/LPVault.sol:_usdcRatio()`; `test/fixtures/KeeperFillFixture.sol:_fillMove()` |
 
 ## Architecture Decisions
 
@@ -235,6 +238,7 @@ In the context of decision O2 reversed on 2026-09-14, facing R9's pay-what-is-th
 | USDC (ERC-20) | e2e | The shared `MockERC20`, as elsewhere in this repo |
 | ConditionalTokens (ERC-1155) | e2e | The real Gnosis bytecode from `test/fixtures/ConditionalTokensFixture.sol`; `_giveOutcomeTokens` funds the token legs |
 | Shortfall states | fixture | Reached by moving USDC out of the vault through the exchange's standing approval, as a fill would (decision C8), and by funding fewer tokens than the bands owe; no production path creates a shortfall on purpose |
+| Drift-free fills | fixture | `KeeperFillFixture._fillMove` spends the board's bid per level through the exchange's standing approval and delivers the tokens through the receiver hook, so the conservation scenario and the drift-free invariant harness model the keeper the same way, at a spread of 0 and of 2,000 bps |
 | The conservation invariant | fuzz | `test/invariants/SolvencyLedger.t.sol` computes every position's claim per level in the test, so a wrong closed form in the vault is caught too |
 | The `currentTick` slot | fixture | `VaultStorage.setCurrentTick` writes the packed bytes only, so the extreme-word search tests of FEAT-TVS0 leave `noSideLiquidity` at zero |
 | Resolution and the switch | e2e | The fixture's `_resolve` reports the result on the real ConditionalTokens contract, and the Oracle's `redeemOutcomeTokens` sets the switch; the invariant harness reports through a helper on the test contract, because the test contract is the condition's oracle |

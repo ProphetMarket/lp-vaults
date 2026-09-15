@@ -20,7 +20,7 @@ C4Context
     System(vault, "LPVault (clone)", "Per-market vault with v3-style fee accumulators and positions")
     System_Ext(factory, "LPVaultFactory", "Operator registry and the Safe derivation inputs")
     System_Ext(usdc, "USDC", "ERC-20 stablecoin -- fee payout currency")
-    System_Ext(ctf, "ConditionalTokens", "Merges the vault's pairs into USDC first")
+    System_Ext(ctf, "ConditionalTokens", "Merges the vault's free pairs into USDC first")
     Rel(lp, vault, "collect(positionId)", "contract call")
     Rel(lp, operator, "signs CollectIntent(lp, positionId, nonce, deadline)", "EIP-712 off-chain")
     Rel(operator, vault, "collectFor(lp, positionId, nonce, deadline, sig)", "contract call")
@@ -40,7 +40,7 @@ C4Container
     Person(operator, "Operator")
     Container(vault, "LPVault (clone)", "Solidity", "collect and collectFor over one _collect body")
     Container(feeInside, "_computeFeeGrowthInside()", "Solidity internal", "Computes feeGrowthInsideX128 from global and per-tick accumulators")
-    Container(avail, "_availableUsdc()", "Solidity internal", "balance + pairs - totalEscrowed, floored at zero (FEAT-7G40)")
+    Container(avail, "_availableUsdc()", "Solidity internal", "balance + free pairs - totalEscrowed, floored at zero (FEAT-7G40)")
     Container(prorate, "_prorate()", "Solidity internal", "owed x min(1, available / (totalUsdcOwed + totalFeesOwed)), rounded down (FEAT-9BQZ)")
     Container(merge, "_settle()", "Solidity internal", "The merge before the switch, the redemption after it (FEAT-6HBN)")
     Container(eip712, "EIP-712 (inlined)", "Solidity internal", "CollectIntent typehash, _verifySafeOwnerSignature")
@@ -60,7 +60,7 @@ C4Container
     Rel(vault, avail, "read what USDC may be paid", "view")
     Rel(vault, prorate, "the paid amount at the USDC ratio", "internal")
     Rel(vault, positions, "reads liquidity, snapshot, tokensOwed; writes snapshot and zeroes tokensOwed", "storage")
-    Rel(vault, merge, "merge pairs, or redeem every token", "first interaction")
+    Rel(vault, merge, "merge the free pairs the collect computed, or redeem every token", "first interaction")
     Rel(merge, ctf, "mergePositions or redeemPositions", "call")
     Rel(vault, safeTransfer, "transfer the paid USDC")
 ```
@@ -97,7 +97,7 @@ erDiagram
 - Owed fees for a position can never exceed the total fee revenue distributed since the position was minted
 - `collect` does not modify `liquidity`, `tickLower`, `tickUpper`, or any tick state -- it is read-only on fee accumulators
 - The sum of every position's claimable fees plus every fee paid by `collect` never exceeds the sum of amounts passed to `notifyFees`, with no slack, because every rounding on the path rounds down
-- A collect pays the owed amount times the USDC ratio of FEAT-9BQZ, never above `usdc.balanceOf(vault) + pairs − totalEscrowed`, never reverts on that comparison, and debits the full scaled claim
+- A collect pays the owed amount times the USDC ratio of FEAT-9BQZ, never above `usdc.balanceOf(vault) + free pairs − totalEscrowed`, never reverts on that comparison, and debits the full scaled claim
 - Both collect paths pay the same amount for the same position; `collectFor` refreshes `lastOperatorActivityTimestamp`, `collect` never does
 - A signature valid for one of `MintIntent`, `ReclaimIntent`, `BurnIntent`, or `CollectIntent` is rejected by the other three paths
 
@@ -120,7 +120,7 @@ erDiagram
 | Event | Publisher | Payload | Condition | Consumers |
 |-------|-----------|---------|-----------|-----------|
 | `FeesCollected(uint256 positionId, address owner, uint256 amountOwed, uint256 amountPaid)` | LPVault | `positionId, owner, amountOwed, amountPaid` | On a successful collect or collectFor with a nonzero owed amount; `amountPaid < amountOwed` marks a ratio below 1 | Off-chain Event Listener |
-| `CompleteSetsMerged(address caller, uint256 amount)` | LPVault (FEAT-6HBN) | `caller, amount` | A paying collect found `min(YES, NO) > 0`; emitted before `FeesCollected` | Off-chain Event Listener |
+| `CompleteSetsMerged(address caller, uint256 amount)` | LPVault (FEAT-6HBN) | `caller, amount` | A paying collect found a free pair, a pair above what the ledger owes in both tokens; emitted before `FeesCollected` | Off-chain Event Listener |
 
 **Non-events (explicit):**
 - Zero-fee collect (SC-U07C, SC-BMFD): no FeesCollected event emitted, no balance read, no merge

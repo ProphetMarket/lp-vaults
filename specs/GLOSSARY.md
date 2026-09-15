@@ -21,9 +21,11 @@
 
 **Claim** -- What a position holds under decision C26: USDC for its unfilled levels and for the part of each filled level that a fill did not spend, one outcome token for the band between its mint tick and the current tick, and its share of the spread. Valued by `_claim` in FEAT-7G40.
 
-**Shortfall** -- The state in which the vault holds less of one asset than the solvency ledger (FEAT-9BQZ) says it owes, after the merge of its pairs. It comes from the accepted drift between the Operator's reported tick and the real fills (decision C8). It is a reading, never a flag: no payout reverts on it.
+**Shortfall** -- The state in which the vault holds less of one asset than the solvency ledger (FEAT-9BQZ) says it owes, after the merge of its free pairs. It comes from the accepted drift between the Operator's reported tick and the real fills (decision C8). It is a reading, never a flag: no payout reverts on it.
 
-**Ratio** -- One per asset, the smaller of 1 and what the vault holds divided by what the ledger says it owes: for USDC the balance plus the pairs less `totalEscrowed`, over `totalUsdcOwed() + totalFeesOwed()`; for a token its balance less the pairs, over that token's total. A burn or a collect pays owed × ratio, rounded down, and debits the full owed amount.
+**Free pair** -- A complete set above what the solvency ledger owes in both tokens: `min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed()))`, read before the exiting position is debited. Under drift-free fills the free pairs are the round-trip pairs. The merge, public or inside a payout, takes only free pairs (FEAT-6HBN, R14).
+
+**Ratio** -- One per asset, the smaller of 1 and what the vault holds divided by what the ledger says it owes: for USDC the balance plus the free pairs less `totalEscrowed`, over `totalUsdcOwed() + totalFeesOwed()`; for a token its balance less the free pairs, over that token's total. A burn or a collect pays owed × ratio, rounded down, and debits the full owed amount.
 
 **NO side** -- The sub-range `[mintTick, tickUpper)` of a position, whose levels buy NO when the price rises through them. Booked like a range: a `noLiquidityNet` pair at the mint tick and at `tickUpper`, and a `noSideLiquidity` counter that `updateTick` moves at each crossing. The YES side is `[tickLower, mintTick)`.
 

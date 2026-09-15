@@ -4,13 +4,13 @@ name: Collect Fees on a Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 5
+version: 6
 refs: [FEAT-TVS0, FEAT-6HBN, FEAT-3ZRI, FEAT-JAIJ, FEAT-9BQZ]
 ---
 
 # Collect Fees on a Position
 
-> Enables an LP to withdraw accumulated trading fees from their position without removing it, in one call by the LP's Safe or one relayed call with the owner key's signature, using the v3 feeGrowthInside accumulator to compute what is owed, merging the vault's pairs first and paying its share of what the vault holds above escrow under the solvency ledger (FEAT-9BQZ).
+> Enables an LP to withdraw accumulated trading fees from their position without removing it, in one call by the LP's Safe or one relayed call with the owner key's signature, using the v3 feeGrowthInside accumulator to compute what is owed, merging the vault's free pairs first and paying its share of what the vault holds above escrow under the solvency ledger (FEAT-9BQZ).
 
 ## Non-Goals
 
@@ -18,7 +18,7 @@ refs: [FEAT-TVS0, FEAT-6HBN, FEAT-3ZRI, FEAT-JAIJ, FEAT-9BQZ]
 - Does not handle fee notification or global accumulator updates -- see FEAT-TOGR
 - Does not handle tick crossing or feeGrowthOutside flipping -- see FEAT-TVS0
 - Does not handle vault lifecycle transitions -- see FEAT-JGE7 (wind-down) and FEAT-JXQO (emergency cancel)
-- Does not merge the vault's pairs or redeem its tokens on its own account -- see FEAT-6HBN, whose internal settlement every paying collect calls first (the merge before the switch, the redemption after it)
+- Does not merge the vault's free pairs or redeem its tokens on its own account -- see FEAT-6HBN, whose internal settlement every paying collect calls first (the merge before the switch, the redemption after it)
 
 ## Actors
 
@@ -87,13 +87,13 @@ Linked to: UC-BMF8, UC-U07A
 
 ## Non-Functional Requirements
 
-**NFR-U07P** Gas: `When the LP collects fees on a single position, the call gas shall remain below 120,000 when the vault holds no pair, and below 180,000 when the collect merges the vault's pairs, against the mock USDC and the real ConditionalTokens bytecode, measured with every slot cold.`
-Rationale: measured cold on the build of 2026-09-13 at 99,646 call gas with nothing to merge and 153,283 with 20 pairs merged, plus the 21,000 base each. The merge through the real ConditionalTokens contract costs about 54,000 gas cold, which the user accepted on 2026-09-13 (decision C26) over a collect that could pay from USDC a fill already spent; a keeper that merges on sight keeps the per-collect cost at the lower figure.
+**NFR-U07P** Gas: `When the LP collects fees on a single position, the call gas shall remain below 120,000 when the vault holds no pair, and below 180,000 when the collect merges the vault's free pairs, against the mock USDC and the real ConditionalTokens bytecode, measured with every slot cold.`
+Rationale: measured cold on the build of 2026-09-13 at 99,646 call gas with nothing to merge and 153,283 with 20 pairs merged, plus the 21,000 base each. The merge through the real ConditionalTokens contract costs about 54,000 gas cold, which the user accepted on 2026-09-13 (decision C26) over a collect that could pay from USDC a fill already spent; a keeper that merges on sight keeps the per-collect cost at the lower figure. Re-measured on the R14 build (2026-09-14): 117,976 with no pair, up from 117,998 on the R13 build, because the free-pairs rule returns before its two ledger reads when either balance is zero, and 168,792 with 20 pairs merged, up from 164,152 for those two reads. The bounds stay.
 
 **NFR-U07Q** Security: `The system shall apply an inline nonReentrant modifier on collect to prevent reentrancy via the USDC transfer callback.`
 
 **NFR-U07R** Security: `The system shall follow checks-effects-interactions ordering in collect: validate ownership and read the balances, the switch, and the ledger totals first (both token balances, the USDC balance, the stored payout, the ratio's two sides, and the amount to pay), update position state and the ledger second (the feeGrowthInsideLastX128 snapshot, tokensOwed to zero, and the fee total's debit), then settle (the merge before the switch, the redemption after it) and transfer USDC last.`
-Rationale: the merge pays exactly `min(yes, no)` USDC and the redemption pays exactly `balance × numerator ÷ denominator` per side, so the amount to pay is known from view reads before any effect, and CLAUDE.md checklist item 1 holds without exception.
+Rationale: the merge pays exactly the free pairs the collect computed from view reads (the two balances and the two owed totals, read before the fee debit) and the redemption pays exactly `balance × numerator ÷ denominator` per side, so the amount to pay is known before any effect, and CLAUDE.md checklist item 1 holds without exception. The settlement receives the number the collect computed, never a fresh read (FEAT-6HBN ADR-DFE2).
 
 **NFR-BMFC** Security: `collectFor shall carry an OPERATOR TRUST ASSUMPTION NatSpec block with an MEV analysis section.`
 Fit Criterion: the block states that the Operator can delay a collect and chooses its block, which changes nothing about the fees owed, because the accumulator only grows; that it cannot start one without the signature, replay a spent nonce, or redirect the payout; and that the LP's remedy is `collect`.
@@ -108,7 +108,7 @@ Fit Criterion: the block states that the Operator can delay a collect and choose
 - Non-owner callers cannot collect (FR-U07M verified in SC-U07D)
 - Sequential collects with no fee growth produce zero payout (no double-counting, SC-U07G)
 - Collect works in Active, WindDown, and Cancelled phases (SC-U07F, SC-BMFD)
-- Every paying collect merges the vault's pairs first, pays the owed amount times the USDC ratio, and settles the claim (SC-BMFE, SC-COEZ)
+- Every paying collect merges the vault's free pairs first, pays the owed amount times the USDC ratio, and settles the claim (SC-BMFE, SC-COEZ)
 - All scenarios in UC-BMF8 pass, and a `MintIntent`, `ReclaimIntent`, or `BurnIntent` signature is rejected by `collectFor`
 - `collectFor` refreshes `lastOperatorActivityTimestamp`; `collect` does not
 - OPERATOR TRUST ASSUMPTION NatSpec block with an MEV analysis present on `collectFor`

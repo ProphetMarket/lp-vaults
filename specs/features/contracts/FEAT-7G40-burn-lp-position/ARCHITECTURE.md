@@ -2,7 +2,7 @@
 id: FEAT-7G40
 name: Burn LP Position
 use_cases: [UC-7G41, UC-7G42]
-scenarios: [SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B, SC-BMF1, SC-BMF2, SC-BMF3, SC-7G4C, SC-7G4D, SC-7G4E, SC-7G4F, SC-7G4G, SC-7G4H, SC-7G4I, SC-7G4J, SC-7G4K, SC-BMF4, SC-BMF5, SC-BZC6, SC-CYS7, SC-CYS8, SC-CYS9, SC-CYSA]
+scenarios: [SC-7G43, SC-7G44, SC-7G45, SC-7G46, SC-7G47, SC-7G48, SC-7G49, SC-7G4A, SC-7G4B, SC-BMF1, SC-DFDX, SC-BMF2, SC-BMF3, SC-7G4C, SC-7G4D, SC-7G4E, SC-7G4F, SC-7G4G, SC-7G4H, SC-7G4I, SC-7G4J, SC-7G4K, SC-BMF4, SC-BMF5, SC-BZC6, SC-CYS7, SC-CYS8, SC-CYS9, SC-CYSA]
 last_update: 2026-09-14
 ---
 
@@ -18,7 +18,7 @@ C4Context
     System(vault, "LPVault", "Per-market vault with two burn entry points over one shared body")
     System_Ext(factory, "LPVaultFactory", "Operator registry and the Safe derivation inputs")
     System_Ext(usdc, "USDC", "ERC-20 token contract")
-    System_Ext(ctf, "ConditionalTokens", "ERC-1155 outcome tokens; merges pairs into USDC before the switch, redeems them at the payout after it")
+    System_Ext(ctf, "ConditionalTokens", "ERC-1155 outcome tokens; merges the free pairs into USDC before the switch, redeems them at the payout after it")
     Rel(lp, vault, "burnPosition(positionId)", "self-service, no Operator")
     Rel(lp, operator, "signs BurnIntent(lp, positionId, deadline)", "EIP-712 off-chain")
     Rel(operator, vault, "burnPositionFor(lp, positionId, deadline, sig)", "gas-sponsored relay")
@@ -63,7 +63,7 @@ C4Container
     Rel(vault, bitmap, "clears bit at liquidityGross == 0")
     Rel(vault, active, "decrements when in range", "storage")
     Rel(vault, pos, "reads then deletes", "storage")
-    Rel(vault, merge, "merge pairs, or redeem every token", "first interaction")
+    Rel(vault, merge, "merge the free pairs the burn computed, or redeem every token", "first interaction")
     Rel(vault, usdc, "transfer(owner, usdcPaid), or usdcPaid + tokenPaid after the switch (last call)", "ERC-20")
     Rel(vault, ctf, "safeTransferFrom(vault, owner, tokenId, tokenPaid)", "ERC-1155, last call, before the switch only")
 ```
@@ -112,7 +112,7 @@ erDiagram
 - Both entry points produce identical `PositionBurned` amounts, tick state, and `activeLiquidity` deltas for the same `(position, currentTick)`
 - Every asset a burn pays goes to `position.owner`, never to `msg.sender`
 - Before the switch, `usdcPaid <= usdcOwed + feesOwed` and `tokenPaid <= tokenOwed`, and a burn never reverts on either comparison; after it, `usdcPaid + tokenPaid <= usdcOwed + feesOwed + tokenUsdc`
-- `usdcPaid <= usdc.balanceOf(vault) + pairs − totalEscrowed` at the moment of the burn before the switch, and `usdcPaid + tokenPaid <= usdc.balanceOf(vault) + the USDC the vault's tokens redeem for − totalEscrowed` after it, so escrowed USDC never pays a burn
+- `usdcPaid <= usdc.balanceOf(vault) + free pairs − totalEscrowed` at the moment of the burn before the switch, with the free pairs read before the ledger debit (FEAT-6HBN ADR-DFE2), and `usdcPaid + tokenPaid <= usdc.balanceOf(vault) + the USDC the vault's tokens redeem for − totalEscrowed` after it, so escrowed USDC never pays a burn
 - Before the switch, `usdcPaid == floor((usdcOwed + feesOwed) × ratio)` and `tokenPaid == floor(tokenOwed × ratio)` for the ratios of FEAT-9BQZ; after it, `usdcPaid + tokenPaid == floor((usdcOwed + feesOwed + tokenUsdc) × ratio)` for the one USDC ratio (FR-CYS5), and in both modes the totals fall by the full scaled claim
 - After the switch a burn makes no ERC-1155 transfer, and the vault holds no token once it returns
 - `ticks[t].liquidityGross == Σ liquidity of live positions referencing t` holds across burns
@@ -127,7 +127,7 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | vault contract | `burnPosition` (external, nonReentrant, owner-only), `burnPositionFor` (external, onlyOperator, nonReentrant, touchesHeartbeat), `_burn` (internal, shared body), `_burnAmounts` (internal view, fills `BurnAmounts` with the truncated claim, the switch, and the paid amounts through `_usdcRatio` and `_prorate`, one prorate of the sum after the switch), `_claim` (internal view, the closed-form formula in its scaled unit, shared with the ledger), `_removeLiquidityFromTick` (internal), `_removeNoSubRange` (internal, FEAT-9BQZ), `_clearTickBitmapBit` (internal, now called), `_availableUsdc` and `_usdcRatio` (internal view, shared with FEAT-U079), `_tokenBalances`, `_pairs`, `_settle`, `_mergeCompleteSets`, `_redeemOutcomeTokens`, `_resolved`, and `_atPayout` (internal, FEAT-6HBN), `PRICE_TICK_ONE` (constant, FEAT-T7AF), `BURN_INTENT_TYPEHASH` (constant), `usedBurnAuthorizations` (storage), `PositionBurned` (event), `BurnAmounts` (memory struct) |
+| `src/LPVault.sol` | vault contract | `burnPosition` (external, nonReentrant, owner-only), `burnPositionFor` (external, onlyOperator, nonReentrant, touchesHeartbeat), `_burn` (internal, shared body), `_burnAmounts` (internal view, fills `BurnAmounts` with the truncated claim, the switch, the free pairs before the switch, and the paid amounts through `_usdcRatio` and `_prorate`, one prorate of the sum after the switch), `_claim` (internal view, the closed-form formula in its scaled unit, shared with the ledger), `_removeLiquidityFromTick` (internal), `_removeNoSubRange` (internal, FEAT-9BQZ), `_clearTickBitmapBit` (internal, now called), `_availableUsdc` and `_usdcRatio` (internal view, shared with FEAT-U079), `_tokenBalances`, `_freePairs`, `_settle`, `_mergeCompleteSets`, `_redeemOutcomeTokens`, `_resolved`, and `_atPayout` (internal, FEAT-6HBN), `PRICE_TICK_ONE` (constant, FEAT-T7AF), `BURN_INTENT_TYPEHASH` (constant), `usedBurnAuthorizations` (storage), `PositionBurned` (event), `BurnAmounts` (memory struct) |
 | `test/fixtures/LPVaultFixture.sol` | test fixture | `BURN_INTENT_TYPEHASH`, `_signBurnIntent(vault, pk, lp, positionId, deadline)` |
 | `test/fixtures/ConditionalTokensFixture.sol` | test fixture | `_giveOutcomeTokens(vault, conditionId, yesAmount, noAmount)` funds the token leg |
 | `test/features/FEAT-7G40-burn-lp-position/UC-7G41-burn-position.t.sol` | Integration tests for the self-service path, including the claim fuzz test, the shortfall tests, and the resolved branch | SC-7G43 through SC-7G4B, SC-BMF1, SC-BMF2, SC-BMF3, SC-BZC6, SC-CYS7 through SC-CYSA |
@@ -140,7 +140,7 @@ erDiagram
 | Event | Publisher | Payload | Condition | Consumers |
 |-------|-----------|---------|-----------|-----------|
 | `PositionBurned` | `LPVault._burn` | `positionId, owner, usdcOwed, feesOwed, usdcPaid, tokenId, tokenOwed, tokenPaid` | A burn completes through either entry point | Off-chain event listener (`paid < owed` marks a shortfall), LP app, keeper |
-| `CompleteSetsMerged` | `LPVault._mergeCompleteSets` (FEAT-6HBN) | `caller, amount` | Before the switch, the burn found `min(YES, NO) > 0`; emitted before `PositionBurned` | Off-chain event listener |
+| `CompleteSetsMerged` | `LPVault._mergeCompleteSets` (FEAT-6HBN) | `caller, amount` | Before the switch, the burn found a free pair, a pair above what the ledger owes in both tokens, read before the debit; emitted before `PositionBurned` | Off-chain event listener |
 | `OutcomeTokensRedeemed` | `LPVault._redeemOutcomeTokens` (FEAT-6HBN) | `caller, yesAmount, noAmount, usdcAmount` | After the switch, the burn found a token to redeem; emitted before `PositionBurned` | Off-chain event listener |
 
 **Non-events (explicit):**
@@ -162,7 +162,7 @@ erDiagram
 | System | Protocol | Direction | Purpose |
 |--------|----------|-----------|---------|
 | USDC ERC-20 | `balanceOf`, `transfer` | outbound | Reads what the vault holds above escrow, then pays the USDC leg and the fees to the owner |
-| ConditionalTokens ERC-1155 | `balanceOf`, `mergePositions`, `safeTransferFrom`, `redeemPositions` | outbound | Reads both token balances; before the switch merges the pairs into USDC and pays the token leg to the owner; after it redeems every token the vault holds |
+| ConditionalTokens ERC-1155 | `balanceOf`, `mergePositions`, `safeTransferFrom`, `redeemPositions` | outbound | Reads both token balances; before the switch merges the free pairs into USDC and pays the token leg to the owner; after it redeems every token the vault holds |
 | LPVaultFactory | `operators`, `safeFactory`, `safeProxyBytecodeHash` | outbound | The Operator gate and the Safe derivation on the relayed path |
 | FEAT-TVS0 `currentTick` | internal storage read | inbound | With `mintTick`, sets the claim |
 | FEAT-U079 fee accumulators | internal storage read | inbound | Supplies `feesOwed` through `_computeFeeGrowthInside` |
@@ -197,6 +197,7 @@ stateDiagram-v2
 | SC-7G4A | Burn succeeds with zero registered operators | `src/LPVault.sol:burnPosition()` |
 | SC-7G4B | Revert on a nonexistent, burned, or merged-away position | `src/LPVault.sol:burnPosition()` (liveness check) |
 | SC-BMF1 | Burn merges the vault's pairs first | `src/LPVault.sol:_burn()`, `src/LPVault.sol:_mergeCompleteSets()` |
+| SC-DFDX | Two claims on opposite sides of the tick are both paid in full | `src/LPVault.sol:_burnAmounts()` (the free pairs before any effect), `src/LPVault.sol:_freePairs()`, `src/LPVault.sol:_burn()` (passes them to `_settle` after the debit); `test/fixtures/KeeperFillFixture.sol:_fillMove()` |
 | SC-BMF2 | Burn pays its share when the vault is short | `src/LPVault.sol:_burnAmounts()`, `src/LPVault.sol:_prorate()`, `src/LPVault.sol:_availableUsdc()` |
 | SC-BMF3 | Burn of a clamped mint tick pays NO for the levels the price rose through | `src/LPVault.sol:_claim()` |
 | SC-CYS7 | Burn after the switch pays the winning leg in USDC | `src/LPVault.sol:_burnAmounts()`, `src/LPVault.sol:_atPayout()`, `src/LPVault.sol:_burn()` (the one transfer) |

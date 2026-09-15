@@ -4,7 +4,7 @@ name: Complete-Set Merge and Resolution Redemption
 module: contracts
 domain: "@vault"
 status: implemented
-version: 3
+version: 4
 refs: [FEAT-REPZ, FEAT-JXQO, FEAT-JGE7, FEAT-7G40, FEAT-U079, FEAT-9BQZ]
 ---
 
@@ -32,12 +32,12 @@ refs: [FEAT-REPZ, FEAT-JXQO, FEAT-JGE7, FEAT-7G40, FEAT-U079, FEAT-9BQZ]
 
 ### Complete-Set Merge
 
-**FR-6HBZ** `When any wallet calls mergeCompleteSets, the system shall merge min(YES balance, NO balance) complete sets of the vault's condition through the ConditionalTokens contract into USDC held by the vault, and emit CompleteSetsMerged(caller, amount).`
-Fit Criterion: Given the vault holds 100 YES and 60 NO, after `mergeCompleteSets()` the vault holds 40 YES, 0 NO, and 60 more USDC, and `CompleteSetsMerged(caller, 60)` is emitted. The caller receives nothing.
+**FR-6HBZ** `When any wallet calls mergeCompleteSets, the system shall merge the free pairs, min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed())), as complete sets of the vault's condition through the ConditionalTokens contract into USDC held by the vault, and emit CompleteSetsMerged(caller, amount).`
+Fit Criterion: Given the vault holds 100 YES and 60 NO and the ledger owes no token, after `mergeCompleteSets()` the vault holds 40 YES, 0 NO, and 60 more USDC, and `CompleteSetsMerged(caller, 60)` is emitted. Given the vault holds 150 YES and 120 NO and the ledger owes 90 YES and 60 NO, the merge takes `min(150 − 90, 120 − 60) = 60` pairs and leaves 90 YES, 60 NO, and 60 more USDC. The caller receives nothing. A pair below what the ledger owes is a claim's band token, and merging it would pay that claim a cut token leg and strand the USDC (finding CV-01 of `audits/code-validation-round-1.md`).
 Linked to: UC-6HBO
 
-**FR-6HC0** `If the vault holds no complete set when mergeCompleteSets or an internal merge runs, then the system shall return without calling mergePositions and without emitting an event.`
-Fit Criterion: Given 50 YES and 0 NO, or 0 YES and 0 NO, the call does not revert, balances do not change, and no `CompleteSetsMerged` event is emitted. Every payout calls the internal merge, and a payout must never revert on it.
+**FR-6HC0** `If the vault holds no free pair when mergeCompleteSets or an internal merge runs, then the system shall return without calling mergePositions and without emitting an event.`
+Fit Criterion: Given 50 YES and 0 NO, or 0 YES and 0 NO, or 90 YES and 50 NO with 90 YES owed, the call does not revert, balances do not change, and no `CompleteSetsMerged` event is emitted. Every payout calls the internal merge, and a payout must never revert on it. When either balance is zero the merge returns before it reads the ledger, because no pair can be free then.
 Linked to: UC-6HBO
 
 **FR-6HC1** `While the vault is in any phase (Active, WindDown, or Cancelled), the system shall accept mergeCompleteSets from any wallet, whether or not trading is paused.`
@@ -85,8 +85,8 @@ Rationale: measured on the prototype on 2026-09-14 at 140,623 call gas with YES 
 > The feature is complete when all of the following are true:
 
 - All scenarios in UC-6HBO and UC-6HBP pass against the real ConditionalTokens bytecode
-- A merge turns complete sets into the same number of USDC, and the caller receives nothing
-- A call with no complete set succeeds with no merge call and no event
+- A merge turns complete sets into the same number of USDC, never a token a claim is owed, and the caller receives nothing
+- A call with no free pair succeeds with no merge call and no event
 - Any wallet merges in Active, WindDown, and Cancelled, and while paused, and no merge refreshes the Operator heartbeat
 - The internal merge runs first in every burn and every paying collect before the switch, and the internal redemption after it
 - The first redemption stores the payout read from the ConditionalTokens contract, and a redemption never accepts a payout argument

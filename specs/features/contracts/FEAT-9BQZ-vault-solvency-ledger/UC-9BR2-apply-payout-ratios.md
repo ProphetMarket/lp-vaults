@@ -3,7 +3,7 @@ id: UC-9BR2
 name: Apply Payout Ratios
 feature: FEAT-9BQZ
 status: implemented
-version: 3
+version: 4
 actor: LP
 ---
 
@@ -77,7 +77,7 @@ The Safe calls `burnPosition` or `collect` on a position it owns, or the Operato
 
 **Steps:**
 1. The Safe calls `burnPosition`
-2. System computes the USDC held as `balance + pairs − totalEscrowed`, floored at zero, so the USDC ratio is zero
+2. System computes the USDC held as `balance + free pairs − totalEscrowed`, floored at zero, so the USDC ratio is zero
 3. System pays zero USDC and does not revert
 
 **Outcomes:**
@@ -219,5 +219,29 @@ The Safe calls `burnPosition` or `collect` on a position it owns, or the Operato
 - `OutcomeTokensRedeemed(safe, 5e6, 5e6, 5e6)` emitted, then `PositionBurned`
 - `PayoutRedemption` emitted by ConditionalTokens
 - No `CompleteSetsMerged`
+
+---
+
+### SC-DFDY: Drift-free fills conserve value across claims on both sides of the price, before and after the switch
+
+**Given:**
+- Four positions minted at different ticks on both sides of the price, each mint after the tick move that precedes it: `[5500, 6500)` with 300 USDC at 6000, `[5500, 6500)` with 300 USDC at 5500, `[5000, 6000)` with 250 USDC at 5700, and `[6000, 7000)` with 400 USDC at 6300
+- The moves 6000 → 5500 → 5700 → 6300 → 5800, each followed by the keeper's fill of every level the move crossed inside every live position's range, at the vault's bid price: at a spread σ of 0 the model price (`t / 10000` per YES, `1 − t / 10000` per NO); at σ = 2,000 bps the price the house board gives (`quotes.Board` in the Prophet server: each bid is its own probability less the board's split of the spread, floored at 100 bps with the blocked margin moved across), which spends `t × (1 − σ)` per YES and `(10000 − t) × (1 − σ)` per NO at every level above the floor
+- The token count per level is the model's (`liquidity / 1e18` per tick) in both runs, so the ledger's owed totals and the free pairs are exact in both
+- The USDC leaves through the exchange's standing approval and the tokens arrive through the receiver hook
+
+**Steps:**
+1. Run A (before the switch): every Safe burns its position
+2. Run B (after the switch): the result `[1, 0]` is reported, the Oracle winds the vault down and redeems, then every Safe burns
+3. Each run at σ = 0 and at σ = 2,000 bps
+
+**Outcomes:**
+- Every `PositionBurned` reports `paid == owed` on every leg, in every run
+- The vault ends with 0 YES, 0 NO, and exactly `totalEscrowed` plus the spread income the test summed over every fill (the model price less the bid, per token), which is 0 at σ = 0
+- The spread income is held, not paid: FR-9BRP caps every ratio at 1, and the income decision (O1b in `audits/audit-fixes-ranged.md`) splits the pool later
+
+**Side Effects:**
+- `CompleteSetsMerged` amounts sum to the round-trip pairs, the YES held above `totalYesOwed()` before the first burn, which equals the NO held above `totalNoOwed()`
+- On the source before R14, run A fails at both spreads: the merge takes every pair, the last burns pay a cut token leg, and the vault keeps USDC above the spread income; run B passes on both sources, because after the switch every token redeems at the payout
 
 ---

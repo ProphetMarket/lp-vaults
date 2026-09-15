@@ -4,7 +4,7 @@ name: Vault Solvency Ledger
 module: contracts
 domain: "@vault"
 status: implemented
-version: 3
+version: 4
 refs: [FEAT-REPZ, FEAT-T7AF, FEAT-7G40, FEAT-U079, FEAT-TOGR, FEAT-TVS0, FEAT-3ZRI, FEAT-JAIJ, FEAT-JXQO, FEAT-K1M2, FEAT-6HBN]
 ---
 
@@ -103,20 +103,20 @@ Linked to: UC-9BR1
 
 ### Payout Ratios
 
-**FR-9BRM** `While the switch is off, when a burn or a collect pays USDC, the system shall compute the USDC ratio as the smaller of 1 and (usdc.balanceOf(vault) + the pairs the merge produces − totalEscrowed, floored at zero) ÷ (totalUsdcOwed() + totalFeesOwed()), read before the debit.`
-Fit Criterion: Given three positions of the R9 example, the vault at 5700, and a USDC balance drained to half of the 742,063,500 owed, each burn pays `247,354,500 / 2 = 123,677,250` USDC. Escrowed USDC is not in the numerator, because it is senior (decision C7), and not in the denominator, because the reclaim applies no ratio.
+**FR-9BRM** `While the switch is off, when a burn or a collect pays USDC, the system shall compute the USDC ratio as the smaller of 1 and (usdc.balanceOf(vault) + the free pairs the merge produces − totalEscrowed, floored at zero) ÷ (totalUsdcOwed() + totalFeesOwed()), read before the debit, where the free pairs are min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed())) with the totals read before the debit.`
+Fit Criterion: Given three positions of the R9 example, the vault at 5700, and a USDC balance drained to half of the 742,063,500 owed, each burn pays `247,354,500 / 2 = 123,677,250` USDC. Escrowed USDC is not in the numerator, because it is senior (decision C7), and not in the denominator, because the reclaim applies no ratio. Given the two-claim state of UC-6HBO (150 YES and 120 NO held, 90 YES and 60 NO owed, 460,951,500 USDC held, 520,951,500 owed), the numerator counts 60 free pairs, the ratio is 1, and A's burn pays 247,354,500. The totals are read before the debit, so the exiting position's own band never counts as free.
 Linked to: UC-9BR2
 
 **FR-CYS5** `While the switch is on (payoutNumerators() is non-zero), when a burn or a collect pays, the system shall compute one USDC ratio as the smaller of 1 and (usdc.balanceOf(vault) + the USDC the vault's YES and NO balances redeem for at the stored payout − totalEscrowed, floored at zero) ÷ (totalUsdcOwed() + totalFeesOwed() + the USDC totalYesOwed() and totalNoOwed() redeem for at the stored payout), read before the debit, and shall apply it to the claim's USDC, the fees, and the token leg's USDC as one prorate of their sum.`
 Fit Criterion: Given three R9 positions at 5700 (each owed 247,354,500 USDC units and 90 YES), the vault holding 270 YES and its USDC drained to half of the 742,063,500 owed (371,031,750), the result `[1, 0]`, and the Oracle's redemption: `held = 371,031,750 + 270,000,000 = 641,031,750`, `owed = 742,063,500 + 270,000,000 = 1,012,063,500`, and each of three burns in a row pays `floor(337,354,500 × 641,031,750 ÷ 1,012,063,500) = 213,677,250` USDC units, the same ratio each time, and the third leaves the vault at the escrow total. The USDC a balance redeems for is `floor(yes × numYes ÷ den) + floor(no × numNo ÷ den)` with `den = numYes + numNo`, exactly what `redeemPositions` pays, so the numerator never exceeds what the redemption produces. After the switch every asset is USDC, and one pooled ratio is what pro-rata means (ADR-9BSH).
 Linked to: UC-9BR2
 
-**FR-9BRN** `While the switch is off, when a burn pays YES, the system shall compute the YES ratio as the smaller of 1 and (the vault's YES balance − the pairs the merge produces) ÷ totalYesOwed(), read before the debit.`
-Fit Criterion: Given 270 YES owed to three positions and 150 held, the ratio is `150 / 270 = 5/9`, and each burn pays `90 × 150 / 270 = 50` YES; after the first burn 100 are held against 180 owed, the same ratio.
+**FR-9BRN** `While the switch is off, when a burn pays YES, the system shall compute the YES ratio as the smaller of 1 and (the vault's YES balance − the free pairs the merge produces) ÷ totalYesOwed(), read before the debit.`
+Fit Criterion: Given 270 YES owed to three positions and 150 held, the ratio is `150 / 270 = 5/9`, and each burn pays `90 × 150 / 270 = 50` YES; after the first burn 100 are held against 180 owed, the same ratio. The YES balance less the free pairs is never below `min(YES balance, totalYesOwed())`, so a balance that covers the total gives a ratio of 1 whatever the NO balance is: given 150 YES and 120 NO held against 90 YES and 60 NO owed, the merge leaves 90 YES and the ratio is 1. Given 150 YES held against 270 owed and 100 NO held against nothing owed, no YES is free, nothing merges, and the ratio stays `150 / 270`.
 Linked to: UC-9BR2
 
-**FR-9BRO** `While the switch is off, when a burn pays NO, the system shall compute the NO ratio as the smaller of 1 and (the vault's NO balance − the pairs the merge produces) ÷ totalNoOwed(), read before the debit.`
-Fit Criterion: Given 90 NO owed and 60 held, the burn pays `90 × 60 / 90 = 60` NO.
+**FR-9BRO** `While the switch is off, when a burn pays NO, the system shall compute the NO ratio as the smaller of 1 and (the vault's NO balance − the free pairs the merge produces) ÷ totalNoOwed(), read before the debit.`
+Fit Criterion: Given 90 NO owed and 60 held, the burn pays `90 × 60 / 90 = 60` NO. Given 120 NO and 150 YES held against 60 NO and 90 YES owed, the merge leaves 60 NO and B's burn pays 60 NO in full.
 Linked to: UC-9BR2
 
 **FR-9BRP** `While an asset's holding covers its total, the system shall cap that asset's ratio at 1.`
@@ -177,6 +177,7 @@ Fit Criterion: Given an amount of `2^128 − 1`, the report succeeds and `totalF
 - A collect at a ratio pays its share, sets `tokensOwed` to zero, and emits `FeesCollected` with both amounts
 - No payout path reverts on a shortfall (FR-9BRS, NFR-9BRT)
 - A position devalued purely by price movement is paid in full
+- Under drift-free fills at a spread of 0 and of 2,000 bps, before and after the switch, every burn pays every leg in full and the vault ends with 0 YES, 0 NO, and `totalEscrowed` plus the spread income; `invariant_holdingsCoverTotals` and `invariant_burnsPayInFull` hold in `test/invariants/SolvencyLedger.t.sol` under the drift-free handler
 - `invariant_ledgerEqualsSumOfClaims`, `invariant_noSideLiquidity`, and `invariant_payoutsNeverExceedHeld` hold in `test/invariants/SolvencyLedger.t.sol`
 - Forge fmt passes; no console.log in production code
 - `forge build --sizes --skip test --skip script` exits 0

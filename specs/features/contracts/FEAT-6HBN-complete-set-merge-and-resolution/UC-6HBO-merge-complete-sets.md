@@ -3,7 +3,7 @@ id: UC-6HBO
 name: Merge Complete Sets
 feature: FEAT-6HBN
 status: implemented
-version: 2
+version: 3
 actor: Any Wallet
 ---
 
@@ -26,11 +26,12 @@ Any wallet calls `mergeCompleteSets()` on the vault, usually the keeper after fi
 **Given:**
 - The vault is in Active phase
 - The vault holds 100 YES, 60 NO, and B USDC
+- No live position holds a band, so `totalYesOwed()` and `totalNoOwed()` are both 0
 
 **Steps:**
 1. A wallet calls `mergeCompleteSets()`
-2. The vault reads its YES and NO balances on the ConditionalTokens contract
-3. The vault computes `amount = min(100, 60) = 60`
+2. The vault reads its YES and NO balances on the ConditionalTokens contract and the two owed totals
+3. The vault computes the free pairs, `amount = min(100 − 0, 60 − 0) = 60`
 4. The vault calls `mergePositions(usdc, bytes32(0), conditionId, [1, 2], 60)`
 5. ConditionalTokens burns 60 YES and 60 NO and transfers 60 USDC to the vault
 
@@ -43,6 +44,49 @@ Any wallet calls `mergeCompleteSets()` on the vault, usually the keeper after fi
 - `PositionsMerge` emitted by ConditionalTokens
 - No receiver hook runs, because a burn calls no hook
 - No vault storage written: phase, positions, ticks, and `lastOperatorActivityTimestamp` keep their values
+
+---
+
+### SC-DFDV: The merge leaves every claim's band token in the vault
+
+**Given:**
+- The vault is in Active phase and holds B USDC before any fill
+- Safe A holds the R9 example (300 USDC over `[5500, 6500)`, `liquidity = 3e23`) minted at 6000, and Safe B holds the same range minted at 5500
+- The keeper's drift-free fills moved the vault to 5700: the fall to 5500 bought 150 YES for 86,242,500 USDC units on A's levels, and the rise to 5700 bought 60 NO on A's levels and 60 NO on B's for 52,806,000 units
+- The vault holds 150 YES, 120 NO, and B + 460,951,500 USDC units, and the ledger owes 90 YES (A), 60 NO (B), and 520,951,500 USDC
+
+**Steps:**
+1. Any wallet calls `mergeCompleteSets()`
+2. The vault computes the free pairs `min(150 − 90, 120 − 60) = 60`
+3. The vault merges 60 pairs
+
+**Outcomes:**
+- The vault holds 90 YES, 60 NO, and B + 520,951,500 USDC: above B, exactly what the ledger owes
+- A second call merges nothing
+
+**Side Effects:**
+- `CompleteSetsMerged(caller, 60)` emitted once
+- No vault storage written
+
+---
+
+### SC-DFDW: A donated token merges nothing when no pair is free
+
+**Given:**
+- The vault at 5700 holds one R9 position minted at 6000, so the ledger owes 90 YES, and the vault holds exactly 90 YES and 0 NO from the keeper's drift-free fill
+- A stranger sends 50 NO to the vault through the receiver hook
+
+**Steps:**
+1. The stranger calls `mergeCompleteSets()`
+2. The vault computes the free pairs `min(90 − 90, 50 − 0) = 0`
+
+**Outcomes:**
+- No `mergePositions` call and no event
+- The vault still holds 90 YES and 50 NO
+- The position's burn pays the 90 YES in full
+
+**Side Effects:**
+- None from the merge call
 
 ---
 

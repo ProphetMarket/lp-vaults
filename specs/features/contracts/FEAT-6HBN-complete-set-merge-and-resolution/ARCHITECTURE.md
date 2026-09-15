@@ -2,7 +2,7 @@
 id: FEAT-6HBN
 name: Complete-Set Merge and Resolution Redemption
 use_cases: [UC-6HBO, UC-6HBP]
-scenarios: [SC-6HC9, SC-6HCA, SC-6HCB, SC-6HCC, SC-6HCD, SC-6HCE, SC-6HCF, SC-6HCG, SC-6HCH, SC-6HCI, SC-CYS6]
+scenarios: [SC-6HC9, SC-6HCA, SC-6HCB, SC-6HCC, SC-DFDV, SC-DFDW, SC-6HCD, SC-6HCE, SC-6HCF, SC-6HCG, SC-6HCH, SC-6HCI, SC-CYS6]
 last_update: 2026-09-14
 ---
 
@@ -35,17 +35,17 @@ C4Container
     title Complete-Set Merge and Resolution Redemption -- Container View
     Person(wallet, "Any Wallet")
     Person(oracle, "Oracle")
-    Container(vault, "LPVault (clone)", "Solidity", "mergeCompleteSets, redeemOutcomeTokens, payoutNumerators, _tokenBalances, _pairs, _mergeCompleteSets, _redeemOutcomeTokens, _resolved, _atPayout, _settle, _binaryPartition")
-    Container(burn, "_burn (FEAT-7G40)", "Solidity", "Calls _settle before it pays: the merge before the switch, the redemption after it")
-    Container(collect, "_collect (FEAT-U079)", "Solidity", "Calls _settle before it pays")
+    Container(vault, "LPVault (clone)", "Solidity", "mergeCompleteSets, redeemOutcomeTokens, payoutNumerators, _tokenBalances, _freePairs, _mergeCompleteSets, _redeemOutcomeTokens, _resolved, _atPayout, _settle, _binaryPartition")
+    Container(burn, "_burn (FEAT-7G40)", "Solidity", "Computes the free pairs before any effect, then calls _settle with them before it pays: the merge before the switch, the redemption after it")
+    Container(collect, "_collect (FEAT-U079)", "Solidity", "Computes the free pairs before any effect, then calls _settle with them before it pays")
     ContainerDb(identity, "Outcome-token identity", "Storage", "conditionId, yesTokenId, noTokenId, set once at initialize")
     ContainerDb(payout, "Stored payout (the switch)", "Storage", "payoutNumeratorYes, payoutNumeratorNo: zero until the first successful redemption, then written once")
     System_Ext(ctf, "ConditionalTokens", "ERC-1155")
     System_Ext(usdc, "USDC", "ERC-20")
     Rel(wallet, vault, "mergeCompleteSets()", "tx")
     Rel(oracle, vault, "redeemOutcomeTokens()", "tx")
-    Rel(burn, vault, "_settle(yes, no, resolved)", "internal")
-    Rel(collect, vault, "_settle(yes, no, resolved)", "internal")
+    Rel(burn, vault, "_settle(pairs, yes, no, resolved)", "internal")
+    Rel(collect, vault, "_settle(pairs, yes, no, resolved)", "internal")
     Rel(vault, identity, "reads", "storage")
     Rel(vault, payout, "writes once, reads on every payout", "storage")
     Rel(vault, ctf, "balanceOf / mergePositions / payoutDenominator / payoutNumerators / redeemPositions", "call")
@@ -82,7 +82,7 @@ erDiagram
 
 **Invariants:**
 - A merge of `amount` complete sets lowers the vault's YES and NO balances by `amount` each and raises its USDC balance by `amount`
-- After a successful `mergeCompleteSets()`, `min(YES balance, NO balance) == 0`
+- After a successful `mergeCompleteSets()`, the free pairs are 0: `min(YES balance − min(YES balance, totalYesOwed()), NO balance − min(NO balance, totalNoOwed())) == 0`, so every token the vault still holds is one the ledger owes, or one whose complement the ledger owes (ADR-DFE2)
 - The merge writes no vault storage: `phase`, `paused`, positions, ticks, and `lastOperatorActivityTimestamp` keep their values
 - The USDC from a merge or a redemption goes only to the vault, because the ConditionalTokens contract pays its caller and the caller is the vault
 - The merge works in every phase, including Cancelled (decision C9, ADR-6HCM); the redemption works in WindDown and Cancelled and reverts while Active (ADR-6HCK)
@@ -96,10 +96,11 @@ erDiagram
 
 | File | Role | Key Exports |
 |------|------|-------------|
-| `src/LPVault.sol` | Per-market vault -- the merge entry point, the Oracle's redemption, the internal settlement every payout calls | `mergeCompleteSets()`, `redeemOutcomeTokens()`, `payoutNumerators()`, `_tokenBalances()`, `_pairs(uint256,uint256)`, `_mergeCompleteSets(uint256)`, `_redeemOutcomeTokens(uint256,uint256)`, `_resolved()`, `_atPayout(uint256,uint256)`, `_settle(uint256,uint256,bool)`, `_binaryPartition()`, `CompleteSetsMerged`, `OutcomeTokensRedeemed`, `MarketNotResolved`, `VaultStillActive` |
+| `src/LPVault.sol` | Per-market vault -- the merge entry point, the Oracle's redemption, the internal settlement every payout calls | `mergeCompleteSets()`, `redeemOutcomeTokens()`, `payoutNumerators()`, `_tokenBalances()`, `_freePairs(uint256,uint256)`, `_mergeCompleteSets(uint256)`, `_redeemOutcomeTokens(uint256,uint256)`, `_resolved()`, `_atPayout(uint256,uint256)`, `_settle(uint256,uint256,uint256,bool)`, `_binaryPartition()`, `CompleteSetsMerged`, `OutcomeTokensRedeemed`, `MarketNotResolved`, `VaultStillActive` |
 | `test/fixtures/ConditionalTokensFixture.sol` | Test fixture -- real ConditionalTokens bytecode, binary condition setup, token funding, result reporting | `_deployConditionalTokens()`, `_prepareBinaryCondition()`, `_mintCompleteSets()`, `_giveOutcomeTokens()`, `_resolve()` |
 | `test/fixtures/VaultStorage.sol` | Test fixture -- vault storage-slot helpers | `setPhase()` |
-| `test/features/FEAT-6HBN-complete-set-merge-and-resolution/UC-6HBO-merge-complete-sets.t.sol` | Integration tests for Merge Complete Sets | Scenarios of UC-6HBO |
+| `test/fixtures/KeeperFillFixture.sol` | Test fixture -- the keeper's drift-free fill for one tick move, priced as the house board prices its bids | `_fillMove()`, `_boardBids()` |
+| `test/features/FEAT-6HBN-complete-set-merge-and-resolution/UC-6HBO-merge-complete-sets.t.sol` | Integration tests for Merge Complete Sets | Scenarios of UC-6HBO, including the two-claim state and the donation reached through drift-free fills |
 | `test/features/FEAT-6HBN-complete-set-merge-and-resolution/UC-6HBP-redeem-outcome-tokens.t.sol` | Integration tests for Redeem Outcome Tokens After Resolution | Scenarios of UC-6HBP, the NFR-CYS3 gas bound |
 
 ## Event Topology
@@ -108,13 +109,13 @@ erDiagram
 
 | Event | Publisher | Payload | Condition | Consumers |
 |-------|-----------|---------|-----------|-----------|
-| `CompleteSetsMerged(address indexed caller, uint256 amount)` | LPVault | `caller, amount` | `mergeCompleteSets()`, a burn, or a collect merged `amount > 0` complete sets | Off-chain Event Listener |
+| `CompleteSetsMerged(address indexed caller, uint256 amount)` | LPVault | `caller, amount` | `mergeCompleteSets()`, a burn, or a collect merged `amount > 0` free pairs; `amount` can be below `min(YES balance, NO balance)`, because a pair a claim is owed is never merged | Off-chain Event Listener |
 | `OutcomeTokensRedeemed(address indexed caller, uint256 yesAmount, uint256 noAmount, uint256 usdcAmount)` | LPVault | `caller, yesAmount, noAmount, usdcAmount` | `redeemOutcomeTokens()`, or a burn or a collect after the switch, redeemed with either balance above zero; `caller` is `msg.sender` | Off-chain Event Listener |
 | `PositionsMerge` | ConditionalTokens | `stakeholder, collateralToken, parentCollectionId, conditionId, partition, amount` | Inside a merge with `amount > 0` | Off-chain indexers |
 | `PayoutRedemption` | ConditionalTokens | `redeemer, collateralToken, parentCollectionId, conditionId, indexSets, payout` | Inside every `redeemPositions` call | Off-chain indexers |
 
 **Non-events (explicit):**
-- A merge with no complete set emits no event and makes no `mergePositions` call
+- A merge with no free pair emits no event and makes no `mergePositions` call
 - A redemption with nothing to redeem emits no event and makes no `redeemPositions` call
 - The merge and the redemption run no receiver hook, because a burn calls no hook
 - A revert (`Reentrancy`, `NotOracle`, `VaultStillActive`, `MarketNotResolved`, `SafeCastOverflow`) emits nothing
@@ -135,7 +136,7 @@ erDiagram
 
 | System | Protocol | Direction | Purpose |
 |--------|----------|-----------|---------|
-| ConditionalTokens (Gnosis CTF) | `balanceOf`, `mergePositions` | outbound | Merge `min(YES, NO)` complete sets into USDC paid to the vault |
+| ConditionalTokens (Gnosis CTF) | `balanceOf`, `mergePositions` | outbound | Merge the free pairs, the complete sets above what the ledger owes in both tokens, into USDC paid to the vault |
 | ConditionalTokens (Gnosis CTF) | `payoutDenominator`, `payoutNumerators`, `redeemPositions` | outbound | Read the result on every redemption, copy the numerators once, and redeem the vault's whole YES and NO balances at `balance × numerator ÷ denominator` per side, rounded down |
 | USDC (ERC-20) | ERC-20 `transfer` from ConditionalTokens | inbound | The vault receives the merged or redeemed amount |
 
@@ -149,11 +150,13 @@ erDiagram
 
 | Spec ID | Spec Name | Implementation Files |
 |---------|-----------|---------------------|
-| UC-6HBO | Merge Complete Sets | `src/LPVault.sol:mergeCompleteSets()`, `src/LPVault.sol:_tokenBalances()`, `src/LPVault.sol:_pairs()`, `src/LPVault.sol:_mergeCompleteSets()`, `src/LPVault.sol:_binaryPartition()` |
-| SC-6HC9 | Any wallet merges the vault's matched pairs into USDC | `src/LPVault.sol:mergeCompleteSets()`, `src/LPVault.sol:_mergeCompleteSets()` |
-| SC-6HCA | Nothing to merge changes nothing | `src/LPVault.sol:_mergeCompleteSets()` |
+| UC-6HBO | Merge Complete Sets | `src/LPVault.sol:mergeCompleteSets()`, `src/LPVault.sol:_tokenBalances()`, `src/LPVault.sol:_freePairs()`, `src/LPVault.sol:_mergeCompleteSets()`, `src/LPVault.sol:_binaryPartition()` |
+| SC-6HC9 | Any wallet merges the vault's matched pairs into USDC | `src/LPVault.sol:mergeCompleteSets()`, `src/LPVault.sol:_freePairs()`, `src/LPVault.sol:_mergeCompleteSets()` |
+| SC-6HCA | Nothing to merge changes nothing | `src/LPVault.sol:_freePairs()` (the zero-balance guard), `src/LPVault.sol:_mergeCompleteSets()` |
 | SC-6HCB | Merge works for any wallet in WindDown, in Cancelled, and while paused, without a heartbeat refresh | `src/LPVault.sol:mergeCompleteSets()` |
 | SC-6HCC | Merge works after an emergency cancel | `src/LPVault.sol:mergeCompleteSets()` |
+| SC-DFDV | The merge leaves every claim's band token in the vault | `src/LPVault.sol:_freePairs()`, `src/LPVault.sol:totalYesOwed()`, `src/LPVault.sol:totalNoOwed()` |
+| SC-DFDW | A donated token merges nothing when no pair is free | `src/LPVault.sol:_freePairs()`, `src/LPVault.sol:_mergeCompleteSets()` |
 | UC-6HBP | Redeem Outcome Tokens After Resolution | `src/LPVault.sol:redeemOutcomeTokens()`, `src/LPVault.sol:_redeemOutcomeTokens()`, `src/LPVault.sol:_resolved()`, `src/LPVault.sol:_atPayout()`, `src/LPVault.sol:payoutNumerators()` |
 | SC-6HCD | Oracle redeems after YES wins | `src/LPVault.sol:redeemOutcomeTokens()`, `src/LPVault.sol:_redeemOutcomeTokens()` |
 | SC-6HCE | Oracle redeems after a cancelled market | `src/LPVault.sol:redeemOutcomeTokens()`, `src/LPVault.sol:_atPayout()` |
@@ -169,8 +172,18 @@ erDiagram
 
 **ADR-6HCJ:** Complete-set merge is a separate function that any wallet can call, never part of a receiver hook
 In the context of a vault that gains YES and NO tokens at every fill, facing the fact that a receiver hook runs inside the exchange's settlement transaction so a revert there reverts the user's match, we decided to merge through a separate `mergeCompleteSets()` that any wallet can call. It merges `min(YES, NO)` and returns without a call when that amount is zero. This achieves capital recycling that can never block a trade. One YES plus one NO always pays exactly 1 USDC, so a merge moves no value between parties and the caller receives nothing. We accept that pairs can sit unmerged until a keeper or a payout calls it.
+Superseded in part on 2026-09-14 by ADR-DFE2: the merge takes only the free pairs (finding CV-01 of `audits/code-validation-round-1.md`), because the sentence "a merge moves no value between parties" holds only for a pair no claim is owed. The separate-function decision and the hook rejection stand.
 
 **Rejected alternative -- merge inside `onERC1155Received`:** it would revert settlement on any merge failure, and it would break the stateless-hook decision (ADR-3WLP).
+
+**ADR-DFE2:** The merge takes only the free pairs, read before the exiting position is debited
+In the context of a vault that holds one claim's YES and another claim's NO at once (claim A minted above the current tick, claim B below it), facing finding CV-01 of `audits/code-validation-round-1.md`, where a merge of `min(YES, NO)` pairs A's YES with B's NO, pays both a cut token leg, and strands the USDC because the ratio caps at 1 (FR-9BRP), we decided that every merge, public or inside a payout, takes only the free pairs, `min(yes − min(yes, totalYesOwed()), no − min(no, totalNoOwed()))`, with the totals read before the exiting position is debited, so a position's own band is never merged at its own burn, and that the burn and the collect compute the number once in their reads phase and pass it to `_settle` and `_usdcRatio`. This achieves full payment of every token leg under drift-free fills, where the free pairs are exactly the round-trip pairs, keeps `mergeCompleteSets()` safe for any caller in every phase, and closes the path where a wallet sends the complementary token to force a merge of another claim's token. We accept two cold storage reads per merge (the no-pair collect skips them through a zero-balance guard), 186 bytes of contract size (`LPVault` 22,837 to 23,023 bytes, 1,553 of room), and that under drift a pair below the owed totals stays unmerged and is paid in kind at each token's ratio. The user chose this on 2026-09-14.
+
+**Rejected alternative -- merge every pair and pay a missing token in USDC at the current tick:** it moves price risk between LPs who exit at different times.
+
+**Rejected alternative -- a sweep function for the stranded residue:** it treats the symptom, and the residue has no owner.
+
+**Rejected alternative -- no merge at all:** every round-trip pair would then be paid in kind as two tokens, which decision C26 dropped (ADR-85DL).
 
 **ADR-6HCL:** The merge refreshes no Operator heartbeat
 In the context of the operator-silence timer that `emergencyCancelAll` reads (FR-JXQS), facing a function that any wallet can call, we decided that `mergeCompleteSets()` carries no `touchesHeartbeat` modifier, even when the Operator calls it. This achieves a timer that only a registered Operator can refresh. We accept that an Operator who only merges does not prove liveness through the merge and must call `heartbeat()` or another Operator function.

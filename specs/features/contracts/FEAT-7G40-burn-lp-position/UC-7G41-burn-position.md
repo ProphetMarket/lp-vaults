@@ -3,7 +3,7 @@ id: UC-7G41
 name: Burn Position
 feature: FEAT-7G40
 status: implemented
-version: 5
+version: 6
 actor: LP
 ---
 
@@ -307,6 +307,29 @@ The LP's Safe calls `burnPosition(positionId)` on the vault, through a Safe tran
 - `PositionBurned(positionId, safe, 300000000, 0, 300000000, 0, 0, 0)` emitted
 - `PositionsMerge` emitted by ConditionalTokens
 - USDC transferred from ConditionalTokens to the vault, then from the vault to the Safe
+
+---
+
+### SC-DFDX: Two claims on opposite sides of the tick are both paid in full
+
+**Given:**
+- Safe A holds the R9 example minted at 6000 and Safe B the same range minted at 5500, after drift-free fills: the fall from 6000 to 5500 bought 150 YES on A's levels for 86,242,500 USDC units (`Σ t / 10000` per token over `[5500, 6000)`), and the rise from 5500 to 5700 bought 60 NO on A's levels and 60 NO on B's for 52,806,000 units (`Σ (1 − t / 10000)` over `[5500, 5700)`), the USDC leaving through the exchange's standing approval and the tokens arriving through the receiver hook
+- The vault holds 150 YES, 120 NO, and 460,951,500 USDC units, and the ledger owes 90 YES, 60 NO, and 520,951,500 USDC
+
+**Steps:**
+1. Safe A calls `burnPosition`
+2. The burn computes 60 free pairs before any effect, merges them, and pays 247,354,500 USDC and 90 YES
+3. Safe B calls `burnPosition`
+4. The burn computes 0 free pairs and pays 273,597,000 USDC and 60 NO
+
+**Outcomes:**
+- `PositionBurned` reports `paid == owed` on every leg for both burns
+- The vault holds 0 YES, 0 NO, and `totalEscrowed` USDC
+- On the source before R14 the same steps paid A 30 YES, B 0 NO, and left 60,000,000 USDC units with no live position (finding CV-01)
+
+**Side Effects:**
+- `CompleteSetsMerged(safeA, 60)` once, before A's `PositionBurned`
+- Two `PositionBurned` events, two USDC transfers, one YES transfer, and one NO transfer
 
 ---
 

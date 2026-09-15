@@ -4,7 +4,7 @@ name: Burn LP Position
 module: contracts
 domain: "@positions"
 status: implemented
-version: 5
+version: 6
 refs: [FEAT-T7AF, FEAT-U079, FEAT-TVS0, FEAT-JGE7, FEAT-6HBN, FEAT-3ZRI, FEAT-9BQZ]
 ---
 
@@ -22,7 +22,7 @@ refs: [FEAT-T7AF, FEAT-U079, FEAT-TVS0, FEAT-JGE7, FEAT-6HBN, FEAT-3ZRI, FEAT-9B
 - Does not transition the vault between phases -- see FEAT-JGE7 (wind-down) and FEAT-JXQO (emergency cancel)
 - Does not refund an unfulfilled mint intent's escrow -- see FEAT-JAIJ
 - Does not join positions -- see FEAT-K1M2
-- Does not merge the vault's pairs on its own account -- see FEAT-6HBN, whose internal merge every burn calls first
+- Does not merge the vault's free pairs on its own account -- see FEAT-6HBN, whose internal merge every burn calls first with the number the burn computed
 
 ## Actors
 
@@ -149,7 +149,7 @@ Linked to: UC-7G42
 Rationale: both paths make external calls, the merge, a USDC transfer, and an ERC-1155 `safeTransferFrom` whose receiver hook hands control to the recipient. A Safe owner can replace the Safe's fallback handler, so the ERC-1155 callback is a live reentrancy surface.
 
 **NFR-7G59** Security: `The shared burn shall run its checks and reads first (the claim, the fees, both token balances, the switch, the USDC balance, and the two amounts to pay), then the tick, bitmap, activeLiquidity, ledger, and position effects, then the settlement call and the transfers last: before the switch the merge, the USDC transfer, and the ERC-1155 transfer as the final call; after the switch the redemption and then the USDC transfer as the final call.`
-Fit Criterion: the position record is deleted and both boundary ticks are updated before the first external call, so a recipient re-entering through the ERC-1155 receive hook finds no live position. The amounts are computable before the merge, because the ConditionalTokens contract pays exactly `min(yes, no)` USDC for a merge and burns that many of each token. After the switch the amounts are computable before the redemption, because `redeemPositions` pays exactly `balance × numerator ÷ denominator` per side, rounded down, which `_atPayout` reproduces.
+Fit Criterion: the position record is deleted and both boundary ticks are updated before the first external call, so a recipient re-entering through the ERC-1155 receive hook finds no live position. The amounts are computable before the merge, because the burn computes the free pairs from view reads before any effect and the ConditionalTokens contract pays exactly that many USDC and burns that many of each token; the merge receives the number the burn computed, never a fresh read, because after the ledger debit the exiting position's own band would count as free (FEAT-6HBN ADR-DFE2). After the switch the amounts are computable before the redemption, because `redeemPositions` pays exactly `balance × numerator ÷ denominator` per side, rounded down, which `_atPayout` reproduces.
 
 **NFR-7G5A** Security: `The system shall use the inline _safeTransfer helper for the USDC payout, the ConditionalTokens safeTransferFrom for an outcome-token payout before the switch, and the ConditionalTokens redeemPositions after it, importing no SafeERC20 implementation.`
 
@@ -157,7 +157,7 @@ Fit Criterion: the position record is deleted and both boundary ticks are update
 Fit Criterion: an LP completes `burnPosition` in a vault whose entire operator set the Admin removed.
 
 **NFR-7G5C** Gas: `When an LP burns a single position, including tick deinitialization, a merge of pairs, and both transfers, the total gas shall remain below 250,000 gas against the mock USDC.`
-Rationale: measured cold on the prototype at 103,318 to 162,900 call gas, plus the 21,000 base. Measured cold on the R13 prototype on 2026-09-14, with the vault, the factory, the ConditionalTokens contract, and the USDC mock all cold: 203,449 for a burn before the switch that pays USDC plus YES in kind (200,777 before R13, so the switch read costs about 2,650), 167,974 for a burn after the switch with nothing to redeem, and 233,488 for a burn after the switch that redeems 5 YES and 5 NO that arrived late. The forked-Polygon test in Part 6 measures the real USDC.
+Rationale: measured cold on the prototype at 103,318 to 162,900 call gas, plus the 21,000 base. Measured cold on the R13 prototype on 2026-09-14, with the vault, the factory, the ConditionalTokens contract, and the USDC mock all cold: 203,449 for a burn before the switch that pays USDC plus YES in kind (200,777 before R13, so the switch read costs about 2,650), 167,974 for a burn after the switch with nothing to redeem, and 233,488 for a burn after the switch that redeems 5 YES and 5 NO that arrived late. Re-measured on the R14 build (2026-09-14): 246,913 for a burn before the switch with a merge of 50 free pairs and both legs, up from 244,339 for the two ledger reads of the free-pairs rule. The forked-Polygon test in Part 6 measures the real USDC.
 
 **NFR-7G5D** Security: `burnPositionFor shall carry an OPERATOR TRUST ASSUMPTION NatSpec block including an MEV analysis section.`
 Fit Criterion: the block states that the Operator can censor, reorder, or delay a relayed exit and chooses which block it lands in, so which `currentTick` values the claim, bounded by the deadline the LP signed; that it cannot start a burn without the owner key's `BurnIntent`, cannot replay a mint, reclaim, or collect signature, cannot redirect the payout, and cannot burn a position for another Safe; and that the LP's remedy is `burnPosition`. The MEV analysis states that the burn reads a price but places no order and moves no tick, so no third party can sandwich it.
